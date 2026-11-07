@@ -13,8 +13,14 @@ reports the client's delivery proof for each reply.
 
 Lines meant for scripts start with a fixed tag: PEER READY, ANNOUNCED,
 RECEIVED, CLIENT ANNOUNCE, REPLY SENT, REPLY PROVED, REPLY FAILED, LINK ESTABLISHED,
-LINK IDENTIFIED, LINK REQUEST, LINK CLOSED. The destination serves a "/echo"
-request handler on links, answering "pong:<data>:<identity hash or anonymous>".
+LINK IDENTIFIED, LINK REQUEST, LINK CLOSED, RESOURCE PROVED, RESOURCE
+REFUSED. The destination serves link
+request handlers:
+  /echo  "pong:<data>:<identity hash or anonymous>"
+  /big   <data> bytes (an int, default 4000) of big_payload(), sent as an
+         uncompressed Resource: larger than a packet
+  /bigz  the same with compression allowed: RNS sends it bz2-compressed,
+         which ret-client must refuse
 """
 
 import argparse
@@ -28,6 +34,13 @@ APP_NAME = "retclient"
 ASPECT = "echo"
 APP_DATA = b"ret-test"
 CLIENT_NAME = "retclient.node"
+
+
+def big_payload(size: int) -> bytes:
+    """/big's response; the sample checks it byte for byte."""
+    return bytes((i * 7 + 3) & 0xFF for i in range(size))
+
+
 REPLY_PATH_WAIT_S = 30.0
 
 
@@ -141,12 +154,42 @@ def main() -> None:
 
     dest.register_request_handler("/echo", echo_request, allow=RNS.Destination.ALLOW_ALL)
 
+    def big_request(path, data, request_id, link_id, remote_identity, requested_at):
+        size = data if isinstance(data, int) and 0 < data <= 65536 else 4000
+        out(f"LINK REQUEST {path} {size}")
+        return big_payload(size)
+
+    dest.register_request_handler(
+        "/big", big_request, allow=RNS.Destination.ALLOW_ALL, auto_compress=False
+    )
+    dest.register_request_handler(
+        "/bigz", big_request, allow=RNS.Destination.ALLOW_ALL, auto_compress=True
+    )
+
     def on_link(link: RNS.Link) -> None:
         out("LINK ESTABLISHED")
         link.set_link_closed_callback(lambda lk: out("LINK CLOSED"))
         link.set_remote_identified_callback(
             lambda lk, ident: out(f"LINK IDENTIFIED {ident.hash.hex()}")
         )
+
+        # Response resources carry no callback: watch the link's own hooks
+        # to report whether the client proved or refused them.
+        concluded = link.resource_concluded
+        cancel = link.cancel_outgoing_resource
+
+        def on_concluded(resource):
+            concluded(resource)
+            if resource.initiator and resource.status == RNS.Resource.COMPLETE:
+                out(f"RESOURCE PROVED {resource.total_size}")
+
+        def on_cancel(resource):
+            cancel(resource)
+            if resource.status == RNS.Resource.REJECTED:
+                out(f"RESOURCE REFUSED {resource.total_size}")
+
+        link.resource_concluded = on_concluded
+        link.cancel_outgoing_resource = on_cancel
 
     dest.set_link_established_callback(on_link)
 

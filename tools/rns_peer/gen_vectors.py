@@ -210,7 +210,11 @@ def link_vectors(identity, dest_hash):
     keepalive = link_packet(RNS.Packet.KEEPALIVE, b"\xff", "", encrypt=False)
     linkclose = link_packet(RNS.Packet.LINKCLOSE, link_id, "iv_close")
 
-    return {
+    res = resource_vectors(key, link_id, request_id, "res", 1200)
+    res.update(resource_vectors(key, link_id, request_id, "resbig", 36000))
+    assert len(res["v_resbig_stream"]) > 74 * 464
+
+    return res | {
         "v_link_x25519_prv": lx_prv,
         "v_link_ed25519_seed": led_seed,
         "v_link_signalling": signalling,
@@ -236,6 +240,61 @@ def link_vectors(identity, dest_hash):
         "v_link_iv_ident": fixed("iv_ident", 16),
         "v_link_iv_close": fixed("iv_close", 16),
     }
+
+
+def resource_vectors(key, link_id, request_id, tag, payload_len):
+    """A response Resource for `request_id` on the link with `key`, laid out
+    as RNS/Resource.py builds it: stream = Token(random4 | data), parts of
+    SDU 464, h = SHA256(data | r), map hash = SHA256(part | r)[:4]."""
+    mp = RNS.vendor.umsgpack
+    sdu = 464
+    payload = bytes((i * 7 + 3) & 0xFF for i in range(payload_len))
+    data = mp.packb([request_id, payload])
+    r = fixed(tag + "_r", 4)
+    with mock.patch("RNS.Cryptography.Token.os.urandom", return_value=fixed(tag + "_iv", 16)):
+        stream = Token(key).encrypt(fixed(tag + "_prefix", 4) + data)
+    h = full_hash(data + r)
+    parts = [stream[i : i + sdu] for i in range(0, len(stream), sdu)]
+    hashmap = b"".join(full_hash(p + r)[:4] for p in parts)
+    adv = {
+        "t": len(stream),
+        "d": len(data),
+        "n": len(parts),
+        "h": h,
+        "r": r,
+        "o": h,
+        "i": 1,
+        "l": 1,
+        "q": request_id,
+        "f": 0x01 | 0x10,  # encrypted, response
+        "m": hashmap[: 74 * 4],
+    }
+    adv_plain = mp.packb(adv)
+    with mock.patch("RNS.Cryptography.Token.os.urandom", return_value=fixed(tag + "_adv_iv", 16)):
+        adv_token = Token(key).encrypt(adv_plain)
+    flags = (RNS.Destination.LINK << 2) | RNS.Packet.DATA
+    adv_packet = bytes([flags, 0]) + link_id + bytes([RNS.Packet.RESOURCE_ADV]) + adv_token
+    proof = h + full_hash(data + h)
+    # Resource.prove(): a PROOF packet on the link, RESOURCE_PRF, unencrypted.
+    flags_prf = (RNS.Destination.LINK << 2) | RNS.Packet.PROOF
+    proof_packet = bytes([flags_prf, 0]) + link_id + bytes([RNS.Packet.RESOURCE_PRF]) + proof
+    out = {
+        f"v_{tag}_data": data,
+        f"v_{tag}_stream": stream,
+        f"v_{tag}_r": r,
+        f"v_{tag}_h": h,
+        f"v_{tag}_hashmap": hashmap,
+        f"v_{tag}_adv_plain": adv_plain,
+        f"v_{tag}_adv_packet": adv_packet,
+        f"v_{tag}_proof": proof,
+        f"v_{tag}_proof_packet": proof_packet,
+    }
+    if len(parts) > 74:
+        # The assembled data is checked against h; no need to carry it twice.
+        del out[f"v_{tag}_data"]
+        # Hashmap update for segment 1, as Resource sends it: h | [1, hashes].
+        out[f"v_{tag}_hmu_plain"] = h + mp.packb([1, hashmap[74 * 4 :]])
+    return out
 
 
 def c_array(name: str, b: bytes) -> str:

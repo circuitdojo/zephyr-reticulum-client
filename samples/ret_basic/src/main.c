@@ -139,6 +139,43 @@ static void on_response(int status, const uint8_t *resp, size_t len, void *user)
 	k_sem_give(&response_sem);
 }
 
+/* "/big": a response larger than a packet arrives as a resource. */
+#define BIG_SIZE 4000
+
+static void on_big_response(int status, const uint8_t *resp, size_t len, void *user)
+{
+	mpack_reader_t r;
+
+	ARG_UNUSED(user);
+	response_status = status;
+	if (status == 0) {
+		mpack_reader_init_data(&r, (const char *)resp, len);
+		uint32_t n = mpack_expect_bin(&r);
+		const char *data = mpack_read_bytes_inplace(&r, n);
+
+		mpack_done_bin(&r);
+		response_status = mpack_reader_destroy(&r) == mpack_ok && n == BIG_SIZE ? 0 : -EBADMSG;
+		for (uint32_t i = 0; response_status == 0 && i < n; i++) {
+			if ((uint8_t)data[i] != (uint8_t)(i * 7 + 3)) {
+				response_status = -EBADMSG;
+			}
+		}
+	}
+	k_sem_give(&response_sem);
+}
+
+static int big_request(struct ret_client *client, const char *path)
+{
+	/* msgpack uint16 BIG_SIZE */
+	static const uint8_t size[] = { 0xcd, BIG_SIZE >> 8, BIG_SIZE & 0xFF };
+
+	if (ret_client_link_request(client, path, size, sizeof(size), on_big_response, NULL) != 0 ||
+	    k_sem_take(&response_sem, K_SECONDS(60)) != 0) {
+		return -ETIMEDOUT;
+	}
+	return response_status;
+}
+
 static bool wait_link_event(enum ret_link_event want)
 {
 	if (k_sem_take(&link_sem, K_SECONDS(30)) != 0) {
@@ -167,6 +204,22 @@ static void link_test(struct ret_client *client)
 		return;
 	}
 	LOG_INF("LINK RESPONSE %s", response_text);
+
+	int err = big_request(client, "/big");
+
+	if (err) {
+		LOG_ERR("LINK FAILED big response (%d)", err);
+		return;
+	}
+	LOG_INF("LINK BIG RESPONSE %d bytes", BIG_SIZE);
+
+	/* bz2 is out of reach on the MCU: a compressed resource is refused. */
+	err = big_request(client, "/bigz");
+	if (err != -ENOTSUP) {
+		LOG_ERR("LINK FAILED compressed response not refused (%d)", err);
+		return;
+	}
+	LOG_INF("LINK COMPRESSED REFUSED");
 
 	/* Idle past the responder's stale time (2 x the 5 s minimum
 	 * keepalive): only the client's keepalives keep the link up.

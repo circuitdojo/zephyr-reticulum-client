@@ -21,6 +21,7 @@
 #include "ret_identity.h"
 #include "ret_link.h"
 #include "ret_packet.h"
+#include "ret_resource.h"
 
 enum send_kind {
 	REQ_SEND,
@@ -66,6 +67,8 @@ enum link_state {
 
 struct link_request {
 	bool used;
+	/* Its response is arriving as a resource: no deadline meanwhile. */
+	bool receiving;
 	uint8_t id[RET_TRUNC_HASH_LEN];
 	int64_t deadline_ms;
 	ret_link_response_cb_t cb;
@@ -97,6 +100,17 @@ struct link {
 	struct link_request req[CONFIG_RET_LINK_MAX_REQUESTS];
 };
 
+/** The one incoming resource: a response too large for a packet. */
+struct link_resource {
+	bool active;
+	struct link_request *req;
+	int64_t deadline_ms;
+	uint8_t retries;
+	struct ret_resource_rx rx;
+	uint8_t stream[CONFIG_RET_RESOURCE_MAX_SIZE];
+	uint8_t plain[CONFIG_RET_RESOURCE_MAX_SIZE];
+};
+
 struct ret_client {
 	struct ret_client_config cfg;
 	const char *host;
@@ -116,6 +130,7 @@ struct ret_client {
 	bool connecting;
 	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
 	struct link link;
+	struct link_resource res;
 
 	/* The client's own destination, when cfg.dest_name is set. */
 	bool has_local;

@@ -261,6 +261,16 @@ scenario_echo() {
 	[ -n "$ident" ] || fail "echo: peer saw no identify, see $peer_log"
 	grep -q "LINK RESPONSE pong:ping:$ident" "$dev_log" ||
 		fail "echo: wrong or missing link response, see $dev_log"
+	# A response larger than a packet: a resource, proved; a compressed
+	# one is refused (RESOURCE_RCL).
+	grep -q "LINK BIG RESPONSE 4000 bytes" "$dev_log" ||
+		fail "echo: large response (resource) not received intact, see $dev_log"
+	grep -q "^RESOURCE PROVED" "$peer_log" ||
+		fail "echo: peer saw no valid resource proof, see $peer_log"
+	grep -q "LINK COMPRESSED REFUSED" "$dev_log" ||
+		fail "echo: compressed resource not refused, see $dev_log"
+	grep -q "^RESOURCE REFUSED" "$peer_log" ||
+		fail "echo: peer saw no resource refusal, see $peer_log"
 	grep -q "LINK RESPONSE AFTER IDLE pong:ping:$ident" "$dev_log" ||
 		fail "echo: link did not survive 15 s idle (keepalives), see $dev_log"
 	grep -q "LINK CLOSED" "$dev_log" || fail "echo: device did not close the link"
