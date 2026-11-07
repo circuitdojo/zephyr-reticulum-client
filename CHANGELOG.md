@@ -4,6 +4,15 @@
 
 ### Added
 
+- Links, initiator side: `ret_client_link_open/request/identify/close`.
+  - Handshake with proof validation and the RTT packet.
+  - Single-packet requests and responses with timeouts.
+  - Identify, keepalive, stale detection and close; the link is torn down when the connection
+    drops.
+  - A path request goes out first if the destination has no current path.
+  - Tested against RNS-built vectors, and end to end against a real RNS destination (including
+    15 s idle on keepalives).
+
 - mpack (msgpack) as a pinned west dependency, for the Link, Resource and
   LXMF work ahead. Tests check its encoding is byte-identical to RNS's
   umsgpack for the shapes RNS/LXMF use.

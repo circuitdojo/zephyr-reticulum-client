@@ -143,6 +143,101 @@ def real_proof(identity, data_raw, implicit):
     return sent[0]
 
 
+def link_vectors(identity, dest_hash):
+    """A link from a client to `identity`'s destination, with pinned keys."""
+    from RNS.Cryptography import Ed25519PrivateKey, X25519PublicKey
+
+    mp = RNS.vendor.umsgpack
+    signalling = RNS.Link.signalling_bytes(500, RNS.Link.MODE_AES256_CBC)
+
+    # Initiator: ephemeral X25519 + Ed25519, LINKREQUEST to the destination.
+    lx_prv = fixed("link_x25519", 32)
+    led_seed = fixed("link_ed25519", 32)
+    lx_pub = X25519PrivateKey.from_private_bytes(lx_prv).public_key().public_bytes()
+    led_pub = Ed25519PrivateKey.from_private_bytes(led_seed).public_key().public_bytes()
+    flags_lr = (0 << 6) | (0 << 4) | (RNS.Destination.SINGLE << 2) | RNS.Packet.LINKREQUEST
+    linkrequest = bytes([flags_lr, 0]) + dest_hash + b"\x00" + lx_pub + led_pub + signalling
+    link_id = RNS.Link.link_id_from_lr_packet(unpack(linkrequest))
+
+    # Responder: ephemeral X25519, LRPROOF signed by the destination identity.
+    rx_prv = fixed("link_resp_x25519", 32)
+    rx_pub = X25519PrivateKey.from_private_bytes(rx_prv).public_key().public_bytes()
+    sig_pub = identity.get_public_key()[32:]
+    sig = identity.sign(link_id + rx_pub + sig_pub + signalling)
+    flags_lp = (0 << 6) | (0 << 4) | (RNS.Destination.LINK << 2) | RNS.Packet.PROOF
+    lrproof = bytes([flags_lp, 0]) + link_id + bytes([RNS.Packet.LRPROOF]) + sig + rx_pub
+    lrproof += signalling
+
+    # Variants: no signalling (96-byte proof), and a mode RNS doesn't enable.
+    sig_nosig = identity.sign(link_id + rx_pub + sig_pub)
+    lrproof_nosig = bytes([flags_lp, 0]) + link_id + bytes([RNS.Packet.LRPROOF]) + sig_nosig
+    lrproof_nosig += rx_pub
+    mode0 = bytes([signalling[0] & 0x1F]) + signalling[1:]  # mode bits 0 (AES-128)
+    sig_mode0 = identity.sign(link_id + rx_pub + sig_pub + mode0)
+    lrproof_mode0 = bytes([flags_lp, 0]) + link_id + bytes([RNS.Packet.LRPROOF]) + sig_mode0
+    lrproof_mode0 += rx_pub + mode0
+
+    # Both sides derive the same key: HKDF(64, X25519, salt=link_id).
+    shared = X25519PrivateKey.from_private_bytes(lx_prv).exchange(
+        X25519PublicKey.from_public_bytes(rx_pub)
+    )
+    shared_r = X25519PrivateKey.from_private_bytes(rx_prv).exchange(
+        X25519PublicKey.from_public_bytes(lx_pub)
+    )
+    assert shared == shared_r
+    key = hkdf(length=64, derive_from=shared, salt=link_id, context=None)
+
+    def link_packet(context, plaintext, iv_tag, encrypt=True):
+        if encrypt:
+            with mock.patch("RNS.Cryptography.Token.os.urandom", return_value=fixed(iv_tag, 16)):
+                body = Token(key).encrypt(plaintext)
+        else:
+            body = plaintext
+        flags = (0 << 6) | (0 << 4) | (RNS.Destination.LINK << 2) | RNS.Packet.DATA
+        return bytes([flags, 0]) + link_id + bytes([context]) + body
+
+    rtt = link_packet(RNS.Packet.LRRTT, mp.packb(0.25), "iv_rtt")
+    path_hash = full_hash(b"/echo")[:16]
+    request_plain = mp.packb([1800000000.5, path_hash, b"ping"])
+    request = link_packet(RNS.Packet.REQUEST, request_plain, "iv_req")
+    request_id = unpack(request).getTruncatedHash()
+    response = link_packet(RNS.Packet.RESPONSE, mp.packb([request_id, b"pong"]), "iv_resp")
+
+    client = RNS.Identity.from_bytes(fixed("client_x25519", 32) + fixed("client_ed25519", 32))
+    client_pub = client.get_public_key()
+    identify_plain = client_pub + client.sign(link_id + client_pub)
+    identify = link_packet(RNS.Packet.LINKIDENTIFY, identify_plain, "iv_ident")
+    keepalive = link_packet(RNS.Packet.KEEPALIVE, b"\xff", "", encrypt=False)
+    linkclose = link_packet(RNS.Packet.LINKCLOSE, link_id, "iv_close")
+
+    return {
+        "v_link_x25519_prv": lx_prv,
+        "v_link_ed25519_seed": led_seed,
+        "v_link_signalling": signalling,
+        "v_link_request": linkrequest,
+        "v_link_id": link_id,
+        "v_link_resp_x25519_prv": rx_prv,
+        "v_link_proof": lrproof,
+        "v_link_proof_nosig": lrproof_nosig,
+        "v_link_proof_mode0": lrproof_mode0,
+        "v_link_key": key,
+        "v_link_rtt": rtt,
+        "v_link_path_hash": path_hash,
+        "v_link_request_plain": request_plain,
+        "v_link_req": request,
+        "v_link_request_id": request_id,
+        "v_link_response": response,
+        "v_link_client_prv": fixed("client_x25519", 32) + fixed("client_ed25519", 32),
+        "v_link_identify": identify,
+        "v_link_keepalive": keepalive,
+        "v_link_close": linkclose,
+        "v_link_iv_rtt": fixed("iv_rtt", 16),
+        "v_link_iv_req": fixed("iv_req", 16),
+        "v_link_iv_ident": fixed("iv_ident", 16),
+        "v_link_iv_close": fixed("iv_close", 16),
+    }
+
+
 def c_array(name: str, b: bytes) -> str:
     rows = []
     for i in range(0, len(b), 12):
@@ -252,6 +347,9 @@ def main() -> None:
     with mock.patch.object(RNS.Identity, "_remember_ratchet"):
         assert RNS.Identity.validate_announce(unpack(announce_max))
 
+    # --- Link handshake and link packets (RNS/Link.py layouts) ---
+    link = link_vectors(identity, dest_hash)
+
     # msgpack as RNS/LXMF write it (RNS.vendor.umsgpack): the C side must
     # reproduce these bytes exactly, since LXMF signs re-serialized data.
     mp = RNS.vendor.umsgpack
@@ -333,6 +431,7 @@ def main() -> None:
         c_array("v_packet_hash", packet_hash),
         c_array("v_proof_implicit", proof_implicit),
         c_array("v_proof_explicit", proof_explicit),
+        *[c_array(name, data) for name, data in link.items()],
         *[c_array(name, data) for name, data in mp_vectors.items()],
         c_array("v_mp_adv_h", fixed("adv_h", 32)),
         c_array("v_mp_adv_r", fixed("adv_r", 4)),

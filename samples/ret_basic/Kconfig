@@ -39,6 +39,14 @@ config RET_SAMPLE_REPLY_WAIT_S
 	default 10
 	depends on RET_SAMPLE_EXPECT_REPLIES
 
+config RET_SAMPLE_LINK_TEST
+	bool "Exercise a link before sending"
+	help
+	  Once the destination is known: open a link to it, identify (when
+	  the sample has its own destination), request "/echo" with "ping",
+	  check the response, and close the link. Success then also
+	  requires the link test to pass. For tools/rns_peer/peer.py.
+
 config RET_SAMPLE_SEND_INTERVAL_S
 	int "Seconds between messages"
 	default 10

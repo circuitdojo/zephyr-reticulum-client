@@ -21,6 +21,13 @@
 #define RET_RATCHET_LEN     32
 #define RET_SIG_LEN         64
 
+/** Token key: HMAC signing key (32) || AES-256 key (32). */
+#define RET_TOKEN_KEY_LEN 64
+
+/** A token on its own (link encryption): IV | CBC ciphertext | HMAC. */
+#define RET_TOKEN_BODY_LEN(pt_len) \
+	(RET_AES_BLOCK_LEN + ((pt_len) / RET_AES_BLOCK_LEN + 1) * RET_AES_BLOCK_LEN + RET_SHA256_LEN)
+
 /** Ephemeral pub + IV + HMAC around the padded ciphertext. */
 #define RET_TOKEN_OVERHEAD (RET_X25519_LEN + RET_AES_BLOCK_LEN + RET_SHA256_LEN)
 /* Constant expression (usable for static buffers); same as ret_pkcs7_padded_len(). */
@@ -69,6 +76,31 @@ int ret_dest_hash(const uint8_t name_hash[RET_NAME_HASH_LEN],
 
 /** Hash of a PLAIN destination (no identity): H(name_hash)[:16]. */
 int ret_plain_dest_hash(const char *full_name, uint8_t out[RET_TRUNC_HASH_LEN]);
+
+/**
+ * RNS Token (RNS/Cryptography/Token.py) with a 64-byte key: AES-256-CBC
+ * with PKCS7, then HMAC-SHA256 over IV | ciphertext. SINGLE encryption is
+ * an ephemeral X25519 pub followed by a token; link packets are a token
+ * under the link's derived key.
+ *
+ * @return token length, or a negative errno
+ */
+int ret_token_encrypt(const uint8_t key[RET_TOKEN_KEY_LEN], const uint8_t *pt, size_t pt_len,
+		      uint8_t *out, size_t out_cap);
+
+/** As ret_token_encrypt() with a caller-supplied IV (tests). */
+int ret_token_encrypt_det(const uint8_t key[RET_TOKEN_KEY_LEN],
+			  const uint8_t iv[RET_AES_BLOCK_LEN], const uint8_t *pt, size_t pt_len,
+			  uint8_t *out, size_t out_cap);
+
+/**
+ * Verify the HMAC, then decrypt.
+ *
+ * @return plaintext length
+ * @retval -EBADMSG malformed, bad HMAC or bad padding
+ */
+int ret_token_decrypt(const uint8_t key[RET_TOKEN_KEY_LEN], const uint8_t *token, size_t len,
+		      uint8_t *out, size_t out_cap);
 
 /**
  * Encrypt @p pt for a destination: ephemeral X25519 against

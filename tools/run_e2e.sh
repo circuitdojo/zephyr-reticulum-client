@@ -7,9 +7,10 @@
 #   ratchets  peer announces with enforced ratchets -> 3/3 delivered, exit 0
 #   no-prove  peer never proves                     -> 3 timeouts,    exit 1;
 #             a destination that never proved does not trip the watchdog
-#   echo      peer answers each message to the client's own destination
+#   echo      a link first (open, identify, "/echo" request, close), then the
+#             peer answers each message to the client's own destination
 #             (retclient.node), which decrypts and proves the reply
-#             -> 3/3 delivered both ways, both directions proved, exit 0
+#             -> link response, 3/3 delivered both ways, both proved, exit 0
 #
 # Every device run shares one simulated flash file, so the client keeps its
 # identity (address) across scenarios, as it would across reboots. echo
@@ -132,7 +133,8 @@ mkdir -p "$LOGS"
 FLASH="$LOGS/flash.bin"
 
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
-needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y
+needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
+	-DCONFIG_RET_SAMPLE_LINK_TEST=y
 if needs late stall bootdown restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
 	# The peer takes ~18 s to re-attach and re-announce after an rnsd
@@ -250,6 +252,20 @@ scenario_echo() {
 		grep -q "^REPLY PROVED echo: hello #$n$" "$peer_log" ||
 			fail "echo: peer got no proof from the client for reply #$n, see $peer_log"
 	done
+	# The link: established, identified with the client's identity (the
+	# hash the peer saw must be the one it echoed back), request, close.
+	grep -q "LINK ACTIVE" "$dev_log" || fail "echo: link never became active, see $dev_log"
+	grep -q "^LINK ESTABLISHED$" "$peer_log" || fail "echo: peer saw no link"
+	local ident
+	ident=$(awk '/^LINK IDENTIFIED/ {print $3; exit}' "$peer_log")
+	[ -n "$ident" ] || fail "echo: peer saw no identify, see $peer_log"
+	grep -q "LINK RESPONSE pong:ping:$ident" "$dev_log" ||
+		fail "echo: wrong or missing link response, see $dev_log"
+	grep -q "LINK RESPONSE AFTER IDLE pong:ping:$ident" "$dev_log" ||
+		fail "echo: link did not survive 15 s idle (keepalives), see $dev_log"
+	grep -q "LINK CLOSED" "$dev_log" || fail "echo: device did not close the link"
+	grep -q "^LINK CLOSED$" "$peer_log" || fail "echo: peer did not see the link close"
+
 	grep -q "DONE $COUNT_NAME/$COUNT_NAME delivered, $COUNT_NAME/$COUNT_NAME replies" "$dev_log" ||
 		fail "echo: want DONE $COUNT_NAME/$COUNT_NAME, $COUNT_NAME/$COUNT_NAME replies"
 	echo "   $COUNT_NAME/$COUNT_NAME each way, proved both ways (client $own)"

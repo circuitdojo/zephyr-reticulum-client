@@ -134,6 +134,12 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
 - `src/ret_identity.c`: name, identity and destination hashes, and encrypt-to-destination.
 - `src/ret_announce.c`, `src/ret_destinations.c`, `src/ret_receipt.c`: announce validation,
   the known-destination table plus the outbound H1/H2 rule, and proofs.
+- `src/ret_link.c`: link packet formats (request, link_id, proof validation and key, link
+  packets, request/response/identify/RTT payloads). Pure functions, tested against RNS-built
+  vectors in `tests/lib/ret_link`.
+- `src/ret_client_link.c`: the link driver (one link, initiator side): path wait, handshake, RTT,
+  requests with timeouts, identify, keepalive, stale and close. It runs on the client thread;
+  shared state is in `src/ret_client_internal.h`.
 - `src/ret_client.c`: a single static instance and one thread polling the socket plus an
   eventfd. Sends are queued with `k_msgq`. All protocol state is confined to that thread.
   - With `dest_name` configured the client has its own destination (address): an identity
@@ -243,9 +249,12 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   - `--no-prove` exercises receipt timeouts.
   - `--stop-proving-after N` simulates a link that dies after N proofs.
   - `--reply` answers every message with `echo: ...` to the client's `retclient.node`.
+  - It always serves an `/echo` link request handler (`pong:<data>:<identity|anonymous>`) and logs
+    link established, identified and closed.
   - `--print-hash` prints the destination hash for `CONFIG_RET_SAMPLE_DEST_HASH`.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
-  (bidirectional: replies to the client's own destination, proved both ways),
+  (a link: open, identify, request, 15 s idle on keepalives, request, close; then bidirectional
+  replies to the client's own destination, proved both ways),
   plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
   `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash
   build. Each known-hash scenario starts a fresh rnsd, because

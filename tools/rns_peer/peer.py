@@ -12,7 +12,9 @@ client's own destination (`retclient.node`, learned from its announce) and
 reports the client's delivery proof for each reply.
 
 Lines meant for scripts start with a fixed tag: PEER READY, ANNOUNCED,
-RECEIVED, CLIENT ANNOUNCE, REPLY SENT, REPLY PROVED, REPLY FAILED.
+RECEIVED, CLIENT ANNOUNCE, REPLY SENT, REPLY PROVED, REPLY FAILED, LINK ESTABLISHED,
+LINK IDENTIFIED, LINK REQUEST, LINK CLOSED. The destination serves a "/echo"
+request handler on links, answering "pong:<data>:<identity hash or anonymous>".
 """
 
 import argparse
@@ -131,6 +133,22 @@ def main() -> None:
             report(f"REPLY PROVED {text}")
 
     received = 0
+
+    def echo_request(path, data, request_id, link_id, remote_identity, requested_at):
+        who = remote_identity.hash.hex() if remote_identity else "anonymous"
+        out(f"LINK REQUEST {path} from {who}")
+        return b"pong:" + (data if isinstance(data, bytes) else b"") + b":" + who.encode()
+
+    dest.register_request_handler("/echo", echo_request, allow=RNS.Destination.ALLOW_ALL)
+
+    def on_link(link: RNS.Link) -> None:
+        out("LINK ESTABLISHED")
+        link.set_link_closed_callback(lambda lk: out("LINK CLOSED"))
+        link.set_remote_identified_callback(
+            lambda lk, ident: out(f"LINK IDENTIFIED {ident.hash.hex()}")
+        )
+
+    dest.set_link_established_callback(on_link)
 
     def on_packet(data: bytes, packet: RNS.Packet) -> None:
         nonlocal received
