@@ -30,8 +30,9 @@ void ret_hdlc_feed(struct ret_hdlc_decoder *d, const uint8_t *data, size_t len,
 		uint8_t b = data[i];
 
 		if (b == RET_HDLC_FLAG) {
-			if (d->in_frame && d->len > 0) {
-				if (d->overflow) {
+			if (d->in_frame && (d->len > 0 || d->escape)) {
+				/* A frame ending in a lone ESC lost a byte: corrupt. */
+				if (d->overflow || d->escape) {
 					d->dropped++;
 				} else if (cb != NULL) {
 					cb(d->buf, d->len, user);

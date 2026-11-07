@@ -1,0 +1,17 @@
+[project]
+name = "ret-rns-peer"
+version = "0.1.0"
+description = "Reticulum test peer and golden-vector generator for ret-client"
+requires-python = ">=3.11"
+# Pinned: docs/protocol.md and the generated test vectors are checked
+# against this exact version. Bump deliberately and regenerate.
+dependencies = ["rns==1.5.7"]
+
+[dependency-groups]
+dev = ["ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
