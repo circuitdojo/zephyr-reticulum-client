@@ -7,3 +7,4 @@ tools/rnsd-test/logfile
 tools/rns_peer/peer_identity*
 .claude/settings.local.json
 .claude/worktrees/
+.env

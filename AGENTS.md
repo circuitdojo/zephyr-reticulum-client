@@ -111,7 +111,19 @@ Kconfig notes carried over from lion-client:
      `chore: …`). The body explains the why.
    - Be concise. No Claude or AI signatures.
    - Push, open PRs and release only when the user asks.
-7. **After merge:** delete the branch, and remove the worktree if you used one.
+7. **PR.** Write the PR description to a scratch file: what changed and why, how it was
+   verified, and review findings you skipped. Then run
+   `scripts/forgejo.sh pr "<title>" <file>`. It pushes the branch and opens the PR
+   against `main`. `scripts/forgejo.sh ci` waits for the PR's CI run, once CI exists.
+8. **After merge:** delete the branch, and remove the worktree if you used one.
+
+## Forgejo credentials
+
+The remote is `origin` at `forgejo.internal.circuitdojo.com/circuitdojo/ret-client`.
+Tokens live in the main checkout's `.env`, which is gitignored. Never commit or print them.
+- `FORGEJO_TOKEN`: the API token `scripts/forgejo.sh` uses for PRs, CI status and issues.
+  It reads the token from `.env` itself, including from a worktree.
+- `PACKAGES_TOKEN`: the Forgejo package registry, for publishing release artifacts.
 
 ## Debugging against rnsd
 
