@@ -227,4 +227,12 @@ config RET_RECONNECT_BACKOFF_MAX_S
 	  Reconnect delay doubles from 1 s after each failed attempt, up
 	  to this limit.
 
+config RET_LXMF_RECENT_MESSAGES
+	int "LXMF message hashes remembered for dropping repeats"
+	default 16
+	range 1 1024
+	help
+	  A sender that missed our proof sends the message again; repeats
+	  of a remembered message are proved but not delivered twice.
+
 endif # RET_CLIENT

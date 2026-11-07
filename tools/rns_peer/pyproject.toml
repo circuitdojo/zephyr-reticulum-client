@@ -5,7 +5,10 @@ description = "Reticulum test peer and golden-vector generator for ret-client"
 requires-python = ">=3.11"
 # Pinned: docs/protocol.md and the generated test vectors are checked
 # against this exact version. Bump deliberately and regenerate.
-dependencies = ["rns==1.5.7"]
+dependencies = [
+    "lxmf==1.2.1",
+    "rns==1.5.7",
+]
 
 [dependency-groups]
 dev = ["ruff>=0.6"]

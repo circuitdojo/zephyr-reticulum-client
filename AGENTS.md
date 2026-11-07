@@ -6,6 +6,13 @@ client. It connects to a Python `rnsd` TCPServerInterface and supports:
 - receiving and validating announces
 - sending encrypted DATA packets to SINGLE destinations
 - validating delivery proofs
+- links (initiator side) with requests, and receiving Resources
+- LXMF messaging (opportunistic, both ways)
+
+Samples:
+- `samples/ret_basic`: raw Reticulum packets and a link test. The e2e workhorse.
+- `samples/ret_lxmf`: an always-connected LXMF node. It announces `lxmf.delivery`, sends to a
+  contact and answers what it receives.
 
 Targets:
 - `native_sim`: NSOS host sockets, PSA Crypto from mbedTLS.
@@ -116,8 +123,14 @@ uv run --project ret-client/tools/rns_peer ret-client/tools/rns_peer/peer.py \
 
 The console is the Feather's onboard probe UART (`/dev/ttyACM0`, 115200).
 
-The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7`
-(`uv run --project ret-client/tools/rns_peer ...`). Always use `uv`, never bare pip.
+For `ret_lxmf`, build with `-DEXTRA_CONF_FILE=env/<name>.conf` from
+`samples/ret_lxmf/env/example.conf` (server plus an optional `CONFIG_RET_LXMF_SAMPLE_CONTACT`). It
+waits for network time (date_time: modem, else NTP) before sending, because LXMF timestamps are
+wall-clock time. Run `tools/rns_peer/lxmf_peer.py --config ret-client/tools/rnsd-hw` as its contact,
+or message its address from NomadNet or Sideband.
+
+The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7` and
+`lxmf==1.2.1` (`uv run --project ret-client/tools/rns_peer ...`). Always use `uv`, never bare pip.
 
 ## Layout
 
@@ -141,6 +154,18 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
   windowed part requests, hashmap updates, assembly against the resource hash, and the proof.
   Pure functions, tested in `tests/lib/ret_resource`. Compressed, split and oversized resources
   are refused, not decompressed.
+- `src/ret_lxmf.c`: the LXMF message format: unpack (a stamp is dropped from the hash as LXMF does),
+  signature check, pack and sign, and the `lxmf.delivery` announce app_data. Pure functions,
+  tested against vectors from the real LXMF in `tests/lib/ret_lxmf`. Signing and verifying work on
+  scatter lists (`ret_ed25519_*_iov`), because the signed part is not contiguous in a message.
+- `src/ret_client_lxmf.c`: LXMF on the client (`cfg.on_lxmf`). Inbound messages are parsed and
+  verified on the client thread against the sender's announced key. An unknown sender's message
+  is delivered marked unverified, and a path request goes out for it (at most one per
+  `CONFIG_RET_PATH_REQUEST_INTERVAL_MS`). A bad signature is dropped. Repeats are dropped by
+  message hash, but only among the last `CONFIG_RET_LXMF_RECENT_MESSAGES`, held in RAM. A replay
+  after a reboot is delivered again; the API docs say so. `ret_lxmf_send()` packs and signs on the caller's thread
+  (identity and address are immutable after start), stamps it with `SYS_CLOCK_REALTIME`, and
+  returns -ENODATA while the wall clock is unset. Then it goes through `ret_client_send()`.
 - `src/ret_client_link.c`: the link driver (one link, initiator side): path wait, handshake, RTT,
   requests with timeouts, response resources (one at a time, `CONFIG_RET_RESOURCE_MAX_SIZE` each
   for the stream and plaintext buffers), identify, keepalive, stale and close. It runs on the
@@ -224,9 +249,9 @@ Kconfig notes carried over from lion-client:
 `.forgejo/workflows/ci.yml` runs on every PR and push to `main` on the bigbox runner,
 in the `ret-client-ci` image (`ci/Dockerfile`). It has two jobs:
 - `native_sim` (vanilla workspace): ruff, a golden-vector regeneration diff, the flash.py
-  tests, the unit tests, a warning-free sample build and the full e2e.
-- `nrf9151` (NCS workspace, after `native_sim`): a warning-free sysbuild of `ret_basic` for the
-  Feather. It uploads `merged.hex` as the `ret_basic-nrf9151` artifact.
+  tests, the unit tests, warning-free sample builds and the full e2e.
+- `nrf9151` (NCS workspace, after `native_sim`): warning-free sysbuilds of both samples for the
+  Feather. It uploads their `merged.hex` files as the `samples-nrf9151` artifact.
 
 Runner setup (image build, volume allowlist) is in `docs/ci-forgejo.md`. After pushing a
 PR, `scripts/forgejo.sh ci` waits for the run.
@@ -261,10 +286,15 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
     - `/bigz` answers the same with compression allowed, which ret-client must refuse; it logs
       `RESOURCE REFUSED`.
   - `--print-hash` prints the destination hash for `CONFIG_RET_SAMPLE_DEST_HASH`.
+- LXMF peer: `tools/rns_peer/lxmf_peer.py --config ret-client/tools/rnsd-test`, a real `LXMRouter`.
+  It answers messages starting with `hello` with `echo: ...`, and logs whether each received
+  signature validated and the app_data of each `lxmf.delivery` announce. `--print-hash` prints
+  its address for `CONFIG_RET_LXMF_SAMPLE_CONTACT`.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
   (a link: open, identify, request, a resource response and a refused compressed one, 15 s idle on
   keepalives, request, close; then bidirectional
-  replies to the client's own destination, proved both ways),
+  replies to the client's own destination, proved both ways), `lxmf` (`ret_lxmf` against
+  `lxmf_peer.py`: messages and echoes both ways, signatures validated on both sides),
   plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
   `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash
   build. Each known-hash scenario starts a fresh rnsd, because

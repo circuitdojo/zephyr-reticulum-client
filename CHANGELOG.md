@@ -4,6 +4,18 @@
 
 ### Added
 
+- LXMF messaging (lxmf 1.2.1), opportunistic both ways.
+  - `cfg.on_lxmf` makes the client an `lxmf.delivery` node: announced with LXMF app_data, inbound
+    messages verified against the sender's announced key (unknown senders delivered as
+    unverified, bad signatures dropped, repeats dropped).
+  - `ret_lxmf_send()` packs and signs a message (wall-clock timestamp from `SYS_CLOCK_REALTIME`)
+    and sends it as one packet.
+  - Message format tested byte for byte against the real LXMF, including stamped messages.
+- `samples/ret_lxmf`: an always-connected LXMF node (contact, replies, display name). On the
+  nRF9151 it takes network time from the modem (date_time, NTP if the network sends none).
+  - e2e scenario `lxmf` against a real LXMRouter, signatures validated both ways.
+- Ed25519 signing and verification over scatter lists (`ret_ed25519_sign_iov`/`_verify_iov`).
+
 - Resources, receiving side: link request responses larger than one packet arrive as a Resource,
   are reassembled into `CONFIG_RET_RESOURCE_MAX_SIZE` (default 8 KB) of buffers, verified and
   proved.

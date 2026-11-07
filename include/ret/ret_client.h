@@ -78,6 +78,41 @@ typedef void (*ret_state_cb_t)(enum ret_client_state state, void *user);
  */
 typedef void (*ret_data_cb_t)(const uint8_t *data, size_t len, void *user);
 
+/** An LXMF message received for the client's lxmf.delivery address. */
+struct ret_lxmf_message {
+	/** The sender's lxmf.delivery address. */
+	uint8_t source[RET_DEST_HASH_LEN];
+	/** LXMF message hash (message id). */
+	uint8_t hash[32];
+	/** Sender's wall-clock time, seconds since the epoch. */
+	double timestamp;
+	const uint8_t *title;
+	size_t title_len;
+	const uint8_t *content;
+	size_t content_len;
+	/** The fields map as encoded msgpack (0x80 when empty). */
+	const uint8_t *fields;
+	size_t fields_len;
+	/**
+	 * The signature was checked against the sender's announced key.
+	 * False when the sender has not announced to us (its key is
+	 * unknown; a path request for it goes out). Messages with a bad
+	 * signature are dropped, never delivered.
+	 */
+	bool verified;
+};
+
+/**
+ * Called on the client thread once per LXMF message. Repeats are dropped
+ * by message hash, but only among the last CONFIG_RET_LXMF_RECENT_MESSAGES
+ * messages, held in RAM: a message captured earlier and replayed after a
+ * reboot, or after that many others, is delivered again (still verified,
+ * since it is genuine). Treat content as commands only with your own replay
+ * protection, for example from the timestamp. The pointers are valid only
+ * during the callback.
+ */
+typedef void (*ret_lxmf_cb_t)(const struct ret_lxmf_message *msg, void *user);
+
 struct ret_client_config {
 	/** NULL selects CONFIG_RET_SERVER_HOST. */
 	const char *host;
@@ -98,6 +133,16 @@ struct ret_client_config {
 	const uint8_t *announce_app_data;
 	size_t announce_app_data_len;
 	ret_data_cb_t on_data;
+	/**
+	 * LXMF: set to make the client an LXMF node. Its destination is
+	 * then lxmf.delivery (dest_name, announce_app_data and on_data must
+	 * be NULL), announced with LXMF app_data carrying
+	 * @ref lxmf_display_name, and packets sent to it are parsed as LXMF
+	 * messages and delivered here.
+	 */
+	ret_lxmf_cb_t on_lxmf;
+	/** Display name announced with the LXMF address (NULL for none). */
+	const char *lxmf_display_name;
 	void *user;
 };
 
@@ -147,6 +192,30 @@ int ret_client_dest_hash(const struct ret_client *client, uint8_t out[RET_DEST_H
 
 /** Queue an announce of the client's own destination. */
 int ret_client_announce(struct ret_client *client);
+
+/* --- LXMF ----------------------------------------------------------- */
+
+/** Largest title + content of one opportunistic LXMF message. */
+#define RET_LXMF_MAX_CONTENT 287
+
+/**
+ * Send an LXMF message (opportunistic: one encrypted packet) to the
+ * lxmf.delivery address @p dest_hash, signed by the client's identity,
+ * with empty fields. Needs a client configured with on_lxmf, and a wall
+ * clock: LXMF timestamps are real time, taken from SYS_CLOCK_REALTIME.
+ * Delivery is reported through @p cb as for ret_client_send(), which it
+ * uses (including holding the send while a path is requested). Packs and
+ * signs on the calling thread: about 1.5 KB of stack.
+ *
+ * @retval -EMSGSIZE title + content over RET_LXMF_MAX_CONTENT
+ * @retval -EINVAL client not configured for LXMF
+ * @retval -ENODATA the wall clock is not set (before 2020)
+ * @retval -ENOTCONN client not started
+ * @retval -EAGAIN send queue full
+ */
+int ret_lxmf_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HASH_LEN],
+		  const uint8_t *title, size_t title_len, const uint8_t *content,
+		  size_t content_len, ret_receipt_cb_t cb, void *user);
 
 /* --- Links (one at a time, initiator side) -------------------------- */
 

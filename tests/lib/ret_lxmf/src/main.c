@@ -1,0 +1,192 @@
+/*
+ * Copyright (c) 2026 Circuit Dojo LLC
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * LXMF messages against vectors from the real LXMF (LXMessage.pack and
+ * unpack_from_bytes, lxmf 1.2.1).
+ */
+
+#include <errno.h>
+#include <string.h>
+
+#include <zephyr/ztest.h>
+
+#include "ret_crypto.h"
+#include "ret_lxmf.h"
+#include "vectors_rns.h"
+
+/* RET_MAX_PAYLOAD (ret_client.h): the SINGLE packet plaintext limit. */
+#define SINGLE_MAX_PAYLOAD 383
+
+static const uint8_t *snd_sig_pub = &v_lxmf_snd_pub[RET_X25519_LEN];
+
+static void *setup(void)
+{
+	zassert_ok(ret_crypto_init());
+	return NULL;
+}
+
+/* A packed message is dest | body. */
+static int unpack_packed(const uint8_t *packed, size_t len, struct ret_lxmf_msg *m)
+{
+	return ret_lxmf_unpack(packed, &packed[RET_LXMF_ADDR_LEN], len - RET_LXMF_ADDR_LEN, m);
+}
+
+ZTEST(lxmf, test_unpack_and_verify)
+{
+	struct ret_lxmf_msg m;
+
+	zassert_ok(unpack_packed(v_lxmf_in_packed, sizeof(v_lxmf_in_packed), &m));
+	zassert_mem_equal(m.hash, v_lxmf_in_hash, sizeof(m.hash));
+	zassert_mem_equal(m.dest, v_lxmf_dev_dest, RET_LXMF_ADDR_LEN);
+	zassert_mem_equal(m.src, v_lxmf_snd_dest, RET_LXMF_ADDR_LEN);
+	zassert_equal(m.timestamp, 1800000000.25);
+	zassert_equal(m.title_len, 2);
+	zassert_mem_equal(m.title, "hi", 2);
+	zassert_equal(m.content_len, strlen("hello device"));
+	zassert_mem_equal(m.content, "hello device", m.content_len);
+	zassert_equal(m.fields_len, 1);
+	zassert_equal(m.fields[0], 0x80);
+	zassert_false(m.stamped);
+	zassert_true(ret_lxmf_verify(&m, snd_sig_pub));
+
+	/* Not the sender's key. */
+	zassert_false(ret_lxmf_verify(&m, &v_lxmf_dev_prv[0]));
+}
+
+ZTEST(lxmf, test_stamp_is_not_hashed)
+{
+	struct ret_lxmf_msg m;
+
+	zassert_ok(unpack_packed(v_lxmf_in_stamped, sizeof(v_lxmf_in_stamped), &m));
+	zassert_true(m.stamped);
+	zassert_mem_equal(m.hash, v_lxmf_in_hash, sizeof(m.hash));
+	zassert_true(ret_lxmf_verify(&m, snd_sig_pub));
+	zassert_mem_equal(m.content, "hello device", m.content_len);
+}
+
+ZTEST(lxmf, test_fields_passed_through)
+{
+	struct ret_lxmf_msg m;
+
+	zassert_ok(unpack_packed(v_lxmf_fields_packed, sizeof(v_lxmf_fields_packed), &m));
+	zassert_mem_equal(m.hash, v_lxmf_fields_hash, sizeof(m.hash));
+	zassert_true(ret_lxmf_verify(&m, snd_sig_pub));
+	zassert_equal(m.title_len, 0);
+	zassert_equal(m.fields[0], 0x82, "a 2-entry fixmap");
+	zassert_true(m.fields_len > 1);
+}
+
+ZTEST(lxmf, test_str_title_content_stamp_and_fields)
+{
+	struct ret_lxmf_msg m;
+	static const char title[] = "T\xc3\xaftle";
+
+	zassert_ok(unpack_packed(v_lxmf_str_packed, sizeof(v_lxmf_str_packed), &m));
+	zassert_true(m.stamped);
+	zassert_mem_equal(m.hash, v_lxmf_str_hash, sizeof(m.hash));
+	zassert_true(ret_lxmf_verify(&m, snd_sig_pub));
+	zassert_equal(m.title_len, strlen(title));
+	zassert_mem_equal(m.title, title, m.title_len);
+	zassert_mem_equal(m.content, "content as str", m.content_len);
+	zassert_equal(m.fields[0], 0x81);
+}
+
+ZTEST(lxmf, test_fields_must_be_a_map)
+{
+	uint8_t buf[sizeof(v_lxmf_in_packed)];
+	struct ret_lxmf_msg m;
+
+	/* The empty fields map is the last byte: make it an empty array. */
+	memcpy(buf, v_lxmf_in_packed, sizeof(buf));
+	zassert_equal(buf[sizeof(buf) - 1], 0x80);
+	buf[sizeof(buf) - 1] = 0x90;
+	zassert_equal(unpack_packed(buf, sizeof(buf), &m), -EBADMSG);
+}
+
+ZTEST(lxmf, test_tampered_fails)
+{
+	uint8_t buf[sizeof(v_lxmf_in_packed)];
+	struct ret_lxmf_msg m;
+
+	memcpy(buf, v_lxmf_in_packed, sizeof(buf));
+	buf[sizeof(buf) - 2] ^= 0x01; /* inside the content */
+	zassert_ok(unpack_packed(buf, sizeof(buf), &m));
+	zassert_false(ret_lxmf_verify(&m, snd_sig_pub));
+}
+
+ZTEST(lxmf, test_unpack_rejects)
+{
+	uint8_t buf[sizeof(v_lxmf_in_packed) + 1];
+	struct ret_lxmf_msg m;
+
+	/* Truncated, trailing bytes, too short for the header. */
+	zassert_equal(unpack_packed(v_lxmf_in_packed, sizeof(v_lxmf_in_packed) - 1, &m),
+		      -EBADMSG);
+	memcpy(buf, v_lxmf_in_packed, sizeof(v_lxmf_in_packed));
+	buf[sizeof(buf) - 1] = 0xc0;
+	zassert_equal(unpack_packed(buf, sizeof(buf), &m), -EBADMSG);
+	zassert_equal(unpack_packed(v_lxmf_in_packed, RET_LXMF_ADDR_LEN + RET_LXMF_BODY_HDR, &m),
+		      -EBADMSG);
+
+	/* A 3-element payload. */
+	memcpy(buf, v_lxmf_in_packed, sizeof(v_lxmf_in_packed));
+	zassert_equal(buf[RET_LXMF_ADDR_LEN + RET_LXMF_BODY_HDR], 0x94);
+	buf[RET_LXMF_ADDR_LEN + RET_LXMF_BODY_HDR] = 0x93;
+	zassert_equal(unpack_packed(buf, sizeof(v_lxmf_in_packed), &m), -EBADMSG);
+}
+
+ZTEST(lxmf, test_pack_matches_lxmf)
+{
+	struct ret_local_identity id;
+	uint8_t out[512];
+	uint8_t hash[RET_SHA256_LEN];
+	static const char content[] = "reply from device";
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_lxmf_dev_prv));
+	n = ret_lxmf_pack(&id, v_lxmf_dev_dest, v_lxmf_snd_dest, 1800000001.5, NULL, 0,
+			  (const uint8_t *)content, strlen(content), out, sizeof(out), hash);
+	zassert_equal(n, sizeof(v_lxmf_out_packed));
+	zassert_mem_equal(out, v_lxmf_out_packed, n);
+
+	/* And it reads back. */
+	struct ret_lxmf_msg m;
+
+	zassert_ok(unpack_packed(out, n, &m));
+	zassert_mem_equal(m.hash, hash, sizeof(hash));
+	zassert_true(ret_lxmf_verify(&m, &id.pub[RET_X25519_LEN]));
+	ret_wipe(&id, sizeof(id));
+}
+
+ZTEST(lxmf, test_opportunistic_limit)
+{
+	struct ret_local_identity id;
+	static uint8_t content[RET_LXMF_OPPORTUNISTIC_MAX];
+	uint8_t out[512];
+	uint8_t hash[RET_SHA256_LEN];
+	int n;
+
+	/* The largest content exactly fills one SINGLE packet's plaintext. */
+	zassert_ok(ret_local_identity_load(&id, v_lxmf_dev_prv));
+	n = ret_lxmf_pack(&id, v_lxmf_dev_dest, v_lxmf_snd_dest, 1800000001.5, NULL, 0, content,
+			  sizeof(content), out, sizeof(out), hash);
+	zassert_equal(n - RET_LXMF_ADDR_LEN, SINGLE_MAX_PAYLOAD);
+	zassert_equal(ret_lxmf_pack(&id, v_lxmf_dev_dest, v_lxmf_snd_dest, 0, NULL, 0, content,
+				    sizeof(content), out, 200, hash),
+		      -ENOBUFS);
+	ret_wipe(&id, sizeof(id));
+}
+
+ZTEST(lxmf, test_app_data)
+{
+	uint8_t out[32];
+	int n = ret_lxmf_app_data("ret-node", out, sizeof(out));
+
+	zassert_equal(n, sizeof(v_lxmf_app_data));
+	zassert_mem_equal(out, v_lxmf_app_data, n);
+	zassert_equal(ret_lxmf_app_data("ret-node", out, 4), -ENOBUFS);
+	zassert_equal(ret_lxmf_app_data(NULL, out, sizeof(out)), 4); /* 93 c0 c0 90 */
+}
+
+ZTEST_SUITE(lxmf, NULL, setup, NULL, NULL, NULL);

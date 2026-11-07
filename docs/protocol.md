@@ -161,3 +161,25 @@ ret-client receives Resources only as responses to its own requests (advertiseme
   - larger than `CONFIG_RET_RESOURCE_MAX_SIZE` (stream bytes)
 
   The request then fails with `-ENOTSUP` or `-EFBIG`, never silently. RNS compresses only when that makes the data smaller, and encrypted payloads such as LXMF messages don't compress, so the propagation sync flow should not meet compressed resources.
+
+## LXMF (LXMF/LXMessage.py, LXMRouter.py; lxmf 1.2.1)
+
+- **Addresses:** `lxmf.delivery` SINGLE destinations. Name hash `SHA256("lxmf.delivery")[:10]`.
+- **Announce app_data:** msgpack `[display name (bin) or nil, stamp cost or nil, [functionality]]`.
+  - ret-client announces stamp cost nil, so senders need no proof-of-work.
+  - It announces an empty functionality list, without `SF_COMPRESSION` (0x00), so no sender compresses a delivery to it.
+  - No ratchet.
+- **Packed message:** `dest (16) | src (16) | Ed25519 signature (64) | payload`.
+  - The payload is msgpack `[timestamp float64, title bin, content bin, fields map(, stamp bin)]`. Title and content are written as bin, but str is accepted on receive.
+  - `message hash = SHA256(dest | src | payload without the stamp)`, also called the message id.
+  - The signature covers `dest | src | payload without the stamp | message hash`.
+  - With a stamp, LXMF re-packs the first four elements. For umsgpack's canonical encoding that is `0x94` followed by their original bytes, which is what ret-client hashes. LXMF itself is the only producer of stamped messages.
+- **Opportunistic delivery:** one SINGLE DATA packet to the destination, carrying `packed[16:]`. The receiver rebuilds `dest | plaintext` and proves the packet.
+  - At most 287 bytes of title plus content (`ENCRYPTED_PACKET_MAX_CONTENT`): `packed[16:]` then fills the 383-byte SINGLE plaintext exactly.
+- **Timestamps** are wall-clock seconds. They are hashed, so two identical messages with the same timestamp are the same message: receivers drop the repeat.
+- **Receiving:**
+  - The signature is checked against the source's announced Ed25519 key.
+  - LXMRouter delivers messages from an unknown source flagged `SOURCE_UNKNOWN`. ret-client also delivers them, marked unverified.
+  - ret-client drops a signature that fails. LXMRouter would hand it on marked `SIGNATURE_INVALID`.
+  - Repeats, which come from a sender whose proof got lost, are dropped by message hash. ret-client keeps the last `CONFIG_RET_LXMF_RECENT_MESSAGES` hashes in RAM. LXMRouter keeps delivered ids on disk with an expiry. So a genuine packet replayed after a reboot is delivered to ret-client again.
+  - A message from an unknown source triggers a path request for it, rate-limited to one per path-request interval.

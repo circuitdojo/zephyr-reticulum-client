@@ -12,16 +12,17 @@ request. One job, `native_sim`, in the `ret-client-ci` container:
 2. Python checks in `tools/rns_peer`: ruff, and regenerating
    `tests/common/vectors_rns.h` from the pinned RNS and diffing it
 3. Unit tests: `scripts/twister.sh -T tests -p native_sim`
-4. `ret_basic` native_sim build, failing on any compiler warning
+4. `ret_basic` and `ret_lxmf` native_sim builds, failing on any compiler warning
 5. `tools/run_e2e.sh`: every scenario against a real rnsd and the RNS test
    peer, inside the container (ports and AF_UNIX sockets stay local to it).
    On failure the device, peer and rnsd logs are printed.
 
 Then the `nrf9151` job (needs `native_sim`), in the NCS workspace
 (`west-ncs.yml`) on its own `ret-client-ncs-west` volume. It builds
-`ret_basic` for `circuitdojo_feather_nrf9151/nrf9151/ns` with sysbuild,
-fails on compiler warnings, and uploads `merged.hex` (TF-M plus app, what
-`scripts/flash.py` programs) as the `ret_basic-nrf9151` artifact (14 days).
+`ret_basic` and `ret_lxmf` for `circuitdojo_feather_nrf9151/nrf9151/ns` with
+sysbuild, fails on compiler warnings, and uploads each `merged.hex` (TF-M plus
+app, what `scripts/flash.py` programs) as the `samples-nrf9151` artifact (14
+days).
 Its first run on a cold volume clones all of NCS and takes the better part
 of an hour.
 

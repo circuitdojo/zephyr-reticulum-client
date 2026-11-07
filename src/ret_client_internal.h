@@ -132,7 +132,20 @@ struct ret_client {
 	struct link link;
 	struct link_resource res;
 
-	/* The client's own destination, when cfg.dest_name is set. */
+	/* LXMF (cfg.on_lxmf): announce app_data, recent message hashes, and
+	 * the last path request sent for an unknown sender.
+	 */
+	uint8_t lxmf_app_data[128];
+	int64_t lxmf_last_path_request_ms;
+	uint8_t lxmf_recent[CONFIG_RET_LXMF_RECENT_MESSAGES][RET_SHA256_LEN];
+	size_t lxmf_recent_next;
+
+	/* The client's own destination: cfg.dest_name, or lxmf.delivery for
+	 * an LXMF client. Chosen at start; cfg itself stays as given.
+	 */
+	const char *dest_name;
+	const uint8_t *app_data;
+	size_t app_data_len;
 	bool has_local;
 	struct ret_local_identity id;
 	uint8_t local_dest[RET_TRUNC_HASH_LEN];
@@ -162,6 +175,14 @@ int ret_client_send_frame(struct ret_client *c, size_t raw_len);
 
 /** Send a path request for @p dest_hash. */
 int ret_client_send_path_request(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC_HASH_LEN]);
+
+/* --- Provided by ret_client_lxmf.c --------------------------------- */
+
+/** Validate the LXMF configuration and set the destination up for it. */
+int ret_lxmf_drv_setup(struct ret_client *c);
+
+/** The decrypted payload of a packet for our lxmf.delivery address. */
+void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len);
 
 /* --- Provided by ret_client_link.c --------------------------------- */
 

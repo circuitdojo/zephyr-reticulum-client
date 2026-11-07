@@ -81,9 +81,18 @@ void ret_ed25519_key_pair(uint8_t secret_key[64], uint8_t pub[RET_ED25519_PUB_LE
 void ret_ed25519_sign(uint8_t sig[RET_ED25519_SIG_LEN], const uint8_t secret_key[64],
 		      const uint8_t *msg, size_t len);
 
+/** As ret_ed25519_sign() over the concatenation of @p iov. */
+void ret_ed25519_sign_iov(uint8_t sig[RET_ED25519_SIG_LEN], const uint8_t secret_key[64],
+			  const struct ret_iov *iov, size_t iov_cnt);
+
 /** RFC 8032 Ed25519 (SHA-512) signature check. */
 bool ret_ed25519_verify(const uint8_t sig[RET_ED25519_SIG_LEN],
 			const uint8_t pub[RET_ED25519_PUB_LEN], const uint8_t *msg, size_t len);
+
+/** As ret_ed25519_verify() over the concatenation of @p iov. */
+bool ret_ed25519_verify_iov(const uint8_t sig[RET_ED25519_SIG_LEN],
+			    const uint8_t pub[RET_ED25519_PUB_LEN], const struct ret_iov *iov,
+			    size_t iov_cnt);
 
 int ret_random(uint8_t *buf, size_t len);
 

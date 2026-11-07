@@ -65,14 +65,16 @@ jobs:
         # -c overwrites twister-out instead of keeping one per run forever.
         run: ret-client/scripts/twister.sh -c -T ret-client/tests -p native_sim -v --inline-logs -O build/twister-ret
 
-      - name: Build ret_basic (no warnings)
+      - name: Build the samples (no warnings)
         working-directory: /west-workspace
         # run: steps are bash -e without pipefail; without it tee hides a
         # failed build.
         run: |
           set -o pipefail
-          west build -b native_sim ret-client/samples/ret_basic -d build/ret_basic -p --no-sysbuild 2>&1 | tee build/ret_basic.log
-          ! grep -q "warning:" build/ret_basic.log
+          for s in ret_basic ret_lxmf; do
+            west build -b native_sim ret-client/samples/$s -d build/$s -p --no-sysbuild 2>&1 | tee build/$s.log
+            ! grep -q "warning:" build/$s.log
+          done
 
       - name: End to end against rnsd
         id: e2e
@@ -91,7 +93,7 @@ jobs:
 
   nrf9151:
     name: nRF9151 (NCS build)
-    # Builds ret_basic for the nRF9151 Feather in the NCS workspace: the only
+    # Builds the samples for the nRF9151 Feather in the NCS workspace: the only
     # build that proves the board config, TF-M profile check and modem path
     # compile and link. Gated on native_sim so a run that fails the tests
     # does not spend the NCS build.
@@ -124,7 +126,7 @@ jobs:
           [ -d .west ] || west init -l --mf west-ncs.yml ret-client
           west update --narrow -o=--depth=1
 
-      - name: Build ret_basic (nRF9151, sysbuild, no compiler warnings)
+      - name: Build the samples (nRF9151, sysbuild, no compiler warnings)
         working-directory: /ncs-workspace
         # -p: the build directory is on the volume and outlives the run, and
         # a stale CMake cache is the failure that reproduces nowhere else.
@@ -135,23 +137,27 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build
-          west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_basic \
-            -d build/ret_nrf9151 -p 2>&1 | tee build/ret_nrf9151.log
-          ! grep -q ": warning:" build/ret_nrf9151.log
+          for s in ret_basic ret_lxmf; do
+            west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/$s \
+              -d build/${s}_nrf9151 -p 2>&1 | tee build/${s}_nrf9151.log
+            ! grep -q ": warning:" build/${s}_nrf9151.log
+          done
 
-      - name: Collect the image
+      - name: Collect the images
         # merged.hex is TF-M plus the application: what scripts/flash.py
         # programs. Copied under GITHUB_WORKSPACE, the only place
         # upload-artifact collects from.
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp /ncs-workspace/build/ret_nrf9151/merged.hex \
-            "$GITHUB_WORKSPACE/dist/ret_basic-circuitdojo_feather_nrf9151_ns.hex"
+          for s in ret_basic ret_lxmf; do
+            cp /ncs-workspace/build/${s}_nrf9151/merged.hex \
+              "$GITHUB_WORKSPACE/dist/$s-circuitdojo_feather_nrf9151_ns.hex"
+          done
 
-      - name: Upload image
+      - name: Upload images
         uses: forgejo/upload-artifact@v4
         with:
-          name: ret_basic-nrf9151
+          name: samples-nrf9151
           path: dist
           if-no-files-found: error
           retention-days: 14

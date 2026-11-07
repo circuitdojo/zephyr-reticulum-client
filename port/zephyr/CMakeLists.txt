@@ -63,6 +63,7 @@ zephyr_library_sources(
     ../../src/ret_link.c
     ../../src/ret_mp.c
     ../../src/ret_resource.c
+    ../../src/ret_lxmf.c
     ${RET_MONOCYPHER_DIR}/src/monocypher.c
     ${RET_MONOCYPHER_DIR}/src/optional/monocypher-ed25519.c
     ${RET_MPACK_DIR}/src/mpack/mpack-common.c
@@ -76,6 +77,7 @@ zephyr_library_sources_ifdef(CONFIG_RET_CLIENT
     ../../src/ret_tcp.c
     ../../src/ret_client.c
     ../../src/ret_client_link.c
+    ../../src/ret_client_lxmf.c
     ../../src/ret_storage.c
 )
 
