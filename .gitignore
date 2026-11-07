@@ -16,3 +16,4 @@ samples/*/log-*.log
 # Zephyr Tools per-checkout build settings
 **/.zephyr-overrides.json
 tools/rns_peer/lxmf_peer_identity*
+tools/rns_peer/lxmf_sender_identity*

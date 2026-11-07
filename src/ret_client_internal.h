@@ -21,6 +21,7 @@
 #include "ret_identity.h"
 #include "ret_link.h"
 #include "ret_packet.h"
+#include "ret_lxmf_seen.h"
 #include "ret_resource.h"
 
 enum send_kind {
@@ -30,6 +31,7 @@ enum send_kind {
 	REQ_LINK_REQUEST,
 	REQ_LINK_IDENTIFY,
 	REQ_LINK_CLOSE,
+	REQ_LXMF_SYNC,
 };
 
 /* Longest request path accepted by ret_client_link_request(). */
@@ -46,6 +48,7 @@ struct send_req {
 	ret_receipt_cb_t cb;
 	ret_link_cb_t link_cb;
 	ret_link_response_cb_t response_cb;
+	ret_lxmf_sync_cb_t sync_cb;
 	void *user;
 };
 
@@ -111,6 +114,55 @@ struct link_resource {
 	uint8_t plain[CONFIG_RET_RESOURCE_MAX_SIZE];
 };
 
+/* Ids per /get request: [wants, [], limit] must fit one link packet. */
+#define RET_LXMF_SYNC_BATCH 10
+/* Too-large message ids remembered within one sync, so a re-list skips them. */
+#define RET_LXMF_SYNC_SKIPPED 8
+
+/* The next step, performed from the client loop (never from a callback). */
+enum sync_pending {
+	SYNC_PEND_NONE,
+	SYNC_PEND_IDENTIFY, /* then list */
+	SYNC_PEND_REQUEST,
+	SYNC_PEND_CLOSE,
+};
+
+enum sync_phase {
+	SYNC_LINKING,
+	SYNC_LISTING,
+	SYNC_FETCHING,
+	SYNC_ACKING,
+	SYNC_CLOSING,
+};
+
+/** A propagation node sync in progress (ret_client_lxmf_sync.c). */
+struct lxmf_sync {
+	bool active;
+	enum sync_phase phase;
+	enum sync_pending pending;
+	/* The request to send: /get data, encoded msgpack. */
+	uint8_t req[RET_LINK_MDU];
+	size_t req_len;
+	/* Messages acknowledged since the last listing. */
+	size_t acked_since_list;
+	ret_lxmf_sync_cb_t cb;
+	void *user;
+	int status;
+	unsigned int received;
+	/* The working list, from the node's /get [nil, nil]. */
+	uint8_t ids[CONFIG_RET_LXMF_SYNC_MAX_IDS][RET_SHA256_LEN];
+	size_t n_ids;
+	size_t next;
+	bool list_truncated;
+	/* The batch in flight: ids[next .. next+wanted), which were served. */
+	size_t wanted;
+	uint32_t served;
+	uint8_t acks[RET_LXMF_SYNC_BATCH][RET_SHA256_LEN];
+	size_t n_acks;
+	uint8_t skipped[RET_LXMF_SYNC_SKIPPED][RET_SHA256_LEN];
+	size_t n_skipped;
+};
+
 struct ret_client {
 	struct ret_client_config cfg;
 	const char *host;
@@ -137,8 +189,9 @@ struct ret_client {
 	 */
 	uint8_t lxmf_app_data[128];
 	int64_t lxmf_last_path_request_ms;
-	uint8_t lxmf_recent[CONFIG_RET_LXMF_RECENT_MESSAGES][RET_SHA256_LEN];
-	size_t lxmf_recent_next;
+	struct lxmf_sync sync;
+	struct ret_lxmf_seen_entry lxmf_seen_entries[CONFIG_RET_LXMF_SEEN_ENTRIES];
+	struct ret_lxmf_seen lxmf_seen;
 
 	/* The client's own destination: cfg.dest_name, or lxmf.delivery for
 	 * an LXMF client. Chosen at start; cfg itself stays as given.
@@ -181,10 +234,44 @@ int ret_client_send_path_request(struct ret_client *c, const uint8_t dest_hash[R
 /** Validate the LXMF configuration and set the destination up for it. */
 int ret_lxmf_drv_setup(struct ret_client *c);
 
+/** Load the remembered messages (settings are up). */
+int ret_lxmf_drv_load(struct ret_client *c);
+
+enum lxmf_outcome {
+	LXMF_DELIVERED,
+	LXMF_DUPLICATE,
+	LXMF_TOO_OLD,
+	LXMF_BAD_SIGNATURE,
+	LXMF_MALFORMED,
+};
+
+/** Check, remember and deliver a message body (packed[16:]) for us. */
+enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body, size_t len);
+
 /** The decrypted payload of a packet for our lxmf.delivery address. */
 void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len);
 
+/* --- Provided by ret_client_lxmf_sync.c ---------------------------- */
+
+void ret_lxmf_sync_drv_start(struct ret_client *c, const struct send_req *r);
+
+/** Perform the sync's pending step (client loop). */
+void ret_lxmf_sync_drv_service(struct ret_client *c);
+int64_t ret_lxmf_sync_drv_next_event(const struct ret_client *c);
+
+/** A sync is running: the link is not the application's. */
+bool ret_lxmf_sync_drv_owns_link(const struct ret_client *c);
+
 /* --- Provided by ret_client_link.c --------------------------------- */
+
+/**
+ * A buffer of CONFIG_RET_RESOURCE_MAX_SIZE bytes, free for use inside a
+ * link response callback: the resource stream buffer, whose content is
+ * spent once a response is delivered (responses themselves live in other
+ * buffers). Wipe what you put there.
+ */
+uint8_t *ret_link_drv_scratch(struct ret_client *c, size_t *cap);
+
 
 void ret_link_drv_open(struct ret_client *c, const struct send_req *r);
 void ret_link_drv_request(struct ret_client *c, const struct send_req *r);

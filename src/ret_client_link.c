@@ -754,3 +754,9 @@ int64_t ret_link_drv_next_event(const struct ret_client *c)
 	}
 	return next;
 }
+
+uint8_t *ret_link_drv_scratch(struct ret_client *c, size_t *cap)
+{
+	*cap = sizeof(c->res.stream);
+	return c->res.stream;
+}

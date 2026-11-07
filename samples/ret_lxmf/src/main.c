@@ -32,6 +32,13 @@ LOG_MODULE_REGISTER(ret_lxmf, LOG_LEVEL_INF);
 static struct ret_client *client;
 static K_SEM_DEFINE(connected_sem, 0, 1);
 
+static uint8_t node[RET_DEST_HASH_LEN];
+static bool has_node;
+static K_SEM_DEFINE(sync_sem, 0, 1);
+static int sync_status;
+static void sync_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(sync_work, sync_work_fn);
+
 static atomic_t delivered;
 static atomic_t resolved;
 static K_SEM_DEFINE(resolved_sem, 0, K_SEM_MAX_LIMIT);
@@ -55,12 +62,39 @@ static void hex(const uint8_t *b, size_t n, char *out)
 	}
 }
 
+static void on_sync(int status, unsigned int received, void *user)
+{
+	ARG_UNUSED(user);
+	LOG_INF("SYNC DONE %d %u", status, received);
+	sync_status = status;
+	k_sem_give(&sync_sem);
+	if (CONFIG_RET_LXMF_SAMPLE_SYNC_INTERVAL_S > 0) {
+		k_work_reschedule(&sync_work, K_SECONDS(CONFIG_RET_LXMF_SAMPLE_SYNC_INTERVAL_S));
+	}
+}
+
+static void sync_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	int err = ret_lxmf_sync(client, node, on_sync, NULL);
+
+	if (err == -EAGAIN) {
+		k_work_reschedule(&sync_work, K_SECONDS(1)); /* queue full: try again */
+	} else if (err) {
+		LOG_WRN("sync not started: %d", err);
+	}
+}
+
 static void on_state(enum ret_client_state state, void *user)
 {
 	ARG_UNUSED(user);
 	if (state == RET_STATE_CONNECTED) {
 		LOG_INF("-> CONNECTED");
 		k_sem_give(&connected_sem);
+		/* Collect what arrived at the node while we were away. */
+		if (has_node) {
+			k_work_reschedule(&sync_work, K_NO_WAIT);
+		}
 	}
 }
 
@@ -70,9 +104,11 @@ static void on_lxmf(const struct ret_lxmf_message *m, void *user)
 
 	ARG_UNUSED(user);
 	hex(m->source, RET_DEST_HASH_LEN, src);
-	LOG_INF("LXMF RECEIVED %s from %s: %.*s|%.*s", m->verified ? "verified" : "UNVERIFIED",
-		src, (int)m->title_len, (const char *)m->title, (int)m->content_len,
-		(const char *)m->content);
+	/* At most the first 64 bytes of each: log messages are bounded. */
+	LOG_INF("LXMF RECEIVED %s from %s: %.*s|%.*s (%u bytes)",
+		m->verified ? "verified" : "UNVERIFIED", src, (int)MIN(m->title_len, 64),
+		(const char *)m->title, (int)MIN(m->content_len, 64), (const char *)m->content,
+		(unsigned int)m->content_len);
 
 	if (m->verified && m->content_len >= strlen(ECHO_PREFIX) &&
 	    memcmp(m->content, ECHO_PREFIX, strlen(ECHO_PREFIX)) == 0) {
@@ -189,6 +225,14 @@ int main(void)
 		return -EINVAL;
 	}
 
+	has_node = strlen(CONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE) > 0;
+	if (has_node && hex2bin(CONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE,
+				strlen(CONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE), node,
+				sizeof(node)) != sizeof(node)) {
+		LOG_ERR("RET_LXMF_SAMPLE_PROPAGATION_NODE must be 32 hex digits");
+		return -EINVAL;
+	}
+
 	client = ret_client_create(&cfg);
 	wait_for_network();
 
@@ -202,6 +246,15 @@ int main(void)
 		LOG_INF("LXMF ADDRESS %s (%s)", own_hex, CONFIG_RET_LXMF_SAMPLE_DISPLAY_NAME);
 	}
 	k_sem_take(&connected_sem, K_FOREVER);
+
+#if defined(CONFIG_RET_LXMF_SAMPLE_SYNC_AND_EXIT)
+	k_sem_take(&sync_sem, K_FOREVER);
+	k_sleep(K_MSEC(200));
+#if defined(CONFIG_ARCH_POSIX)
+	nsi_exit(sync_status == 0 ? 0 : 1);
+#endif
+	return 0;
+#endif
 
 	if (!has_contact) {
 		for (;;) {

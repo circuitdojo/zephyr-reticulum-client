@@ -103,13 +103,11 @@ struct ret_lxmf_message {
 };
 
 /**
- * Called on the client thread once per LXMF message. Repeats are dropped
- * by message hash, but only among the last CONFIG_RET_LXMF_RECENT_MESSAGES
- * messages, held in RAM: a message captured earlier and replayed after a
- * reboot, or after that many others, is delivered again (still verified,
- * since it is genuine). Treat content as commands only with your own replay
- * protection, for example from the timestamp. The pointers are valid only
- * during the callback.
+ * Called on the client thread once per LXMF message. Received messages
+ * are remembered in settings (CONFIG_RET_LXMF_SEEN_ENTRIES), so repeats
+ * and replays are not delivered again, across reboots too; messages older
+ * than CONFIG_RET_LXMF_MAX_AGE_DAYS, or than one the table had to forget,
+ * are refused. The pointers are valid only during the callback.
  */
 typedef void (*ret_lxmf_cb_t)(const struct ret_lxmf_message *msg, void *user);
 
@@ -216,6 +214,34 @@ int ret_client_announce(struct ret_client *client);
 int ret_lxmf_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HASH_LEN],
 		  const uint8_t *title, size_t title_len, const uint8_t *content,
 		  size_t content_len, ret_receipt_cb_t cb, void *user);
+
+/**
+ * Called on the client thread when a sync ends: @p status 0 and the
+ * number of messages delivered (through on_lxmf, as they arrived), or a
+ * negative errno: -EACCES (the node refused us), -ETIMEDOUT, -ECONNRESET,
+ * -ENOTCONN, -EBUSY (a link is already open), -EHOSTUNREACH (no path to
+ * the node), -EFBIG (a response too large for CONFIG_RET_RESOURCE_MAX_SIZE:
+ * the node's list of ids holds about 240 at the default 8 KB),
+ * -EPROTO/-EBADMSG (an unexpected answer), -EALREADY.
+ */
+typedef void (*ret_lxmf_sync_cb_t)(int status, unsigned int received, void *user);
+
+/**
+ * Collect the messages a propagation node holds for this client: link to
+ * the node's lxmf.propagation destination @p node_hash, identify, list,
+ * fetch in batches of at most CONFIG_RET_LXMF_SYNC_LIMIT_KB, acknowledge
+ * each batch (the node deletes it), close. Uses the client's one link.
+ * Messages over the transfer limit are left at the node and logged.
+ * Items that are not ours, undecryptable, refused (replay, age) or badly
+ * signed are acknowledged anyway, so they are deleted at the node. While
+ * a sync runs, the application's link calls fail with -EBUSY.
+ *
+ * @retval -EINVAL client not configured for LXMF
+ * @retval -ENOTCONN client not started
+ * @retval -EAGAIN request queue full
+ */
+int ret_lxmf_sync(struct ret_client *client, const uint8_t node_hash[RET_DEST_HASH_LEN],
+		  ret_lxmf_sync_cb_t cb, void *user);
 
 /* --- Links (one at a time, initiator side) -------------------------- */
 

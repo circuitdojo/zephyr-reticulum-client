@@ -592,11 +592,19 @@ static void release_held(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC
  */
 static void process_link_req(struct ret_client *c, const struct send_req *r)
 {
+	int err = 0;
+
 	if (c->state != RET_STATE_CONNECTED || c->connecting) {
+		err = -ENOTCONN;
+	} else if (ret_lxmf_sync_drv_owns_link(c)) {
+		/* A sync drives the link itself; nothing queued is its. */
+		err = -EBUSY;
+	}
+	if (err) {
 		if (r->kind == REQ_LINK_OPEN && r->link_cb != NULL) {
-			r->link_cb(RET_LINK_EVT_FAILED, -ENOTCONN, r->user);
+			r->link_cb(RET_LINK_EVT_FAILED, err, r->user);
 		} else if (r->kind == REQ_LINK_REQUEST && r->response_cb != NULL) {
-			r->response_cb(-ENOTCONN, NULL, 0, r->user);
+			r->response_cb(err, NULL, 0, r->user);
 		}
 		return;
 	}
@@ -628,6 +636,13 @@ static bool process_queue(struct ret_client *c)
 		case REQ_ANNOUNCE:
 			if (c->state == RET_STATE_CONNECTED &&
 			    send_announce(c, RET_CONTEXT_NONE) == -ECONNRESET) {
+				(void)zvfs_eventfd_write(c->efd, 1);
+				return false;
+			}
+			continue;
+		case REQ_LXMF_SYNC:
+			ret_lxmf_sync_drv_start(c, &c->req);
+			if (c->conn_broken) {
 				(void)zvfs_eventfd_write(c->efd, 1);
 				return false;
 			}
@@ -765,6 +780,7 @@ static void run_connected(struct ret_client *c)
 				   MIN(silence_deadline(c), c->next_announce_ms));
 
 		next = MIN(next, ret_link_drv_next_event(c));
+		next = MIN(next, ret_lxmf_sync_drv_next_event(c));
 		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(next));
 
 		if (n < 0) {
@@ -804,6 +820,7 @@ static void run_connected(struct ret_client *c)
 			return;
 		}
 		ret_link_drv_service(c);
+		ret_lxmf_sync_drv_service(c);
 		if (c->conn_broken) {
 			return;
 		}
@@ -1063,6 +1080,9 @@ int ret_client_start(struct ret_client *c)
 	}
 	if (c->dest_name != NULL) {
 		err = setup_local(c);
+		if (!err && c->cfg.on_lxmf != NULL) {
+			err = ret_lxmf_drv_load(c);
+		}
 		if (err) {
 			LOG_ERR("own destination setup failed: %d", err);
 			zsock_close(c->efd);
@@ -1201,3 +1221,17 @@ int ret_client_link_close(struct ret_client *c)
 	return queue_req(c, &r);
 }
 
+int ret_lxmf_sync(struct ret_client *c, const uint8_t node_hash[RET_DEST_HASH_LEN],
+		  ret_lxmf_sync_cb_t cb, void *user)
+{
+	struct send_req r = { .kind = REQ_LXMF_SYNC, .sync_cb = cb, .user = user };
+
+	if (!c->started) {
+		return -ENOTCONN;
+	}
+	if (c->cfg.on_lxmf == NULL) {
+		return -EINVAL;
+	}
+	memcpy(r.dest_hash, node_hash, RET_DEST_HASH_LEN);
+	return queue_req(c, &r);
+}

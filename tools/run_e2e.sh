@@ -23,6 +23,13 @@
 #             LXMF messages; the peer validates each signature and answers
 #             "echo: ...", which the device verifies, delivers and answers
 #             in turn -> 3/3 delivered, 3/3 echoes, replies validated, exit 0
+#   store-forward  a local lxmd propagation node: the device boots and syncs
+#             (nothing waiting), stops; tools/rns_peer/lxmf_send.py
+#             deposits 12 PROPAGATED messages of 600 bytes and one of
+#             5000 for it; the device boots again and its sync collects
+#             the 12 in batches the 4 KB transfer limit cuts short, and
+#             acknowledges them -> 12 delivered, only the 5000-byte one
+#             (over the limit) left at the node, exit 0
 #
 # Known-hash build (sends to the peer's destination hash at once):
 #   late      peer announced once before the device started: the only way
@@ -51,6 +58,7 @@ BUILD_NAME="$TOP/build/ret_e2e-name"
 BUILD_HASH="$TOP/build/ret_e2e-hash"
 BUILD_ECHO="$TOP/build/ret_e2e-echo"
 BUILD_LXMF="$TOP/build/ret_e2e-lxmf"
+BUILD_SF="$TOP/build/ret_e2e-sf"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
@@ -59,9 +67,10 @@ PORT=4243
 COUNT_NAME=3
 COUNT_HASH=6
 COUNT_LXMF=3
+COUNT_SF=12
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf store-forward late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -155,6 +164,21 @@ if needs lxmf; then
 		>"$LOGS/build-$(basename "$BUILD_LXMF").log" 2>&1 ||
 		fail "build failed, see $LOGS/build-$(basename "$BUILD_LXMF").log"
 fi
+if needs store-forward; then
+	# A fresh node per run: its identity decides the hash the device
+	# syncs with, and its message store starts empty.
+	LXMD_DIR="$LOGS/lxmd"
+	mkdir -p "$LXMD_DIR"
+	cp "$HERE/lxmd-test/config" "$LXMD_DIR/config"
+	NODE=$("$PY" "$PEER_PROJECT/lxmf_send.py" --make-node-identity "$LXMD_DIR/identity")
+	echo "== build $(basename "$BUILD_SF") (propagation sync)"
+	west build -b native_sim "$RET/samples/ret_lxmf" -d "$BUILD_SF" -p --no-sysbuild -- \
+		-DCONFIG_RET_SERVER_PORT=$PORT \
+		-DCONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE=\""$NODE"\" \
+		-DCONFIG_RET_LXMF_SAMPLE_SYNC_AND_EXIT=y \
+		>"$LOGS/build-$(basename "$BUILD_SF").log" 2>&1 ||
+		fail "build failed, see $LOGS/build-$(basename "$BUILD_SF").log"
+fi
 if needs late stall bootdown restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
 	# The peer takes ~18 s to re-attach and re-announce after an rnsd
@@ -164,7 +188,7 @@ if needs late stall bootdown restart; then
 fi
 
 port_open && fail "port $PORT already in use; stop whatever is listening there"
-pgrep -f "$PEER_PROJECT/(lxmf_)?peer.py" >/dev/null &&
+pgrep -f "$PEER_PROJECT/((lxmf_peer|peer|lxmf_send)\.py|\.venv/bin/lxmd)" >/dev/null &&
 	fail "a test peer is still running (pgrep -af peer.py); stop it first"
 
 echo "== start rnsd ($RNSD_CONFIG)"
@@ -340,6 +364,72 @@ scenario_lxmf() {
 	echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
 }
 
+scenario_store_forward() {
+	local lxmd_log="$LOGS/lxmd.log" send_log="$LOGS/sender-sf.log" go="$LOGS/sf-go"
+	local dev1="$LOGS/device-sf-1.log" dev2="$LOGS/device-sf-2.log" n
+
+	# Unbuffered: its log is how we know it is up.
+	PYTHONUNBUFFERED=1 "$PEER_PROJECT/.venv/bin/lxmd" --config "$LXMD_DIR" --rnsconfig "$RNSD_CONFIG" -p \
+		>"$lxmd_log" 2>&1 &
+	local lxmd_pid=$!
+	pids+=("$lxmd_pid")
+	wait_for 30 "lxmd to start" grep -q "$NODE" "$lxmd_log"
+
+	"$PY" "$PEER_PROJECT/lxmf_send.py" --config "$RNSD_CONFIG" --node "$NODE" \
+		--to-name ret-lxmf --count $COUNT_SF --size 600 --big 5000 --go-file "$go" \
+		>"$send_log" 2>&1 &
+	local send_pid=$!
+	pids+=("$send_pid")
+	wait_for 30 "sender ready" grep -q "^SENDER READY" "$send_log"
+	local sender
+	sender=$(awk '/^SENDER READY/ {print $3; exit}' "$send_log")
+
+	# Boot 1: nothing waiting. The sender learns the device's key from
+	# its announce.
+	run_device "$BUILD_SF/zephyr/zephyr.exe" "$dev1"
+	[ $RC -eq 0 ] || fail "store-forward: first sync failed (exit $RC), see $dev1"
+	grep -q "SYNC DONE 0 0" "$dev1" || fail "store-forward: first sync not empty, see $dev1"
+
+	# Offline: deposit at the node.
+	wait_for 30 "sender to see the device" grep -q "^TARGET" "$send_log"
+	touch "$go"
+	wait "$send_pid" || fail "store-forward: deposit failed, see $send_log"
+	for n in $(seq 1 $COUNT_SF); do
+		grep -q "^DEPOSITED stored #$n$" "$send_log" ||
+			fail "store-forward: stored #$n not deposited, see $send_log"
+	done
+	grep -q "^DEPOSITED big$" "$send_log" || fail "store-forward: big not deposited"
+	local store="$LXMD_DIR/storage/lxmf/messagestore" held
+	[ -d "$store" ] || fail "store-forward: no lxmd message store at $store"
+	held=$(find "$store" -type f | wc -l)
+	[ "$held" -eq $((COUNT_SF + 1)) ] ||
+		fail "store-forward: node holds $held messages, want $((COUNT_SF + 1))"
+
+	# Boot 2: the sync collects them.
+	run_device "$BUILD_SF/zephyr/zephyr.exe" "$dev2"
+	kill "$lxmd_pid" 2>/dev/null || true
+	wait "$lxmd_pid" 2>/dev/null || true
+
+	[ $RC -eq 0 ] || fail "store-forward: second sync failed (exit $RC), see $dev2"
+	for n in $(seq 1 $COUNT_SF); do
+		grep -q "LXMF RECEIVED [A-Za-z]* from $sender: |stored #$n\b" "$dev2" ||
+			fail "store-forward: stored #$n not delivered, see $dev2"
+	done
+	grep -q "SYNC DONE 0 $COUNT_SF" "$dev2" ||
+		fail "store-forward: want SYNC DONE 0 $COUNT_SF, see $dev2"
+	grep -q "1 propagated message(s) exceed RET_LXMF_SYNC_LIMIT_KB" "$dev2" ||
+		fail "store-forward: the oversized message was not reported, see $dev2"
+	! grep -q "LXMF RECEIVED .*|big" "$dev2" ||
+		fail "store-forward: the oversized message was delivered"
+	# Acknowledged: the node deleted them, all but the oversized one.
+	local left
+	left=$(find "$store" -type f | wc -l)
+	[ "$left" -eq 1 ] || fail "store-forward: $left message(s) at the node, want 1"
+	local unverified
+	unverified=$(grep -c "LXMF RECEIVED UNVERIFIED" "$dev2" || true)
+	echo "   $COUNT_SF/$COUNT_SF collected and acknowledged, oversized one left ($unverified unverified: sender unseen)"
+}
+
 fresh_rnsd() {
 	stop_rnsd
 	start_rnsd
@@ -446,6 +536,7 @@ for s in "${scenarios[@]}"; do
 	plain | ratchets | no-prove) scenario_announced "$s" ;;
 	echo) scenario_echo ;;
 	lxmf) scenario_lxmf ;;
+	store-forward) scenario_store_forward ;;
 	late) scenario_late ;;
 	stall) scenario_stall ;;
 	bootdown) scenario_bootdown ;;

@@ -181,5 +181,27 @@ ret-client receives Resources only as responses to its own requests (advertiseme
   - The signature is checked against the source's announced Ed25519 key.
   - LXMRouter delivers messages from an unknown source flagged `SOURCE_UNKNOWN`. ret-client also delivers them, marked unverified.
   - ret-client drops a signature that fails. LXMRouter would hand it on marked `SIGNATURE_INVALID`.
-  - Repeats, which come from a sender whose proof got lost, are dropped by message hash. ret-client keeps the last `CONFIG_RET_LXMF_RECENT_MESSAGES` hashes in RAM. LXMRouter keeps delivered ids on disk with an expiry. So a genuine packet replayed after a reboot is delivered to ret-client again.
+  - **Repeats and replays:** ret-client remembers received messages (hash and timestamp, in settings) so neither a repeat nor a replayed packet is delivered twice, across reboots too. LXMRouter keeps delivered ids for 180 days.
+    - Messages older than `CONFIG_RET_LXMF_MAX_AGE_DAYS` (30, LXMRouter's `MESSAGE_EXPIRY`) are refused; no node keeps one longer.
+    - When the table (`CONFIG_RET_LXMF_SEEN_ENTRIES`) is full of younger entries, the oldest is evicted and a persisted floor rises to its timestamp. Reusing an expired entry raises the floor too. Messages at or below the floor are refused, so a forgotten message cannot come back, even after a reboot without a clock. An unreadable table is reset, with an error logged: unlike the identity it is expendable.
+    - Timestamps more than `CONFIG_RET_LXMF_MAX_FUTURE_S` (1 h) ahead of the clock, or non-finite, are refused: evicted later, they would lift the floor above every genuine message.
+    - Only verified messages evict entries. Unverified ones (anyone can make them) take a free or expired entry or go unremembered. While the table is full of verified entries, unverified messages are delivered but not remembered, so a replay of one is delivered again (still marked unverified). A flood of verified messages from a freshly announced identity can still fill the table and raise the floor to about "now". With the clock set, a raised floor is capped at now + `CONFIG_RET_LXMF_MAX_FUTURE_S`. A floor beyond that, raised before the clock was set from timestamps nothing vouched for, is ignored, and the age limit still applies.
   - A message from an unknown source triggers a path request for it, rate-limited to one per path-request interval.
+
+## LXMF propagation sync (LXMRouter message_get_request; lxmf 1.2.1)
+
+The node is an `lxmf.propagation` destination. It serves the messages stored for the `lxmf.delivery` address of the identity that identified on the link.
+
+1. Link to the node, then LINKIDENTIFY with the client's identity. A request without identity is answered `0xf0` (`ERROR_NO_IDENTITY`); one the node's allow-list rejects gets `0xf1`.
+2. `/get [nil, nil]`: the response is the list of transient ids (bin32), smallest message first. More than about 12 ids arrive as a Resource. The whole list must fit `CONFIG_RET_RESOURCE_MAX_SIZE`, or the sync fails with `-EFBIG` (about 240 ids at 8 KB).
+3. `/get [wants, [], limit_kb]`, with at most 10 wants so the request fits one packet:
+   - The response is a list of items, each `dest (16) | SINGLE token of packed[16:]`. The node strips its propagation stamp first.
+   - The node fills the batch cumulatively: it skips any item that would take the total past `limit_kb * 1000` bytes (counting 16 bytes per item, 24 overall, and the stored size including its stamp). A batch can therefore come back short. ret-client asks for what was left out again. A batch that served nothing means every remaining id is over the limit, since the list is in ascending size order. Those messages are skipped for the rest of the sync and stay at the node.
+   - A re-list that follows a pass which acknowledged nothing ends the sync, so a node full of oversized messages cannot keep it looping.
+4. `/get [nil, haves]`: each have is `SHA256(item as served)`. The node deletes those messages. ret-client acknowledges every served item, including undecryptable or refused ones.
+5. When the list is done (re-listing when `CONFIG_RET_LXMF_SYNC_MAX_IDS` truncated it), close the link.
+
+- Retrieving needs no proof-of-work. Depositing needs a propagation stamp (a cost-13+ proof-of-work over a 256 KB workblock), which is out of the nRF91's reach, so the device sends opportunistically only.
+- Items are decrypted with the client's identity and then go through the same path as opportunistic messages: replay check, signature check, delivery.
+- A sender whose announce the device never saw (usual after a sleep) is delivered unverified, with a path request for it.
+

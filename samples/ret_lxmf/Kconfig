@@ -15,6 +15,27 @@ config RET_LXMF_SAMPLE_CONTACT
 	  address every RET_LXMF_SAMPLE_SEND_INTERVAL_S seconds; a path is
 	  requested on demand. Empty: only receive.
 
+config RET_LXMF_SAMPLE_PROPAGATION_NODE
+	string "LXMF propagation node to collect messages from (32 hex digits)"
+	default ""
+	help
+	  The node's lxmf.propagation destination hash (lxmd prints it,
+	  NomadNet lists it). Messages that arrived there while the sample
+	  was offline are collected on every connect, and every
+	  RET_LXMF_SAMPLE_SYNC_INTERVAL_S if that is set. Point senders at
+	  the same node (or one it peers with).
+
+config RET_LXMF_SAMPLE_SYNC_INTERVAL_S
+	int "Seconds between propagation syncs while connected (0 = connect only)"
+	default 0
+
+config RET_LXMF_SAMPLE_SYNC_AND_EXIT
+	bool "Sync once and exit (native_sim, for tests)"
+	help
+	  Connect, sync with RET_LXMF_SAMPLE_PROPAGATION_NODE once, log
+	  "SYNC DONE <status> <messages>" and exit with status 0 if the sync
+	  succeeded. Sends nothing. For tools/run_e2e.sh.
+
 config RET_LXMF_SAMPLE_REPLY
 	bool "Answer every received message"
 	default y
