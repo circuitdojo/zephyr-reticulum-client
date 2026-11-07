@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "ret_crypto.h"
+#include "ret_identity.h"
 #include "ret_packet.h"
 
 #define BIT_IFAC  0x80
@@ -102,4 +103,27 @@ int ret_packet_hash(const uint8_t *raw, size_t len, uint8_t hash[RET_HASH_LEN])
 	};
 
 	return ret_sha256(iov, 2, hash);
+}
+
+int ret_path_request_build(const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
+			   const uint8_t tag[RET_PATH_REQUEST_TAG_LEN], uint8_t *out, size_t cap)
+{
+	uint8_t data[RET_TRUNC_HASH_LEN + RET_PATH_REQUEST_TAG_LEN];
+	struct ret_packet pkt = {
+		.header_type = RET_HEADER_1,
+		.transport_type = RET_TRANSPORT_BROADCAST,
+		.dest_type = RET_DEST_PLAIN,
+		.packet_type = RET_PKT_DATA,
+		.context = RET_CONTEXT_NONE,
+		.data = data,
+		.data_len = sizeof(data),
+	};
+	int err = ret_plain_dest_hash("rnstransport.path.request", pkt.dest_hash);
+
+	if (err) {
+		return err;
+	}
+	memcpy(data, dest_hash, RET_TRUNC_HASH_LEN);
+	memcpy(&data[RET_TRUNC_HASH_LEN], tag, RET_PATH_REQUEST_TAG_LEN);
+	return ret_packet_pack(&pkt, out, cap);
 }

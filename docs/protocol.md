@@ -64,3 +64,26 @@ regenerate the test vectors.
   - It rebroadcasts announces from local clients out to TCP clients (Transport.py:2351).
 
 **Gotcha:** Monocypher's default `crypto_eddsa_*` uses BLAKE2b. Use `crypto_ed25519_check` from `src/optional/monocypher-ed25519.c`, which uses SHA-512 per RFC 8032.
+
+## Path requests (Transport.request_path, path_request_handler)
+
+- A non-transport node sends a HEADER_1 PLAIN DATA packet to
+  `H(name_hash("rnstransport.path.request"))[:16]` with data
+  `dest_hash[16] | tag[16]`. It must be exactly 32 bytes: with more, bytes
+  16..32 are read as the requesting transport ID.
+- rnsd with `enable_transport = False` forwards a request from a TCP client
+  to its local (shared-instance) clients; the owning client answers with an
+  announce with context PATH_RESPONSE (0x0B), which rnsd relays back. A
+  destination rnsd only knows through another interface gets no answer.
+  The same limit applies to announces, so through a non-transport rnsd the
+  client can reach only destinations owned by rnsd's local clients.
+- rnsd batches every further request for the same destination for
+  `PATH_REQUEST_GATE_TIMEOUT` = 45 s unless one was answered (and for
+  local-client destinations it does not mark them answered). Retries
+  within 45 s are dropped; the client's request timeout defaults to 60 s.
+
+## Proof strategy
+
+- `Destination.proof_strategy` defaults to PROVE_NONE. Most destinations
+  never prove, so a missing proof is not by itself a sign of a dead link.
+

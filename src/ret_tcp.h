@@ -9,7 +9,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/** Resolve @p host and open a connected TCP socket. @return fd or -errno. */
+/**
+ * Resolve @p host and open a connected TCP socket with the configured
+ * send timeout and (if enabled) keepalive. A socket option the stack
+ * rejects fails the attempt rather than leaving it unset.
+ *
+ * @return fd or -errno
+ */
 int ret_tcp_connect(const char *host, uint16_t port);
 
 /** Send all of @p buf, retrying partial writes. */

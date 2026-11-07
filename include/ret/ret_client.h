@@ -34,8 +34,10 @@ enum ret_receipt_status {
 	RET_RECEIPT_DELIVERED,
 	/** No proof before CONFIG_RET_RECEIPT_TIMEOUT_MS. */
 	RET_RECEIPT_TIMEOUT,
-	/** Not sent: unknown destination, receipt table full, encryption or
-	 *  socket failure (a socket failure also drops the connection).
+	/** Not sent: no path to the destination within
+	 *  CONFIG_RET_PATH_REQUEST_TIMEOUT_MS, not connected, a table full,
+	 *  or an encryption or socket failure (which also drops the
+	 *  connection).
 	 */
 	RET_RECEIPT_FAILED,
 	/** Sent, but the connection dropped before a proof arrived. */
@@ -88,8 +90,15 @@ int ret_client_start(struct ret_client *client);
 
 /**
  * Queue @p data (at most RET_MAX_PAYLOAD bytes, copied) for encrypted
- * delivery to a destination learned from an announce. @p cb fires once
- * with the outcome. The client wipes its own copies after sending, but
+ * delivery to @p dest_hash. @p cb fires once with the outcome.
+ *
+ * The destination's keys come from its announce. If there is no current
+ * path (it has not announced since we connected, or never announced to
+ * us), the send is held and a path request goes out; the destination's
+ * announce in reply releases it. So a known destination hash can be used
+ * before any announce arrives. Through an rnsd without transport enabled,
+ * only destinations owned by that rnsd's local clients answer (see
+ * docs/protocol.md). The client wipes its own copies after sending, but
  * the plaintext stays in the send queue's ring buffer until that slot is
  * reused.
  *

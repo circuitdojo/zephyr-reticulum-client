@@ -196,6 +196,14 @@ ZTEST(identity, test_hashes_match_rns)
 	zassert_mem_equal(dh, v_dest_hash, sizeof(dh));
 }
 
+ZTEST(identity, test_plain_dest_hash_matches_rns)
+{
+	uint8_t h[RET_TRUNC_HASH_LEN];
+
+	zassert_ok(ret_plain_dest_hash("rnstransport.path.request", h));
+	zassert_mem_equal(h, v_path_request_dest, sizeof(h));
+}
+
 ZTEST(identity, test_hkdf_matches_rns)
 {
 	uint8_t out[64];

@@ -15,6 +15,8 @@ struct receipt {
 	bool used;
 	uint8_t packet_hash[RET_HASH_LEN];
 	uint8_t sig_pub[RET_ED25519_PUB_LEN];
+	uint8_t dest_hash[RET_TRUNC_HASH_LEN];
+	bool watched;
 	int64_t sent_ms;
 	int64_t deadline_ms;
 	ret_receipt_cb_t cb;
@@ -42,7 +44,8 @@ void ret_receipts_clear(void)
 }
 
 int ret_receipts_add(const uint8_t packet_hash[RET_HASH_LEN],
-		     const uint8_t sig_pub[RET_ED25519_PUB_LEN], int64_t now_ms,
+		     const uint8_t sig_pub[RET_ED25519_PUB_LEN],
+		     const uint8_t dest_hash[RET_TRUNC_HASH_LEN], bool watched, int64_t now_ms,
 		     uint32_t timeout_ms, ret_receipt_cb_t cb, void *user)
 {
 	for (size_t i = 0; i < ARRAY_SIZE(receipts); i++) {
@@ -54,6 +57,8 @@ int ret_receipts_add(const uint8_t packet_hash[RET_HASH_LEN],
 		r->used = true;
 		memcpy(r->packet_hash, packet_hash, RET_HASH_LEN);
 		memcpy(r->sig_pub, sig_pub, RET_ED25519_PUB_LEN);
+		memcpy(r->dest_hash, dest_hash, RET_TRUNC_HASH_LEN);
+		r->watched = watched;
 		r->sent_ms = now_ms;
 		r->deadline_ms = now_ms + timeout_ms;
 		r->cb = cb;
@@ -63,7 +68,8 @@ int ret_receipts_add(const uint8_t packet_hash[RET_HASH_LEN],
 	return -ENOMEM;
 }
 
-int ret_receipts_handle_proof(const struct ret_packet *pkt, int64_t now_ms)
+int ret_receipts_handle_proof(const struct ret_packet *pkt, int64_t now_ms,
+			      uint8_t dest_out[RET_TRUNC_HASH_LEN])
 {
 	const uint8_t *sig;
 
@@ -94,6 +100,9 @@ int ret_receipts_handle_proof(const struct ret_packet *pkt, int64_t now_ms)
 			return -EBADMSG;
 		}
 
+		if (dest_out != NULL) {
+			memcpy(dest_out, r->dest_hash, RET_TRUNC_HASH_LEN);
+		}
 		finish(r, RET_RECEIPT_DELIVERED, now_ms);
 		return 0;
 	}
@@ -111,13 +120,17 @@ bool ret_receipts_full(void)
 	return true;
 }
 
-void ret_receipts_expire(int64_t now_ms)
+int ret_receipts_expire(int64_t now_ms)
 {
+	int n = 0;
+
 	for (size_t i = 0; i < ARRAY_SIZE(receipts); i++) {
 		if (receipts[i].used && receipts[i].deadline_ms <= now_ms) {
+			n += receipts[i].watched ? 1 : 0;
 			finish(&receipts[i], RET_RECEIPT_TIMEOUT, now_ms);
 		}
 	}
+	return n;
 }
 
 void ret_receipts_fail_all(enum ret_receipt_status status, int64_t now_ms)

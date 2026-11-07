@@ -25,8 +25,16 @@ struct ret_destination {
 	uint8_t random_hash[RET_RANDOM_HASH_LEN];
 	bool has_ratchet;
 	uint8_t ratchet[RET_RATCHET_LEN];
+	/**
+	 * False once the connection the path was learned on is gone: the
+	 * keys stay usable, but the path (and rnsd's transport ID, which
+	 * changes when rnsd restarts) must be learned again.
+	 */
+	bool path_valid;
 	/** Path length: announce hops + 1, as Transport counts it. */
 	uint8_t hops;
+	/** Has delivered a valid proof: its timeouts count for the watchdog. */
+	bool proves;
 	bool has_transport_id;
 	uint8_t transport_id[RET_TRUNC_HASH_LEN];
 	int64_t last_seen_ms;
@@ -51,6 +59,12 @@ void ret_destinations_clear(void);
  */
 int ret_destinations_update(const struct ret_packet *pkt, const struct ret_announce *a,
 			    int64_t now_ms, const struct ret_destination **out, bool *fresh);
+
+/** Record that @p dest_hash delivered a valid proof. */
+void ret_destinations_mark_proves(const uint8_t dest_hash[RET_TRUNC_HASH_LEN]);
+
+/** Mark every path stale, e.g. after reconnecting. Keys are kept. */
+void ret_destinations_invalidate_paths(void);
 
 const struct ret_destination *ret_destinations_find(const uint8_t dest_hash[RET_TRUNC_HASH_LEN]);
 

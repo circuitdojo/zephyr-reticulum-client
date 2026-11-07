@@ -13,6 +13,48 @@
 
 LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 
+static int set_opt(int s, int level, int name, const void *val, socklen_t len, const char *what)
+{
+	if (zsock_setsockopt(s, level, name, val, len) < 0) {
+		int err = -errno;
+
+		LOG_ERR("setsockopt %s failed: %d", what, err);
+		return err;
+	}
+	return 0;
+}
+
+static int configure(int s)
+{
+	struct zsock_timeval tv = {
+		.tv_sec = CONFIG_RET_SEND_TIMEOUT_MS / 1000,
+		.tv_usec = (CONFIG_RET_SEND_TIMEOUT_MS % 1000) * 1000,
+	};
+	int err = set_opt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv), "SO_SNDTIMEO");
+
+#if defined(CONFIG_RET_TCP_KEEPALIVE)
+	int on = 1;
+	int idle = CONFIG_RET_TCP_KEEPALIVE_IDLE_S;
+	int intvl = CONFIG_RET_TCP_KEEPALIVE_INTERVAL_S;
+	int cnt = CONFIG_RET_TCP_KEEPALIVE_COUNT;
+
+	if (!err) {
+		err = set_opt(s, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on), "SO_KEEPALIVE");
+	}
+	if (!err) {
+		err = set_opt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle), "TCP_KEEPIDLE");
+	}
+	if (!err) {
+		err = set_opt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl),
+			      "TCP_KEEPINTVL");
+	}
+	if (!err) {
+		err = set_opt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt), "TCP_KEEPCNT");
+	}
+#endif
+	return err;
+}
+
 int ret_tcp_connect(const char *host, uint16_t port)
 {
 	struct zsock_addrinfo hints = {
@@ -38,6 +80,12 @@ int ret_tcp_connect(const char *host, uint16_t port)
 			fd = -errno;
 			continue;
 		}
+		err = configure(s);
+		if (err) {
+			zsock_close(s);
+			fd = err;
+			break;
+		}
 		if (zsock_connect(s, ai->ai_addr, ai->ai_addrlen) == 0) {
 			fd = s;
 			break;
@@ -58,10 +106,11 @@ int ret_tcp_send_all(int fd, const uint8_t *buf, size_t len)
 		ssize_t n = zsock_send(fd, &buf[sent], len - sent, 0);
 
 		if (n < 0) {
-			if (errno == EINTR || errno == EAGAIN) {
+			if (errno == EINTR) {
 				continue;
 			}
-			return -errno;
+			/* The socket is blocking: EAGAIN means SO_SNDTIMEO fired. */
+			return (errno == EAGAIN || errno == EWOULDBLOCK) ? -ETIMEDOUT : -errno;
 		}
 		sent += (size_t)n;
 	}

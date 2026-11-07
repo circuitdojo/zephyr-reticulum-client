@@ -34,6 +34,9 @@ int ret_dest_hash(const uint8_t name_hash[RET_NAME_HASH_LEN],
 		  const uint8_t identity_hash[RET_TRUNC_HASH_LEN],
 		  uint8_t out[RET_TRUNC_HASH_LEN]);
 
+/** Hash of a PLAIN destination (no identity): H(name_hash)[:16]. */
+int ret_plain_dest_hash(const char *full_name, uint8_t out[RET_TRUNC_HASH_LEN]);
+
 /**
  * Encrypt @p pt for a destination: ephemeral X25519 against
  * @p target_pub (the announced ratchet if any, otherwise the identity's

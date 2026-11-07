@@ -10,6 +10,14 @@ config RET_SAMPLE_DEST_NAME
 	  Full "app.aspect..." name. The sample sends to the first
 	  announced destination whose name hash matches.
 
+config RET_SAMPLE_DEST_HASH
+	string "Destination hash to send to (32 hex digits)"
+	default ""
+	help
+	  When set, the sample sends to this destination straight away
+	  instead of waiting for an announce matching RET_SAMPLE_DEST_NAME;
+	  the client requests a path to it on demand.
+
 config RET_SAMPLE_SEND_INTERVAL_S
 	int "Seconds between messages"
 	default 10

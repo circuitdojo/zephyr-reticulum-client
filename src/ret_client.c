@@ -44,6 +44,14 @@ struct send_req {
 	void *user;
 };
 
+/* A send waiting for a path to its destination. */
+struct held_send {
+	bool used;
+	int64_t deadline_ms;
+	int64_t next_request_ms;
+	struct send_req req;
+};
+
 struct ret_client {
 	struct ret_client_config cfg;
 	const char *host;
@@ -55,6 +63,11 @@ struct ret_client {
 	struct ret_hdlc_decoder hdlc;
 	/** Valid packets received on the current connection. */
 	uint32_t rx_packets;
+	int64_t last_rx_ms;
+	int consecutive_timeouts;
+	/** Set from inside frame handling when a send broke the connection. */
+	bool conn_broken;
+	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
 	uint8_t rx_frame[RET_MTU];
 	uint8_t rx_chunk[256];
 	uint8_t tx_raw[RET_MTU];
@@ -98,6 +111,8 @@ static void set_state(struct ret_client *c, enum ret_client_state s)
 	}
 }
 
+static void release_held(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC_HASH_LEN]);
+
 static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 {
 	struct ret_announce a;
@@ -117,6 +132,14 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 		LOG_WRN("announce rejected: public key changed for known destination");
 		return;
 	}
+
+	/* Any announce that (re)validated the path releases waiting sends,
+	 * including a repeat of one already seen.
+	 */
+	if (d->path_valid) {
+		release_held(c, d->dest_hash);
+	}
+
 	if (!fresh) {
 		/* Same announce again, e.g. rebroadcast plus path response. */
 		return;
@@ -161,12 +184,18 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 	case RET_PKT_ANNOUNCE:
 		handle_announce(c, &pkt);
 		break;
-	case RET_PKT_PROOF:
-		err = ret_receipts_handle_proof(&pkt, k_uptime_get());
-		if (err == -EBADMSG) {
+	case RET_PKT_PROOF: {
+		uint8_t proved[RET_TRUNC_HASH_LEN];
+
+		err = ret_receipts_handle_proof(&pkt, k_uptime_get(), proved);
+		if (err == 0) {
+			c->consecutive_timeouts = 0;
+			ret_destinations_mark_proves(proved);
+		} else if (err == -EBADMSG) {
 			LOG_WRN("invalid proof for pending packet");
 		}
 		break;
+	}
 	default:
 		/* No local destinations yet: DATA and link traffic is not for us. */
 		break;
@@ -182,6 +211,44 @@ static void fail_req(const struct send_req *r, enum ret_receipt_status status)
 	}
 }
 
+static int send_frame(struct ret_client *c, size_t raw_len)
+{
+	int flen = ret_hdlc_encode(c->tx_raw, raw_len, c->tx_frame, sizeof(c->tx_frame));
+	int err;
+
+	if (flen < 0) {
+		return flen;
+	}
+	err = ret_tcp_send_all(c->sock, c->tx_frame, (size_t)flen);
+	if (err) {
+		LOG_WRN("send failed: %d", err);
+		return -ECONNRESET;
+	}
+	return 0;
+}
+
+static int send_path_request(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC_HASH_LEN])
+{
+	uint8_t tag[RET_PATH_REQUEST_TAG_LEN];
+	int len;
+	int err;
+
+	err = ret_random(tag, sizeof(tag));
+	if (err) {
+		return err;
+	}
+	len = ret_path_request_build(dest_hash, tag, c->tx_raw, sizeof(c->tx_raw));
+	if (len < 0) {
+		return len;
+	}
+	err = send_frame(c, (size_t)len);
+	if (!err) {
+		LOG_INF("path request for %02x%02x%02x%02x..", dest_hash[0], dest_hash[1],
+			dest_hash[2], dest_hash[3]);
+	}
+	return err;
+}
+
 static int transmit(struct ret_client *c, const struct send_req *r)
 {
 	const struct ret_destination *d = ret_destinations_find(r->dest_hash);
@@ -195,8 +262,7 @@ static int transmit(struct ret_client *c, const struct send_req *r)
 	int len;
 	int err;
 
-	if (d == NULL) {
-		LOG_WRN("send to unknown destination");
+	if (d == NULL || !d->path_valid) {
 		return -ENOENT;
 	}
 
@@ -220,28 +286,21 @@ static int transmit(struct ret_client *c, const struct send_req *r)
 		return err;
 	}
 
-	int flen = ret_hdlc_encode(c->tx_raw, (size_t)len, c->tx_frame, sizeof(c->tx_frame));
-
-	if (flen < 0) {
-		return flen;
-	}
-
 	if (ret_receipts_full()) {
 		LOG_WRN("receipt table full");
 		return -ENOMEM;
 	}
 
-	err = ret_tcp_send_all(c->sock, c->tx_frame, (size_t)flen);
+	err = send_frame(c, (size_t)len);
 	if (err) {
-		LOG_WRN("send failed: %d", err);
-		return -ECONNRESET;
+		return err;
 	}
 
 	/* Registering after the send is safe: proofs are only read by this
 	 * thread, after transmit() returns. RTT is measured from here.
 	 */
-	err = ret_receipts_add(hash, &d->pub[RET_X25519_LEN], k_uptime_get(),
-			       CONFIG_RET_RECEIPT_TIMEOUT_MS, r->cb, r->user);
+	err = ret_receipts_add(hash, &d->pub[RET_X25519_LEN], d->dest_hash, d->proves,
+			       k_uptime_get(), CONFIG_RET_RECEIPT_TIMEOUT_MS, r->cb, r->user);
 	if (err) {
 		return err; /* not reachable: checked above, same thread */
 	}
@@ -258,13 +317,136 @@ static void drain_eventfd(struct ret_client *c)
 	(void)zvfs_eventfd_read(c->efd, &v);
 }
 
+static void free_held(struct held_send *h, enum ret_receipt_status status, bool notify)
+{
+	if (notify) {
+		fail_req(&h->req, status);
+	}
+	ret_wipe(&h->req, sizeof(h->req));
+	h->used = false;
+}
+
+/** Hold @p r until a path to its destination arrives. */
+static int hold(struct ret_client *c, const struct send_req *r)
+{
+	int64_t now = k_uptime_get();
+	struct held_send *slot = NULL;
+	int64_t next_request = now;
+
+	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
+		struct held_send *h = &c->held[i];
+
+		if (!h->used) {
+			slot = slot != NULL ? slot : h;
+		} else if (memcmp(h->req.dest_hash, r->dest_hash, RET_DEST_HASH_LEN) == 0) {
+			/* A request for this destination is already scheduled. */
+			next_request = h->next_request_ms;
+		}
+	}
+	if (slot == NULL) {
+		LOG_WRN("no slot to hold a send while its path is requested");
+		return -ENOMEM;
+	}
+
+	slot->used = true;
+	slot->req = *r;
+	slot->deadline_ms = now + CONFIG_RET_PATH_REQUEST_TIMEOUT_MS;
+	slot->next_request_ms = next_request;
+	return 0;
+}
+
+/**
+ * Fail held sends past their deadline and, when connected, send the path
+ * requests that are due (one per destination).
+ *
+ * @return false if the connection must be dropped.
+ */
+static bool service_held(struct ret_client *c)
+{
+	int64_t now = k_uptime_get();
+	bool connected = c->state == RET_STATE_CONNECTED;
+
+	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
+		struct held_send *h = &c->held[i];
+
+		if (!h->used) {
+			continue;
+		}
+		if (h->deadline_ms <= now) {
+			LOG_WRN("no path to %02x%02x%02x%02x.. in time", h->req.dest_hash[0],
+				h->req.dest_hash[1], h->req.dest_hash[2], h->req.dest_hash[3]);
+			free_held(h, RET_RECEIPT_FAILED, true);
+			continue;
+		}
+		if (!connected || h->next_request_ms > now) {
+			continue;
+		}
+
+		int err = send_path_request(c, h->req.dest_hash);
+
+		if (err == -ECONNRESET) {
+			return false;
+		}
+		/* Reschedule every send held for this destination. */
+		for (size_t j = 0; j < ARRAY_SIZE(c->held); j++) {
+			if (c->held[j].used && memcmp(c->held[j].req.dest_hash, h->req.dest_hash,
+						      RET_DEST_HASH_LEN) == 0) {
+				c->held[j].next_request_ms = now + CONFIG_RET_PATH_REQUEST_INTERVAL_MS;
+			}
+		}
+	}
+	return true;
+}
+
+static int64_t held_next_event(const struct ret_client *c)
+{
+	int64_t next = INT64_MAX;
+
+	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
+		const struct held_send *h = &c->held[i];
+
+		if (h->used) {
+			next = MIN(next, h->deadline_ms);
+			if (c->state == RET_STATE_CONNECTED) {
+				next = MIN(next, h->next_request_ms);
+			}
+		}
+	}
+	return next;
+}
+
+static void release_held(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC_HASH_LEN])
+{
+	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
+		struct held_send *h = &c->held[i];
+		int err;
+
+		if (!h->used || memcmp(h->req.dest_hash, dest_hash, RET_DEST_HASH_LEN) != 0) {
+			continue;
+		}
+		err = c->conn_broken ? -ECONNRESET : transmit(c, &h->req);
+		free_held(h, RET_RECEIPT_FAILED, err != 0);
+		if (err == -ECONNRESET) {
+			c->conn_broken = true;
+		}
+	}
+}
+
 /** @return false if the connection must be dropped. */
 static bool process_queue(struct ret_client *c)
 {
 	while (k_msgq_get(&ret_send_q, &c->req, K_NO_WAIT) == 0) {
 		int err;
 
-		err = c->state == RET_STATE_CONNECTED ? transmit(c, &c->req) : -ENOTCONN;
+		if (c->state != RET_STATE_CONNECTED) {
+			err = -ENOTCONN;
+		} else {
+			err = transmit(c, &c->req);
+			if (err == -ENOENT) {
+				/* No current path: hold it and ask for one. */
+				err = hold(c, &c->req);
+			}
+		}
 		if (err) {
 			fail_req(&c->req, RET_RECEIPT_FAILED);
 		}
@@ -277,7 +459,7 @@ static bool process_queue(struct ret_client *c)
 			return false;
 		}
 	}
-	return true;
+	return service_held(c);
 }
 
 static void disconnect(struct ret_client *c)
@@ -288,6 +470,11 @@ static void disconnect(struct ret_client *c)
 	}
 	ret_hdlc_decoder_reset(&c->hdlc);
 	ret_receipts_fail_all(RET_RECEIPT_DISCONNECTED, k_uptime_get());
+
+	/* Held sends survive until their deadline; ask again on reconnect. */
+	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
+		c->held[i].next_request_ms = 0;
+	}
 }
 
 static int poll_timeout_ms(int64_t until_ms)
@@ -303,6 +490,33 @@ static int poll_timeout_ms(int64_t until_ms)
 	return (int)MIN(until_ms - now, INT32_MAX);
 }
 
+static int64_t silence_deadline(const struct ret_client *c)
+{
+	if (CONFIG_RET_RX_SILENCE_TIMEOUT_S == 0) {
+		return INT64_MAX;
+	}
+	return c->last_rx_ms + (int64_t)CONFIG_RET_RX_SILENCE_TIMEOUT_S * MSEC_PER_SEC;
+}
+
+/** @return true if a watchdog decided the connection is dead. */
+static bool watchdog(struct ret_client *c)
+{
+	int64_t now = k_uptime_get();
+
+	c->consecutive_timeouts += ret_receipts_expire(now);
+	if (CONFIG_RET_RECONNECT_AFTER_TIMEOUTS > 0 &&
+	    c->consecutive_timeouts >= CONFIG_RET_RECONNECT_AFTER_TIMEOUTS) {
+		LOG_WRN("%d receipts in a row timed out, reconnecting", c->consecutive_timeouts);
+		c->consecutive_timeouts = 0;
+		return true;
+	}
+	if (now >= silence_deadline(c)) {
+		LOG_WRN("nothing received for %d s, reconnecting", CONFIG_RET_RX_SILENCE_TIMEOUT_S);
+		return true;
+	}
+	return false;
+}
+
 static void run_connected(struct ret_client *c)
 {
 	struct zsock_pollfd fds[2] = {
@@ -310,8 +524,22 @@ static void run_connected(struct ret_client *c)
 		{ .fd = c->efd, .events = ZSOCK_POLLIN },
 	};
 
+	c->last_rx_ms = k_uptime_get();
+	c->conn_broken = false;
+	c->consecutive_timeouts = 0;
+
+	/* Paths learned on an earlier connection are stale (rnsd may have
+	 * restarted with a new transport ID); held sends re-request them.
+	 */
+	ret_destinations_invalidate_paths();
+	if (!service_held(c)) {
+		return;
+	}
+
 	for (;;) {
-		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(ret_receipts_next_deadline()));
+		int64_t next = MIN(MIN(ret_receipts_next_deadline(), held_next_event(c)),
+				   silence_deadline(c));
+		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(next));
 
 		if (n < 0) {
 			if (errno == EINTR) {
@@ -332,7 +560,11 @@ static void run_connected(struct ret_client *c)
 				LOG_WRN("connection closed (%d)", r < 0 ? -errno : 0);
 				return;
 			}
+			c->last_rx_ms = k_uptime_get();
 			ret_hdlc_feed(&c->hdlc, c->rx_chunk, (size_t)r, on_frame, c);
+			if (c->conn_broken) {
+				return;
+			}
 		}
 
 		if (fds[1].revents & ZSOCK_POLLIN) {
@@ -342,7 +574,9 @@ static void run_connected(struct ret_client *c)
 			}
 		}
 
-		ret_receipts_expire(k_uptime_get());
+		if (!service_held(c) || watchdog(c)) {
+			return;
+		}
 	}
 }
 
@@ -353,10 +587,13 @@ static void backoff(struct ret_client *c, int ms)
 	int64_t until = k_uptime_get() + ms;
 
 	while (k_uptime_get() < until) {
-		if (zsock_poll(&pfd, 1, poll_timeout_ms(until)) > 0) {
+		int64_t next = MIN(until, held_next_event(c));
+
+		if (zsock_poll(&pfd, 1, poll_timeout_ms(next)) > 0) {
 			drain_eventfd(c);
 			(void)process_queue(c);
 		}
+		(void)service_held(c);
 	}
 }
 

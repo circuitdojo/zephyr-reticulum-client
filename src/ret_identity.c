@@ -53,6 +53,23 @@ int ret_dest_hash(const uint8_t name_hash[RET_NAME_HASH_LEN],
 	return err;
 }
 
+int ret_plain_dest_hash(const char *full_name, uint8_t out[RET_TRUNC_HASH_LEN])
+{
+	uint8_t nh[RET_NAME_HASH_LEN];
+	uint8_t h[RET_SHA256_LEN];
+	int err = ret_name_hash(full_name, nh);
+
+	if (!err) {
+		const struct ret_iov iov[] = { { nh, sizeof(nh) } };
+
+		err = ret_sha256(iov, 1, h);
+	}
+	if (!err) {
+		memcpy(out, h, RET_TRUNC_HASH_LEN);
+	}
+	return err;
+}
+
 int ret_identity_encrypt_det(const uint8_t target_pub[RET_X25519_LEN],
 			     const uint8_t identity_hash[RET_TRUNC_HASH_LEN], const uint8_t *pt,
 			     size_t pt_len, const uint8_t eph_prv[RET_X25519_LEN],

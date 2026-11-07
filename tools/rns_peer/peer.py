@@ -38,16 +38,31 @@ def main() -> None:
     ap.add_argument("--announce-interval", type=float, default=10.0)
     ap.add_argument("--ratchets", action="store_true", help="announce with ratchets")
     ap.add_argument("--no-prove", action="store_true", help="never send delivery proofs")
+    ap.add_argument(
+        "--stop-proving-after",
+        type=int,
+        metavar="N",
+        help="prove the first N packets, then stop (a link that looks dead)",
+    )
+    ap.add_argument(
+        "--print-hash",
+        action="store_true",
+        help="print the destination hash (creating the identity if needed) and exit",
+    )
     ap.add_argument("-v", "--verbose", action="count", default=0)
     args = ap.parse_args()
-
-    RNS.Reticulum(configdir=args.config, loglevel=RNS.LOG_NOTICE + args.verbose)
 
     if os.path.isfile(args.identity):
         identity = RNS.Identity.from_file(args.identity)
     else:
         identity = RNS.Identity()
         identity.to_file(args.identity)
+
+    if args.print_hash:
+        print(RNS.Destination.hash(identity, APP_NAME, ASPECT).hex())
+        return
+
+    RNS.Reticulum(configdir=args.config, loglevel=RNS.LOG_NOTICE + args.verbose)
 
     dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, APP_NAME, ASPECT)
     if args.ratchets:
@@ -59,8 +74,15 @@ def main() -> None:
         RNS.Destination.PROVE_NONE if args.no_prove else RNS.Destination.PROVE_ALL
     )
 
+    received = 0
+
     def on_packet(data: bytes, packet: RNS.Packet) -> None:
+        nonlocal received
+        received += 1
         out(f"RECEIVED {data.decode(errors='replace')}")
+        # RNS decides whether to prove after this callback returns.
+        if args.stop_proving_after is not None and received > args.stop_proving_after:
+            dest.set_proof_strategy(RNS.Destination.PROVE_NONE)
 
     dest.set_packet_callback(on_packet)
 
@@ -69,6 +91,8 @@ def main() -> None:
         mode.append("ratchets")
     if args.no_prove:
         mode.append("no-prove")
+    if args.stop_proving_after is not None:
+        mode.append(f"stop-proving-after={args.stop_proving_after}")
     out(f"PEER READY {dest.hash.hex()} {' '.join(mode)}".rstrip())
 
     try:

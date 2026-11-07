@@ -268,4 +268,17 @@ ZTEST(packet, test_packet_hash_matches_rns)
 	zassert_mem_equal(h, v_packet_hash, RET_HASH_LEN);
 }
 
+ZTEST(packet, test_path_request_matches_rns)
+{
+	uint8_t out[RET_MTU];
+	int n = ret_path_request_build(v_dest_hash, v_path_request_tag, out, sizeof(out));
+
+	zassert_equal(n, RET_PATH_REQUEST_LEN);
+	zassert_equal(n, sizeof(v_path_request));
+	zassert_mem_equal(out, v_path_request, sizeof(v_path_request));
+	zassert_mem_equal(&out[2], v_path_request_dest, RET_TRUNC_HASH_LEN);
+	zassert_equal(ret_path_request_build(v_dest_hash, v_path_request_tag, out, n - 1),
+		      -EMSGSIZE);
+}
+
 ZTEST_SUITE(packet, NULL, packet_setup, NULL, NULL, NULL);
