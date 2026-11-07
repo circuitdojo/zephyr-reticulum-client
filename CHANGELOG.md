@@ -4,6 +4,10 @@
 
 ### Added
 
+- mpack (msgpack) as a pinned west dependency, for the Link, Resource and
+  LXMF work ahead. Tests check its encoding is byte-identical to RNS's
+  umsgpack for the shapes RNS/LXMF use.
+
 - CI `nrf9151` job: builds `ret_basic` for the nRF9151 Feather in the NCS
   workspace (sysbuild, no compiler warnings) and uploads `merged.hex` as a
   run artifact. The CI image gains the `arm-zephyr-eabi` toolchain.
