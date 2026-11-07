@@ -161,11 +161,19 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
 - `src/ret_client_lxmf.c`: LXMF on the client (`cfg.on_lxmf`). Inbound messages are parsed and
   verified on the client thread against the sender's announced key. An unknown sender's message
   is delivered marked unverified, and a path request goes out for it (at most one per
-  `CONFIG_RET_PATH_REQUEST_INTERVAL_MS`). A bad signature is dropped. Repeats are dropped by
-  message hash, but only among the last `CONFIG_RET_LXMF_RECENT_MESSAGES`, held in RAM. A replay
-  after a reboot is delivered again; the API docs say so. `ret_lxmf_send()` packs and signs on the caller's thread
+  `CONFIG_RET_PATH_REQUEST_INTERVAL_MS`). A bad signature is dropped. Repeats and replays are
+  refused through `src/ret_lxmf_seen.c` (pure, tested in `tests/lib/ret_lxmf`): hashes plus
+  timestamps persisted as `ret/lx/*` in settings, a 30-day age limit, and a floor raised on
+  eviction. `ret_lxmf_send()` packs and signs on the caller's thread
   (identity and address are immutable after start), stamps it with `SYS_CLOCK_REALTIME`, and
   returns -ENODATA while the wall clock is unset. Then it goes through `ret_client_send()`.
+- `src/ret_client_lxmf_sync.c`: `ret_lxmf_sync()`, propagation node sync: link, identify, `/get`
+  list, fetch in batches of 10 under `CONFIG_RET_LXMF_SYNC_LIMIT_KB` (re-asking for what a full
+  batch left out), acknowledge, close. Link callbacks only record the next step;
+  `ret_lxmf_sync_drv_service()` performs it from the client loop through the link driver
+  directly, never through the request queue (a full queue cannot strand a sync). While a sync
+  runs, the application's link requests fail with -EBUSY. Items are decrypted into the resource
+  stream buffer (`ret_link_drv_scratch()`), which is spent by the time a response is delivered.
 - `src/ret_client_link.c`: the link driver (one link, initiator side): path wait, handshake, RTT,
   requests with timeouts, response resources (one at a time, `CONFIG_RET_RESOURCE_MAX_SIZE` each
   for the stream and plaintext buffers), identify, keepalive, stale and close. It runs on the
@@ -295,6 +303,9 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   keepalives, request, close; then bidirectional
   replies to the client's own destination, proved both ways), `lxmf` (`ret_lxmf` against
   `lxmf_peer.py`: messages and echoes both ways, signatures validated on both sides),
+  `store-forward` (a fresh `lxmd` from `tools/lxmd-test`: messages deposited with
+  `tools/rns_peer/lxmf_send.py` while the device is down are collected by its sync, and the
+  node's store ends empty),
   plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
   `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash
   build. Each known-hash scenario starts a fresh rnsd, because

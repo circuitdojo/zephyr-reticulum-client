@@ -18,6 +18,8 @@
 #include "ret_client_internal.h"
 #include "ret_crypto.h"
 #include "ret_lxmf.h"
+#include "ret_lxmf_seen.h"
+#include "ret_storage.h"
 
 LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 
@@ -45,33 +47,57 @@ int ret_lxmf_drv_setup(struct ret_client *c)
 	return 0;
 }
 
-static bool seen(const struct ret_client *c, const uint8_t hash[RET_SHA256_LEN])
+/* Wall-clock seconds, or 0 when the clock was never set. */
+static int64_t wall_now(void)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(c->lxmf_recent); i++) {
-		if (memcmp(c->lxmf_recent[i], hash, RET_SHA256_LEN) == 0) {
-			return true;
-		}
+	struct timespec now;
+
+	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &now) != 0 || now.tv_sec < WALL_CLOCK_VALID_S) {
+		return 0;
 	}
-	return false;
+	return (int64_t)now.tv_sec;
 }
 
-void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len)
+int ret_lxmf_drv_load(struct ret_client *c)
+{
+	c->lxmf_seen = (struct ret_lxmf_seen){
+		.entries = c->lxmf_seen_entries,
+		.count = ARRAY_SIZE(c->lxmf_seen_entries),
+		.max_age_s = CONFIG_RET_LXMF_MAX_AGE_DAYS * 86400U,
+		.max_future_s = CONFIG_RET_LXMF_MAX_FUTURE_S,
+	};
+	return ret_storage_load_lxmf_seen(&c->lxmf_seen);
+}
+
+enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body, size_t len)
 {
 	struct ret_lxmf_msg m;
 	const struct ret_destination *d;
 	const uint8_t *sig_pub;
 	bool verified = false;
+	bool floor_raised;
+	int64_t now_s = wall_now();
+	size_t slot;
 
-	/* Opportunistic delivery: the packet holds packed[16:], the
-	 * destination being our own address.
-	 */
-	if (ret_lxmf_unpack(c->local_dest, plain, len, &m) != 0) {
+	/* body = packed[16:]: the destination is our own address. */
+	if (ret_lxmf_unpack(c->local_dest, body, len, &m) != 0) {
 		LOG_WRN("malformed LXMF message");
-		return;
+		return LXMF_MALFORMED;
 	}
-	if (seen(c, m.hash)) {
+	switch (ret_lxmf_seen_check(&c->lxmf_seen, m.hash, m.timestamp, now_s)) {
+	case RET_LXMF_SEEN_DUPLICATE:
 		LOG_DBG("repeated LXMF message");
-		return;
+		return LXMF_DUPLICATE;
+	case RET_LXMF_SEEN_TOO_OLD:
+		/* Older than any node keeps one, or than what we forgot. */
+		LOG_WRN("refusing LXMF message from %.0f: too old to tell from a replay",
+			m.timestamp);
+		return LXMF_TOO_OLD;
+	case RET_LXMF_SEEN_BAD_TIME:
+		LOG_WRN("refusing LXMF message with timestamp %.0f: in the future", m.timestamp);
+		return LXMF_TOO_OLD;
+	case RET_LXMF_SEEN_NEW:
+		break;
 	}
 
 	if (memcmp(m.src, c->local_dest, RET_LXMF_ADDR_LEN) == 0) {
@@ -83,7 +109,7 @@ void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len
 	if (sig_pub != NULL) {
 		if (!ret_lxmf_verify(&m, sig_pub)) {
 			LOG_WRN("dropping LXMF message with an invalid signature");
-			return;
+			return LXMF_BAD_SIGNATURE;
 		}
 		verified = true;
 	} else {
@@ -103,8 +129,16 @@ void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len
 		}
 	}
 
-	memcpy(c->lxmf_recent[c->lxmf_recent_next], m.hash, RET_SHA256_LEN);
-	c->lxmf_recent_next = (c->lxmf_recent_next + 1) % ARRAY_SIZE(c->lxmf_recent);
+	/* Remembered (and persisted) before delivery: a crash in between
+	 * loses the message rather than delivering it twice. If the save
+	 * fails it is still delivered (remembered in RAM until reboot):
+	 * losing mail is worse than a replay window after a flash fault.
+	 */
+	slot = ret_lxmf_seen_add(&c->lxmf_seen, m.hash, m.timestamp, now_s, verified,
+				 &floor_raised);
+	if (slot != RET_LXMF_SEEN_NOT_STORED) {
+		(void)ret_storage_save_lxmf_seen(&c->lxmf_seen, slot, floor_raised);
+	}
 
 	struct ret_lxmf_message out = {
 		.timestamp = m.timestamp,
@@ -120,6 +154,12 @@ void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len
 	memcpy(out.source, m.src, sizeof(out.source));
 	memcpy(out.hash, m.hash, sizeof(out.hash));
 	c->cfg.on_lxmf(&out, c->cfg.user);
+	return LXMF_DELIVERED;
+}
+
+void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len)
+{
+	(void)ret_lxmf_drv_deliver(c, plain, len);
 }
 
 int ret_lxmf_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LEN],

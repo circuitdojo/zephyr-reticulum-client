@@ -1,0 +1,24 @@
+# lxmd (LXMF propagation node) for tools/run_e2e.sh: a client of the
+# isolated rnsd (tools/rnsd-test). run_e2e.sh copies this directory into
+# build/ for every run, with a fresh identity and an empty message store.
+#
+#   uv run --project ret-client/tools/rns_peer lxmd --config <copy> \
+#       --rnsconfig ret-client/tools/rnsd-test -p
+
+[propagation]
+enable_node = yes
+node_name = ret-test node
+announce_at_start = yes
+announce_interval = 1
+autopeer = no
+# The lowest cost LXMF accepts: depositing senders (Python) compute the
+# stamp in a second or two.
+propagation_stamp_cost_target = 13
+propagation_stamp_cost_flexibility = 0
+
+[lxmf]
+display_name = ret-test lxmd
+announce_at_start = no
+
+[logging]
+loglevel = 5

@@ -227,12 +227,50 @@ config RET_RECONNECT_BACKOFF_MAX_S
 	  Reconnect delay doubles from 1 s after each failed attempt, up
 	  to this limit.
 
-config RET_LXMF_RECENT_MESSAGES
-	int "LXMF message hashes remembered for dropping repeats"
-	default 16
-	range 1 1024
+config RET_LXMF_SEEN_ENTRIES
+	int "LXMF messages remembered against repeats and replays"
+	default 64
+	range 4 1024
 	help
-	  A sender that missed our proof sends the message again; repeats
-	  of a remembered message are proved but not delivered twice.
+	  Received messages are remembered (hash and timestamp: 24 bytes
+	  each in settings, 32 in RAM) so a repeat or a replayed packet is
+	  not delivered twice, across reboots too. When the table fills
+	  with messages younger than RET_LXMF_MAX_AGE_DAYS, the oldest is
+	  forgotten and messages as old as it are refused from then on.
+	  Only verified messages evict; see src/ret_lxmf_seen.h.
+
+config RET_LXMF_SYNC_LIMIT_KB
+	int "Propagation sync: largest batch of messages per request (KB)"
+	default 4
+	range 1 1000
+	help
+	  Sent to the node as the per-transfer limit; a batch arrives as one
+	  resource, so this must stay below RET_RESOURCE_MAX_SIZE (checked
+	  at build time). Messages larger than this are left at the node.
+
+config RET_LXMF_SYNC_MAX_IDS
+	int "Propagation sync: message ids held per listing"
+	default 32
+	range 1 512
+	help
+	  32 bytes each. A node holding more is listed again after these
+	  are fetched.
+
+config RET_LXMF_MAX_FUTURE_S
+	int "Largest LXMF timestamp skew ahead of our clock (s)"
+	default 3600
+	help
+	  Messages stamped further in the future are refused: once
+	  remembered and evicted, such a timestamp would raise the replay
+	  floor above every genuine message.
+
+config RET_LXMF_MAX_AGE_DAYS
+	int "Oldest LXMF message accepted (days, by its timestamp)"
+	default 30
+	range 1 365
+	help
+	  Older messages are refused as possible replays. Propagation nodes
+	  keep messages for 30 days (LXMRouter MESSAGE_EXPIRY). Needs the
+	  wall clock; until it is set only the remembered messages apply.
 
 endif # RET_CLIENT

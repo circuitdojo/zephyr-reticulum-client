@@ -4,6 +4,15 @@
 
 ### Added
 
+- LXMF propagation sync: `ret_lxmf_sync()` collects the messages an LXMF propagation node
+  (lxmd) holds for the device, then acknowledges them so the node deletes them. Batches are
+  bounded by `CONFIG_RET_LXMF_SYNC_LIMIT_KB`; larger messages are left at the node and logged.
+  `ret_lxmf` syncs on every connect (`CONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE`) and optionally
+  periodically. e2e scenario `store-forward` against a real lxmd.
+- Persistent LXMF replay protection: received messages are remembered in settings (hash and
+  timestamp), messages older than 30 days are refused, and a floor rises on eviction so a
+  forgotten message cannot be replayed. Replaces the in-RAM repeat ring.
+
 - LXMF messaging (lxmf 1.2.1), opportunistic both ways.
   - `cfg.on_lxmf` makes the client an `lxmf.delivery` node: announced with LXMF app_data, inbound
     messages verified against the sender's announced key (unknown senders delivered as
