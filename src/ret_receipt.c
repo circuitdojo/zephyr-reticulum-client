@@ -101,6 +101,16 @@ int ret_receipts_handle_proof(const struct ret_packet *pkt, int64_t now_ms)
 	return -ENOENT;
 }
 
+bool ret_receipts_full(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(receipts); i++) {
+		if (!receipts[i].used) {
+			return false;
+		}
+	}
+	return true;
+}
+
 void ret_receipts_expire(int64_t now_ms)
 {
 	for (size_t i = 0; i < ARRAY_SIZE(receipts); i++) {

@@ -12,6 +12,17 @@
 
 static struct ret_destination table[CONFIG_RET_MAX_KNOWN_DESTINATIONS];
 
+/* Announce emission time: big-endian seconds in random_hash[5..9]. */
+static uint64_t emitted(const uint8_t random_hash[RET_RANDOM_HASH_LEN])
+{
+	uint64_t t = 0;
+
+	for (int i = 5; i < RET_RANDOM_HASH_LEN; i++) {
+		t = (t << 8) | random_hash[i];
+	}
+	return t;
+}
+
 void ret_destinations_clear(void)
 {
 	memset(table, 0, sizeof(table));
@@ -43,14 +54,25 @@ static struct ret_destination *slot_for(const uint8_t dest_hash[RET_TRUNC_HASH_L
 }
 
 int ret_destinations_update(const struct ret_packet *pkt, const struct ret_announce *a,
-			    int64_t now_ms, const struct ret_destination **out)
+			    int64_t now_ms, const struct ret_destination **out, bool *fresh)
 {
 	struct ret_destination *d = (struct ret_destination *)ret_destinations_find(a->dest_hash);
+	bool is_fresh = true;
 
 	if (d != NULL) {
 		if (memcmp(d->pub, a->pub, RET_PUBKEY_LEN) != 0) {
 			return -EPERM;
 		}
+		if (emitted(a->random_hash) < emitted(d->random_hash)) {
+			if (fresh != NULL) {
+				*fresh = false;
+			}
+			if (out != NULL) {
+				*out = d;
+			}
+			return 0;
+		}
+		is_fresh = memcmp(d->random_hash, a->random_hash, RET_RANDOM_HASH_LEN) != 0;
 	} else {
 		d = slot_for(a->dest_hash);
 		memset(d, 0, sizeof(*d));
@@ -60,6 +82,8 @@ int ret_destinations_update(const struct ret_packet *pkt, const struct ret_annou
 		memcpy(d->name_hash, a->name_hash, RET_NAME_HASH_LEN);
 		memcpy(d->pub, a->pub, RET_PUBKEY_LEN);
 	}
+
+	memcpy(d->random_hash, a->random_hash, RET_RANDOM_HASH_LEN);
 
 	if (a->ratchet != NULL) {
 		d->has_ratchet = true;
@@ -75,6 +99,9 @@ int ret_destinations_update(const struct ret_packet *pkt, const struct ret_annou
 
 	if (out != NULL) {
 		*out = d;
+	}
+	if (fresh != NULL) {
+		*fresh = is_fresh;
 	}
 	return 0;
 }

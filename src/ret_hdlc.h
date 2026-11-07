@@ -30,7 +30,7 @@ struct ret_hdlc_decoder {
 	bool in_frame;
 	bool escape;
 	bool overflow;
-	/** Frames dropped because they exceeded @ref cap. */
+	/** Frames dropped: larger than @ref cap, or ending in a lone ESC. */
 	uint32_t dropped;
 };
 

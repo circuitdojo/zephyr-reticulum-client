@@ -1,0 +1,25 @@
+# Isolated rnsd for ret-client testing. Its own instance name (AF_UNIX
+# socket on Linux) and ports keep it apart from a default instance that
+# may already be running on 4242 / 37428.
+#
+#   uv run --project ret-client/tools/rns_peer rnsd --config ret-client/tools/rnsd-test -vvv
+
+[reticulum]
+  # The client and the peer are both one hop from rnsd, and rnsd forwards
+  # packets for its local clients' destinations without transport mode.
+  enable_transport = False
+  share_instance = Yes
+  instance_name = ret-test
+  shared_instance_port = 37438
+  instance_control_port = 37439
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[ret-client TCP]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 127.0.0.1
+    listen_port = 4243

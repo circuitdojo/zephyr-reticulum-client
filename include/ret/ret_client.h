@@ -34,7 +34,9 @@ enum ret_receipt_status {
 	RET_RECEIPT_DELIVERED,
 	/** No proof before CONFIG_RET_RECEIPT_TIMEOUT_MS. */
 	RET_RECEIPT_TIMEOUT,
-	/** Not sent: unknown destination, encryption or socket failure. */
+	/** Not sent: unknown destination, receipt table full, encryption or
+	 *  socket failure (a socket failure also drops the connection).
+	 */
 	RET_RECEIPT_FAILED,
 	/** Sent, but the connection dropped before a proof arrived. */
 	RET_RECEIPT_DISCONNECTED,
@@ -51,7 +53,10 @@ struct ret_announce_info {
 	size_t app_data_len;
 };
 
-/** Called on the client thread for every validated announce. */
+/**
+ * Called on the client thread for every validated announce, once per
+ * announce: repeats of it (same random hash) update the path silently.
+ */
 typedef void (*ret_announce_cb_t)(const struct ret_announce_info *info, void *user);
 
 /**
@@ -84,7 +89,9 @@ int ret_client_start(struct ret_client *client);
 /**
  * Queue @p data (at most RET_MAX_PAYLOAD bytes, copied) for encrypted
  * delivery to a destination learned from an announce. @p cb fires once
- * with the outcome.
+ * with the outcome. The client wipes its own copies after sending, but
+ * the plaintext stays in the send queue's ring buffer until that slot is
+ * reused.
  *
  * @retval -EMSGSIZE payload too large
  * @retval -EAGAIN send queue full
@@ -92,7 +99,10 @@ int ret_client_start(struct ret_client *client);
 int ret_client_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HASH_LEN],
 		    const uint8_t *data, size_t len, ret_receipt_cb_t cb, void *user);
 
-/** SHA-256("app.aspect...")[:10], for matching announces by name. */
+/**
+ * SHA-256("app.aspect...")[:10], for matching announces by name. Usable
+ * before ret_client_start().
+ */
 int ret_client_name_hash(const char *full_name, uint8_t out[10]);
 
 enum ret_client_state ret_client_state(const struct ret_client *client);

@@ -34,6 +34,8 @@ int ret_receipts_add(const uint8_t packet_hash[RET_HASH_LEN],
  */
 int ret_receipts_handle_proof(const struct ret_packet *pkt, int64_t now_ms);
 
+bool ret_receipts_full(void);
+
 /** Fire @p status for every receipt whose deadline is at or before @p now_ms. */
 void ret_receipts_expire(int64_t now_ms);
 

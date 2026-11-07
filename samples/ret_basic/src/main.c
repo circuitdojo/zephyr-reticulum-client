@@ -107,15 +107,16 @@ int main(void)
 	char msg[32];
 	int err;
 
-	err = ret_client_start(client);
-	if (err) {
-		LOG_ERR("ret_client_start failed: %d", err);
-		return err;
-	}
-
+	/* Before start: an announce may arrive as soon as the thread runs. */
 	err = ret_client_name_hash(CONFIG_RET_SAMPLE_DEST_NAME, target_name_hash);
 	if (err) {
 		LOG_ERR("name hash failed: %d", err);
+		return err;
+	}
+
+	err = ret_client_start(client);
+	if (err) {
+		LOG_ERR("ret_client_start failed: %d", err);
 		return err;
 	}
 

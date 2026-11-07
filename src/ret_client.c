@@ -29,6 +29,9 @@
 
 LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 
+/* A connection up this long counts as healthy for backoff purposes. */
+#define STABLE_CONNECTION_MS (10 * MSEC_PER_SEC)
+
 BUILD_ASSERT(RET_MAX_PAYLOAD == RET_ENCRYPTED_MDU);
 BUILD_ASSERT(RET_DEST_HASH_LEN == RET_TRUNC_HASH_LEN);
 BUILD_ASSERT(RET_PACKET_HASH_LEN == RET_HASH_LEN);
@@ -50,6 +53,8 @@ struct ret_client {
 	int sock;
 	int efd;
 	struct ret_hdlc_decoder hdlc;
+	/** Valid packets received on the current connection. */
+	uint32_t rx_packets;
 	uint8_t rx_frame[RET_MTU];
 	uint8_t rx_chunk[256];
 	uint8_t tx_raw[RET_MTU];
@@ -97,6 +102,7 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 {
 	struct ret_announce a;
 	const struct ret_destination *d;
+	bool fresh;
 	int err;
 
 	err = ret_announce_validate(pkt, &a);
@@ -106,9 +112,13 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 		return;
 	}
 
-	err = ret_destinations_update(pkt, &a, k_uptime_get(), &d);
+	err = ret_destinations_update(pkt, &a, k_uptime_get(), &d, &fresh);
 	if (err) {
 		LOG_WRN("announce rejected: public key changed for known destination");
+		return;
+	}
+	if (!fresh) {
+		/* Same announce again, e.g. rebroadcast plus path response. */
 		return;
 	}
 
@@ -142,6 +152,7 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 		LOG_DBG("dropping %zu byte frame: %d", len, err);
 		return;
 	}
+	c->rx_packets++;
 
 	LOG_DBG("rx type %u hdr %u hops %u ctx 0x%02x len %zu", pkt.packet_type,
 		pkt.header_type + 1, pkt.hops, pkt.context, pkt.data_len);
@@ -215,19 +226,24 @@ static int transmit(struct ret_client *c, const struct send_req *r)
 		return flen;
 	}
 
-	/* Register before sending so a fast proof cannot beat the receipt. */
-	err = ret_receipts_add(hash, &d->pub[RET_X25519_LEN], k_uptime_get(),
-			       CONFIG_RET_RECEIPT_TIMEOUT_MS, r->cb, r->user);
-	if (err) {
+	if (ret_receipts_full()) {
 		LOG_WRN("receipt table full");
-		return err;
+		return -ENOMEM;
 	}
 
 	err = ret_tcp_send_all(c->sock, c->tx_frame, (size_t)flen);
 	if (err) {
-		/* The receipt will be failed with the rest on disconnect. */
 		LOG_WRN("send failed: %d", err);
 		return -ECONNRESET;
+	}
+
+	/* Registering after the send is safe: proofs are only read by this
+	 * thread, after transmit() returns. RTT is measured from here.
+	 */
+	err = ret_receipts_add(hash, &d->pub[RET_X25519_LEN], k_uptime_get(),
+			       CONFIG_RET_RECEIPT_TIMEOUT_MS, r->cb, r->user);
+	if (err) {
+		return err; /* not reachable: checked above, same thread */
 	}
 
 	LOG_DBG("tx DATA %d bytes, hdr %u", len, pkt.header_type + 1);
@@ -248,16 +264,17 @@ static bool process_queue(struct ret_client *c)
 	while (k_msgq_get(&ret_send_q, &c->req, K_NO_WAIT) == 0) {
 		int err;
 
-		if (c->state != RET_STATE_CONNECTED) {
-			fail_req(&c->req, RET_RECEIPT_FAILED);
-			continue;
-		}
-		err = transmit(c, &c->req);
-		if (err == -ECONNRESET) {
-			return false;
-		}
+		err = c->state == RET_STATE_CONNECTED ? transmit(c, &c->req) : -ENOTCONN;
 		if (err) {
 			fail_req(&c->req, RET_RECEIPT_FAILED);
+		}
+		ret_wipe(c->req.data, sizeof(c->req.data));
+		if (err == -ECONNRESET) {
+			/* The eventfd was drained already: re-arm it so requests
+			 * still queued are failed by backoff() rather than stranded.
+			 */
+			(void)zvfs_eventfd_write(c->efd, 1);
+			return false;
 		}
 	}
 	return true;
@@ -297,6 +314,9 @@ static void run_connected(struct ret_client *c)
 		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(ret_receipts_next_deadline()));
 
 		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
 			LOG_ERR("poll failed: %d", errno);
 			return;
 		}
@@ -362,12 +382,25 @@ static void client_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		delay_s = 1;
+		c->rx_packets = 0;
+		int64_t connected_at = k_uptime_get();
+
 		set_state(c, RET_STATE_CONNECTED);
 		run_connected(c);
 		disconnect(c);
 		set_state(c, RET_STATE_RECONNECTING);
-		backoff(c, MSEC_PER_SEC);
+
+		/* Only a connection that was established for real resets the
+		 * backoff (it received packets or stayed up), so a server that
+		 * accepts and immediately closes is not hammered.
+		 */
+		if (c->rx_packets > 0 ||
+		    k_uptime_get() - connected_at >= STABLE_CONNECTION_MS) {
+			delay_s = 1;
+		}
+		LOG_INF("reconnecting in %d s", delay_s);
+		backoff(c, delay_s * MSEC_PER_SEC);
+		delay_s = MIN(delay_s * 2, CONFIG_RET_RECONNECT_BACKOFF_MAX_S);
 	}
 }
 
@@ -423,6 +456,7 @@ int ret_client_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_
 		.cb = cb,
 		.user = user,
 	};
+	int err;
 
 	if (!c->started) {
 		return -ENOTCONN;
@@ -433,7 +467,9 @@ int ret_client_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_
 
 	memcpy(r.dest_hash, dest_hash, RET_DEST_HASH_LEN);
 	memcpy(r.data, data, len);
-	if (k_msgq_put(&ret_send_q, &r, K_NO_WAIT) != 0) {
+	err = k_msgq_put(&ret_send_q, &r, K_NO_WAIT);
+	ret_wipe(r.data, len);
+	if (err != 0) {
 		return -EAGAIN;
 	}
 	(void)zvfs_eventfd_write(c->efd, 1);
@@ -442,7 +478,9 @@ int ret_client_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_
 
 int ret_client_name_hash(const char *full_name, uint8_t out[10])
 {
-	return ret_name_hash(full_name, out);
+	int err = ret_crypto_init();
+
+	return err ? err : ret_name_hash(full_name, out);
 }
 
 enum ret_client_state ret_client_state(const struct ret_client *c)
