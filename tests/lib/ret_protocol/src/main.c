@@ -159,6 +159,59 @@ ZTEST(announce, test_truncated_and_wrong_type)
 	zassert_equal(ret_announce_validate(&p, &a), -EINVAL);
 }
 
+ZTEST(announce, test_build_matches_rns)
+{
+	/* Ed25519 is deterministic: same key, same fields, same bytes. */
+	struct ret_local_identity id;
+	struct ret_packet p;
+	struct ret_announce a;
+	uint8_t out[RET_MTU];
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
+	n = ret_announce_build(&id, v_name_hash, v_dest_hash, a.random_hash,
+			       (const uint8_t *)V_APP_DATA, strlen(V_APP_DATA), RET_CONTEXT_NONE,
+			       out, sizeof(out));
+	zassert_equal(n, sizeof(v_announce));
+	zassert_mem_equal(out, v_announce, sizeof(v_announce));
+}
+
+ZTEST(announce, test_build_path_response_validates)
+{
+	struct ret_local_identity id;
+	struct ret_packet p;
+	struct ret_announce a;
+	uint8_t rh[RET_RANDOM_HASH_LEN] = { 1, 2, 3, 4, 5, 0, 0, 0, 0, 9 };
+	uint8_t out[RET_MTU];
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	n = ret_announce_build(&id, v_name_hash, v_dest_hash, rh, NULL, 0,
+			       RET_CONTEXT_PATH_RESPONSE, out, sizeof(out));
+	zassert_equal(n, RET_H1_HEADER_LEN + 148);
+	zassert_ok(validate_raw(out, n, &p, &a));
+	zassert_equal(p.context, RET_CONTEXT_PATH_RESPONSE);
+	zassert_equal(a.app_data_len, 0);
+
+	zassert_equal(ret_announce_build(&id, v_name_hash, v_dest_hash, rh, out,
+					 RET_MTU - RET_H1_HEADER_LEN - 148 + 1, RET_CONTEXT_NONE,
+					 out, sizeof(out)),
+		      -EMSGSIZE);
+}
+
+ZTEST(announce, test_proof_build_matches_rns)
+{
+	struct ret_local_identity id;
+	uint8_t out[RET_MTU];
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	n = ret_proof_build(&id, v_packet_hash, out, sizeof(out));
+	zassert_equal(n, sizeof(v_proof_implicit));
+	zassert_mem_equal(out, v_proof_implicit, sizeof(v_proof_implicit));
+}
+
 ZTEST_SUITE(announce, NULL, setup, NULL, NULL, NULL);
 
 /* --- Destinations -------------------------------------------------- */

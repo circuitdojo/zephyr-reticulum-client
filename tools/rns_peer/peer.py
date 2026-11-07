@@ -7,12 +7,17 @@ payload it receives. Proves every packet unless --no-prove is given.
     uv run --project ret-client/tools/rns_peer ret-client/tools/rns_peer/peer.py \
         --config ret-client/tools/rnsd-test
 
+With --reply it also answers every message with "echo: <message>" to the
+client's own destination (`retclient.node`, learned from its announce) and
+reports the client's delivery proof for each reply.
+
 Lines meant for scripts start with a fixed tag: PEER READY, ANNOUNCED,
-RECEIVED.
+RECEIVED, CLIENT ANNOUNCE, REPLY SENT, REPLY PROVED, REPLY FAILED.
 """
 
 import argparse
 import os
+import threading
 import time
 
 import RNS
@@ -20,6 +25,8 @@ import RNS
 APP_NAME = "retclient"
 ASPECT = "echo"
 APP_DATA = b"ret-test"
+CLIENT_NAME = "retclient.node"
+REPLY_PATH_WAIT_S = 30.0
 
 
 def out(line: str) -> None:
@@ -43,6 +50,11 @@ def main() -> None:
         type=int,
         metavar="N",
         help="prove the first N packets, then stop (a link that looks dead)",
+    )
+    ap.add_argument(
+        "--reply",
+        action="store_true",
+        help=f'answer each message with "echo: ..." to the client\'s {CLIENT_NAME}',
     )
     ap.add_argument(
         "--print-hash",
@@ -74,15 +86,63 @@ def main() -> None:
         RNS.Destination.PROVE_NONE if args.no_prove else RNS.Destination.PROVE_ALL
     )
 
+    client_dest_hash = None
+    client_known = threading.Event()
+
+    class ClientAnnounces:
+        aspect_filter = CLIENT_NAME
+        receive_path_responses = True
+
+        def received_announce(self, destination_hash, announced_identity, app_data, **_):
+            nonlocal client_dest_hash
+            client_dest_hash = destination_hash
+            client_known.set()
+            out(f"CLIENT ANNOUNCE {destination_hash.hex()}")
+
+    if args.reply:
+        RNS.Transport.register_announce_handler(ClientAnnounces())
+
+    def reply(text: str) -> None:
+        if not client_known.wait(REPLY_PATH_WAIT_S):
+            out(f"REPLY FAILED no announce from {CLIENT_NAME}: {text}")
+            return
+        identity = RNS.Identity.recall(client_dest_hash)
+        target = RNS.Destination(
+            identity, RNS.Destination.OUT, RNS.Destination.SINGLE, *CLIENT_NAME.split(".")
+        )
+        receipt = RNS.Packet(target, text.encode()).send()
+        if not receipt:
+            out(f"REPLY FAILED send: {text}")
+            return
+        out(f"REPLY SENT {text}")
+        reported = threading.Lock()
+        done = []
+
+        def report(line: str) -> None:
+            with reported:
+                if not done:
+                    done.append(line)
+                    out(line)
+
+        receipt.set_delivery_callback(lambda r: report(f"REPLY PROVED {text}"))
+        receipt.set_timeout_callback(lambda r: report(f"REPLY FAILED timeout: {text}"))
+        # RNS does not call a callback set after the proof already arrived.
+        if receipt.status == RNS.PacketReceipt.DELIVERED:
+            report(f"REPLY PROVED {text}")
+
     received = 0
 
     def on_packet(data: bytes, packet: RNS.Packet) -> None:
         nonlocal received
         received += 1
-        out(f"RECEIVED {data.decode(errors='replace')}")
+        text = data.decode(errors="replace")
+        out(f"RECEIVED {text}")
         # RNS decides whether to prove after this callback returns.
         if args.stop_proving_after is not None and received > args.stop_proving_after:
             dest.set_proof_strategy(RNS.Destination.PROVE_NONE)
+        if args.reply:
+            # Not from this callback: RNS is still processing the packet.
+            threading.Thread(target=reply, args=(f"echo: {text}",), daemon=True).start()
 
     dest.set_packet_callback(on_packet)
 
@@ -91,6 +151,8 @@ def main() -> None:
         mode.append("ratchets")
     if args.no_prove:
         mode.append("no-prove")
+    if args.reply:
+        mode.append("reply")
     if args.stop_proving_after is not None:
         mode.append(f"stop-proving-after={args.stop_proving_after}")
     out(f"PEER READY {dest.hash.hex()} {' '.join(mode)}".rstrip())

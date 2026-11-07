@@ -45,6 +45,7 @@ zephyr_library_sources(
 zephyr_library_sources_ifdef(CONFIG_RET_CLIENT
     ../../src/ret_tcp.c
     ../../src/ret_client.c
+    ../../src/ret_storage.c
 )
 
 if(CONFIG_MBEDTLS)

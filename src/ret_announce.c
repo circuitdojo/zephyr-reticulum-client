@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include <zephyr/sys/util.h>
+
 #include "ret_announce.h"
 
 #define ANNOUNCE_FIXED_LEN (RET_PUBKEY_LEN + RET_NAME_HASH_LEN + RET_RANDOM_HASH_LEN + RET_SIG_LEN)
@@ -69,3 +71,73 @@ int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *a)
 	}
 	return 0;
 }
+
+int ret_announce_build(const struct ret_local_identity *id,
+		       const uint8_t name_hash[RET_NAME_HASH_LEN],
+		       const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
+		       const uint8_t random_hash[RET_RANDOM_HASH_LEN], const uint8_t *app_data,
+		       size_t app_data_len, uint8_t context, uint8_t *out, size_t cap)
+{
+	uint8_t signed_data[RET_TRUNC_HASH_LEN + RET_MTU];
+	size_t head = RET_PUBKEY_LEN + RET_NAME_HASH_LEN + RET_RANDOM_HASH_LEN;
+	size_t n = 0;
+	struct ret_packet pkt = {
+		.header_type = RET_HEADER_1,
+		.transport_type = RET_TRANSPORT_BROADCAST,
+		.dest_type = RET_DEST_SINGLE,
+		.packet_type = RET_PKT_ANNOUNCE,
+		.context = context,
+	};
+	uint8_t *data;
+
+	if (RET_H1_HEADER_LEN + ANNOUNCE_FIXED_LEN + app_data_len > MIN(cap, RET_MTU)) {
+		return -EMSGSIZE;
+	}
+	/* Assemble the payload where it ends up in @p out (packing then
+	 * moves it onto itself), saving a second MTU-sized stack buffer.
+	 */
+	data = &out[RET_H1_HEADER_LEN];
+	pkt.data = data;
+
+	memcpy(&data[0], id->pub, RET_PUBKEY_LEN);
+	memcpy(&data[RET_PUBKEY_LEN], name_hash, RET_NAME_HASH_LEN);
+	memcpy(&data[RET_PUBKEY_LEN + RET_NAME_HASH_LEN], random_hash, RET_RANDOM_HASH_LEN);
+
+	memcpy(&signed_data[n], dest_hash, RET_TRUNC_HASH_LEN);
+	n += RET_TRUNC_HASH_LEN;
+	memcpy(&signed_data[n], data, head);
+	n += head;
+	if (app_data_len > 0) {
+		memcpy(&signed_data[n], app_data, app_data_len);
+		n += app_data_len;
+	}
+
+	ret_local_identity_sign(id, signed_data, n, &data[head]);
+	if (app_data_len > 0) {
+		memcpy(&data[head + RET_SIG_LEN], app_data, app_data_len);
+	}
+
+	memcpy(pkt.dest_hash, dest_hash, RET_TRUNC_HASH_LEN);
+	pkt.data_len = head + RET_SIG_LEN + app_data_len;
+	return ret_packet_pack(&pkt, out, cap);
+}
+
+int ret_proof_build(const struct ret_local_identity *id, const uint8_t packet_hash[RET_HASH_LEN],
+		    uint8_t *out, size_t cap)
+{
+	uint8_t sig[RET_SIG_LEN];
+	struct ret_packet pkt = {
+		.header_type = RET_HEADER_1,
+		.transport_type = RET_TRANSPORT_BROADCAST,
+		.dest_type = RET_DEST_SINGLE,
+		.packet_type = RET_PKT_PROOF,
+		.context = RET_CONTEXT_NONE,
+		.data = sig,
+		.data_len = sizeof(sig),
+	};
+
+	ret_local_identity_sign(id, packet_hash, RET_HASH_LEN, sig);
+	memcpy(pkt.dest_hash, packet_hash, RET_TRUNC_HASH_LEN);
+	return ret_packet_pack(&pkt, out, cap);
+}
+

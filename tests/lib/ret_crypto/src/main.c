@@ -259,4 +259,89 @@ ZTEST(identity, test_encrypt_random_and_bounds)
 	zassert_true(RET_H2_HEADER_LEN + sizeof(a) <= RET_MTU);
 }
 
+ZTEST(identity, test_local_identity_matches_rns)
+{
+	struct ret_local_identity id;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	zassert_mem_equal(id.pub, v_identity_pub, RET_PUBKEY_LEN);
+	zassert_mem_equal(id.hash, v_identity_hash, RET_TRUNC_HASH_LEN);
+}
+
+ZTEST(identity, test_decrypt_rns_token)
+{
+	struct ret_local_identity id;
+	uint8_t out[64];
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	n = ret_local_identity_decrypt(&id, v_token, sizeof(v_token), out, sizeof(out));
+	zassert_equal(n, strlen(V_PLAINTEXT));
+	zassert_mem_equal(out, V_PLAINTEXT, n);
+}
+
+ZTEST(identity, test_decrypt_rejects)
+{
+	struct ret_local_identity id;
+	uint8_t tok[sizeof(v_token)];
+	uint8_t out[64];
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+
+	/* Encrypted to a ratchet key we do not hold. */
+	zassert_equal(ret_local_identity_decrypt(&id, v_token_ratchet, sizeof(v_token_ratchet),
+						 out, sizeof(out)),
+		      -EBADMSG);
+
+	/* Any flipped bit fails the HMAC: ephemeral key, IV, ciphertext, MAC. */
+	const size_t offsets[] = { 0, 40, 50, sizeof(tok) - 1 };
+
+	for (size_t i = 0; i < ARRAY_SIZE(offsets); i++) {
+		memcpy(tok, v_token, sizeof(tok));
+		tok[offsets[i]] ^= 0x01;
+		zassert_equal(ret_local_identity_decrypt(&id, tok, sizeof(tok), out, sizeof(out)),
+			      -EBADMSG, "offset %zu", offsets[i]);
+	}
+
+	/* Truncated or misaligned. */
+	zassert_equal(ret_local_identity_decrypt(&id, v_token, RET_TOKEN_OVERHEAD, out,
+						 sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(ret_local_identity_decrypt(&id, v_token, sizeof(v_token) - 1, out,
+						 sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(ret_local_identity_decrypt(&id, v_token, sizeof(v_token), out, 15),
+		      -ENOBUFS);
+}
+
+ZTEST(identity, test_encrypt_decrypt_roundtrip)
+{
+	struct ret_local_identity id;
+	uint8_t prv[RET_PRVKEY_LEN];
+	static uint8_t pt[RET_ENCRYPTED_MDU];
+	static uint8_t tok[RET_TOKEN_LEN(RET_ENCRYPTED_MDU)];
+	static uint8_t out[sizeof(tok)];
+	int n;
+
+	zassert_ok(ret_local_identity_generate(&id, prv));
+	for (size_t i = 0; i < sizeof(pt); i++) {
+		pt[i] = (uint8_t)i;
+	}
+	n = ret_identity_encrypt(id.pub, id.hash, pt, sizeof(pt), tok, sizeof(tok));
+	zassert_equal(n, sizeof(tok));
+	zassert_equal(ret_local_identity_decrypt(&id, tok, n, out, sizeof(out)), sizeof(pt));
+	zassert_mem_equal(out, pt, sizeof(pt));
+}
+
+ZTEST(identity, test_sign_verifies)
+{
+	struct ret_local_identity id;
+	uint8_t sig[RET_SIG_LEN];
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	ret_local_identity_sign(&id, v_packet_hash, RET_HASH_LEN, sig);
+	zassert_true(ret_ed25519_verify(sig, &v_identity_pub[RET_X25519_LEN], v_packet_hash,
+					RET_HASH_LEN));
+}
+
 ZTEST_SUITE(identity, NULL, setup, NULL, NULL, NULL);

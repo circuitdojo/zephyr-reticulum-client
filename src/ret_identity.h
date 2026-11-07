@@ -23,10 +23,43 @@
 
 /** Ephemeral pub + IV + HMAC around the padded ciphertext. */
 #define RET_TOKEN_OVERHEAD (RET_X25519_LEN + RET_AES_BLOCK_LEN + RET_SHA256_LEN)
-#define RET_TOKEN_LEN(pt_len) (RET_TOKEN_OVERHEAD + ret_pkcs7_padded_len(pt_len))
+/* Constant expression (usable for static buffers); same as ret_pkcs7_padded_len(). */
+#define RET_TOKEN_LEN(pt_len) \
+	(RET_TOKEN_OVERHEAD + ((pt_len) / RET_AES_BLOCK_LEN + 1) * RET_AES_BLOCK_LEN)
 
 /** Largest plaintext for one encrypted packet (RNS Packet.ENCRYPTED_MDU). */
 #define RET_ENCRYPTED_MDU 383
+
+/** RNS private key layout: X25519 private key || Ed25519 seed. */
+#define RET_PRVKEY_LEN 64
+
+/** An identity we hold the private keys for. */
+struct ret_local_identity {
+	uint8_t x25519_prv[RET_X25519_LEN];
+	uint8_t ed25519_sk[64];
+	/** X25519 pub || Ed25519 pub, as announced. */
+	uint8_t pub[RET_PUBKEY_LEN];
+	uint8_t hash[RET_TRUNC_HASH_LEN];
+};
+
+/** Load from the 64-byte RNS private key (Identity.get_private_key()). */
+int ret_local_identity_load(struct ret_local_identity *id, const uint8_t prv[RET_PRVKEY_LEN]);
+
+/** Generate a new identity; @p prv_out receives its private key to store. */
+int ret_local_identity_generate(struct ret_local_identity *id, uint8_t prv_out[RET_PRVKEY_LEN]);
+
+void ret_local_identity_sign(const struct ret_local_identity *id, const uint8_t *msg,
+			     size_t len, uint8_t sig[RET_SIG_LEN]);
+
+/**
+ * Decrypt a token encrypted to @p id (the inverse of
+ * ret_identity_encrypt): ephemeral pub | IV | ciphertext | HMAC.
+ *
+ * @return plaintext length
+ * @retval -EBADMSG malformed token, bad HMAC or bad padding
+ */
+int ret_local_identity_decrypt(const struct ret_local_identity *id, const uint8_t *token,
+			       size_t len, uint8_t *out, size_t out_cap);
 
 int ret_name_hash(const char *full_name, uint8_t out[RET_NAME_HASH_LEN]);
 int ret_identity_hash(const uint8_t pub[RET_PUBKEY_LEN], uint8_t out[RET_TRUNC_HASH_LEN]);

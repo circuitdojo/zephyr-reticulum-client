@@ -67,6 +67,18 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
   the known-destination table plus the outbound H1/H2 rule, and proofs.
 - `src/ret_client.c`: a single static instance and one thread polling the socket plus an
   eventfd. Sends are queued with `k_msgq`. All protocol state is confined to that thread.
+  - With `dest_name` configured the client has its own destination (address): an identity
+    created on first start and persisted in settings (`src/ret_storage.c`, keys `ret/id` and
+    `ret/aclk`). It announces on every connect, answers path requests for itself, and
+    decrypts, delivers (`on_data`) and proves packets sent to it.
+  - The announce clock (emission time in each announce) must never go backwards across a
+    reboot: receivers ignore announces that are not newer than the last one they saw. `ret/aclk`
+    stores a reservation. Values are used from RAM, flash is written once per
+    `CONFIG_RET_ANNOUNCE_CLOCK_BLOCK` announces, and a boot resumes above the reservation.
+  - A settings record that can't be read fails `ret_client_start()`. It is never treated as
+    "no identity", which would silently replace the address.
+  - Path requests for our address are answered once per tag, at most every
+    `CONFIG_RET_PATH_RESPONSE_INTERVAL_MS`. Tagless requests are ignored, as in RNS.
   - A send with no current path is held while path requests go out.
   - Paths go stale on every reconnect.
   - A receipt watchdog reconnects after consecutive timeouts.
@@ -119,6 +131,18 @@ Kconfig notes carried over from lion-client:
    against `main`. `scripts/forgejo.sh ci` waits for the PR's CI run, once CI exists.
 8. **After merge:** delete the branch, and remove the worktree if you used one.
 
+## CI
+
+`.forgejo/workflows/ci.yml` runs on every PR and push to `main` on the bigbox runner,
+in the `ret-client-ci` image (`ci/Dockerfile`). It runs:
+- ruff and a golden-vector regeneration diff
+- the unit tests
+- a warning-free sample build
+- the full e2e
+
+Runner setup (image build, volume allowlist) is in `docs/ci-forgejo.md`. After pushing a
+PR, `scripts/forgejo.sh ci` waits for the run.
+
 ## Forgejo credentials
 
 The remote is `origin` at `forgejo.internal.circuitdojo.com/circuitdojo/ret-client`.
@@ -129,6 +153,8 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
 
 ## Debugging against rnsd
 
+- native_sim keeps settings (the client identity) in a flash file: `--flash=<path>`, or
+  `flash.bin` in the working directory by default. Delete it for a fresh identity.
 - Always run native_sim binaries with `--seed-random`. Otherwise the test
   RNG repeats the same sequence every run, so ephemeral keys, IVs and packet
   hashes repeat, and a long-running rnsd silently drops the packets as
@@ -139,8 +165,10 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   - `--ratchets` exercises the ratchet path.
   - `--no-prove` exercises receipt timeouts.
   - `--stop-proving-after N` simulates a link that dies after N proofs.
+  - `--reply` answers every message with `echo: ...` to the client's `retclient.node`.
   - `--print-hash` prints the destination hash for `CONFIG_RET_SAMPLE_DEST_HASH`.
-- `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build),
+- `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
+  (bidirectional: replies to the client's own destination, proved both ways),
   plus `late` (path request), `stall` (receipt watchdog) and `restart` (rnsd restarted
   mid-run) using a known-hash build. Each known-hash scenario starts a fresh rnsd, because
   rnsd drops repeat path requests for a destination for 45 s.

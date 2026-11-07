@@ -1,0 +1,86 @@
+# Runs on the self-hosted Forgejo runner. Setup, the named volumes this file
+# expects, and the reasons behind the odd-looking steps: docs/ci-forgejo.md.
+name: CI
+
+enable-email-notifications: true
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One west workspace on one volume, shared by every run: queue, never run
+# two at once. Not cancelled: a run dropped while queued reports no status.
+concurrency:
+  group: ret-client-west
+  cancel-in-progress: false
+
+jobs:
+  native_sim:
+    name: native_sim (unit tests, build, rnsd e2e)
+    runs-on: docker
+    container:
+      image: ret-client-ci:latest
+      options: >-
+        --volume ret-client-west:/west-workspace
+        --volume ret-client-ccache:/ccache
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ret-client
+          persist-credentials: false
+
+      - name: Copy the checkout into the cached west workspace
+        # Copied, not symlinked: `west init -l` resolves the manifest repo to
+        # pick the topdir, and a symlink would put it back under
+        # GITHUB_WORKSPACE, off the volume.
+        run: |
+          rm -rf /west-workspace/ret-client
+          cp -a "$GITHUB_WORKSPACE/ret-client" /west-workspace/ret-client
+
+      - name: west init/update (vanilla Zephyr)
+        working-directory: /west-workspace
+        run: |
+          [ -d .west ] || west init -l --mf west-vanilla.yml ret-client
+          west update --narrow -o=--depth=1
+
+      - name: Python tooling (lint, golden vectors match pinned RNS)
+        working-directory: /west-workspace/ret-client/tools/rns_peer
+        # Regenerating the vectors and diffing proves the checked-in header
+        # still comes from the RNS version uv.lock pins.
+        run: |
+          uv sync --locked --group dev
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked gen_vectors.py ../../tests/common/vectors_rns.h
+          git -C ../.. diff --exit-code -- tests/common/vectors_rns.h
+
+      - name: Unit tests
+        working-directory: /west-workspace
+        # -c overwrites twister-out instead of keeping one per run forever.
+        run: ret-client/scripts/twister.sh -c -T ret-client/tests -p native_sim -v --inline-logs -O build/twister-ret
+
+      - name: Build ret_basic (no warnings)
+        working-directory: /west-workspace
+        # run: steps are bash -e without pipefail; without it tee hides a
+        # failed build.
+        run: |
+          set -o pipefail
+          west build -b native_sim ret-client/samples/ret_basic -d build/ret_basic -p --no-sysbuild 2>&1 | tee build/ret_basic.log
+          ! grep -q "warning:" build/ret_basic.log
+
+      - name: End to end against rnsd
+        id: e2e
+        working-directory: /west-workspace
+        run: ret-client/tools/run_e2e.sh
+
+      - name: e2e logs on failure
+        # Only for this step: the logs directory lives on the shared volume
+        # and would otherwise show an earlier run's logs.
+        if: failure() && steps.e2e.outcome == 'failure'
+        working-directory: /west-workspace
+        run: |
+          for f in build/ret_e2e-logs/*.log; do
+            echo "::group::$f"; sed 's/\x1b\[[0-9;]*m//g' "$f"; echo "::endgroup::"
+          done

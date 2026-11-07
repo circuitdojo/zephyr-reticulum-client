@@ -28,6 +28,8 @@ static atomic_t target_known;
 static K_SEM_DEFINE(target_sem, 0, 1);
 
 static atomic_t delivered;
+static atomic_t replies;
+static K_SEM_DEFINE(reply_sem, 0, K_SEM_MAX_LIMIT);
 static atomic_t resolved;
 static K_SEM_DEFINE(resolved_sem, 0, K_SEM_MAX_LIMIT);
 
@@ -57,6 +59,18 @@ static void on_announce(const struct ret_announce_info *info, void *user)
 		memcpy(target_dest, info->dest_hash, RET_DEST_HASH_LEN);
 		atomic_set(&target_known, 1);
 		k_sem_give(&target_sem);
+	}
+}
+
+static void on_data(const uint8_t *data, size_t len, void *user)
+{
+	static const char prefix[] = "echo: ";
+
+	ARG_UNUSED(user);
+	LOG_INF("RECEIVED %.*s", (int)len, (const char *)data);
+	if (len >= sizeof(prefix) - 1 && memcmp(data, prefix, sizeof(prefix) - 1) == 0) {
+		atomic_inc(&replies);
+		k_sem_give(&reply_sem);
 	}
 }
 
@@ -90,22 +104,41 @@ static void on_receipt(const uint8_t packet_hash[RET_PACKET_HASH_LEN],
 static void finish(int sent)
 {
 	int ok = (int)atomic_get(&delivered);
+	bool success = ok == sent;
 
+#if defined(CONFIG_RET_SAMPLE_EXPECT_REPLIES)
+	int64_t until = k_uptime_get() + CONFIG_RET_SAMPLE_REPLY_WAIT_S * MSEC_PER_SEC;
+
+	while (atomic_get(&replies) < sent && k_uptime_get() < until) {
+		k_sem_take(&reply_sem, K_MSEC(until - k_uptime_get()));
+	}
+	success = success && atomic_get(&replies) == sent;
+	LOG_INF("DONE %d/%d delivered, %d/%d replies", ok, sent, (int)atomic_get(&replies), sent);
+#else
 	LOG_INF("DONE %d/%d delivered", ok, sent);
+#endif
 #if defined(CONFIG_ARCH_POSIX)
 	k_sleep(K_MSEC(100)); /* let the log thread flush */
-	nsi_exit(ok == sent ? 0 : 1);
+	nsi_exit(success ? 0 : 1);
+#else
+	ARG_UNUSED(success);
 #endif
 }
 
 int main(void)
 {
-	static const struct ret_client_config cfg = {
+	static struct ret_client_config cfg = {
 		.on_announce = on_announce,
+		.on_data = on_data,
 	};
-	struct ret_client *client = ret_client_create(&cfg);
+	struct ret_client *client;
 	char msg[32];
 	int err;
+
+	if (strlen(CONFIG_RET_SAMPLE_LOCAL_NAME) > 0) {
+		cfg.dest_name = CONFIG_RET_SAMPLE_LOCAL_NAME;
+	}
+	client = ret_client_create(&cfg);
 
 	/* Before start: an announce may arrive as soon as the thread runs. */
 	err = ret_client_name_hash(CONFIG_RET_SAMPLE_DEST_NAME, target_name_hash);
@@ -118,6 +151,14 @@ int main(void)
 	if (err) {
 		LOG_ERR("ret_client_start failed: %d", err);
 		return err;
+	}
+
+	uint8_t own[RET_DEST_HASH_LEN];
+	char own_hex[2 * RET_DEST_HASH_LEN + 1];
+
+	if (ret_client_dest_hash(client, own) == 0) {
+		hex(own, sizeof(own), own_hex);
+		LOG_INF("OWN ADDRESS %s %s", CONFIG_RET_SAMPLE_LOCAL_NAME, own_hex);
 	}
 
 	if (strlen(CONFIG_RET_SAMPLE_DEST_HASH) > 0) {
