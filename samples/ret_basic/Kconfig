@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+menu "ret_basic sample"
+
+config RET_SAMPLE_DEST_NAME
+	string "Destination name to send to"
+	default "retclient.echo"
+	help
+	  Full "app.aspect..." name. The sample sends to the first
+	  announced destination whose name hash matches.
+
+config RET_SAMPLE_SEND_INTERVAL_S
+	int "Seconds between messages"
+	default 10
+
+config RET_SAMPLE_MESSAGE_COUNT
+	int "Messages to send (0 = forever)"
+	default 0
+	help
+	  After this many messages resolve, the sample logs a summary and,
+	  on native_sim, exits with status 0 if every message was
+	  delivered and 1 otherwise.
+
+endmenu
+
+source "Kconfig.zephyr"

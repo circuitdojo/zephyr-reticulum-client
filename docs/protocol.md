@@ -1,0 +1,66 @@
+# Reticulum wire protocol (as implemented)
+
+Checked against the RNS 1.5.7 source (`RNS/Packet.py`, `Identity.py`,
+`Transport.py`, `Cryptography/{HKDF,Token}.py`, `Interfaces/TCPInterface.py`).
+When upgrading the pinned `rns` in `tools/rns_peer`, re-check these and
+regenerate the test vectors.
+
+**TCP framing (`Interfaces/TCPInterface.py`)**
+- HDLC framing, no CRC: `0x7E | escape(pkt) | 0x7E`.
+- Escaping: `0x7D → 7D 5D` first, then `0x7E → 7D 5E`.
+- KISS is off by default.
+- The receiver must tolerate back-to-back flags (empty frames) and drop frames larger than the 500-byte MTU.
+
+**Packet header (`Packet.py`)**
+- Byte 0 is the flags byte:
+
+  | Bit(s) | Field |
+  |---|---|
+  | 7 | IFAC (must be 0) |
+  | 6 | header_type (0 = H1, 1 = H2) |
+  | 5 | context_flag |
+  | 4 | transport_type (0 = BROADCAST, 1 = TRANSPORT) |
+  | 3–2 | dest_type (SINGLE 0, GROUP 1, PLAIN 2, LINK 3) |
+  | 1–0 | packet_type (DATA 0, ANNOUNCE 1, LINKREQUEST 2, PROOF 3) |
+
+- Byte 1 is hops.
+- H1 layout: `dest_hash[16] | context[1] | data`.
+- H2 layout: `transport_id[16] | dest_hash[16] | context[1] | data`.
+- The receiver treats `hops + 1` as the path length (Transport increments hops on inbound).
+
+**Hashes**
+- `full_hash` = SHA-256. Truncated hash = first 16 bytes.
+- `name_hash` = SHA-256(`"app.aspect…"`)[:10].
+- `identity_hash` = SHA-256(pub[64])[:16].
+- `dest_hash` = SHA-256(name_hash ‖ identity_hash)[:16].
+- Public key = X25519 pub[32] ‖ Ed25519 pub[32].
+- Packet hash = SHA-256(`(raw[0] & 0x0F)` ‖ `raw[2:]`). For H2 packets, use `raw[18:]` instead, so the hash does not change when the header is rewritten.
+
+**Announce (`Identity.validate_announce`)**
+- Layout: `data = pub[64] | name_hash[10] | random_hash[10] | ratchet[32] (only if context_flag) | sig[64] | app_data`.
+- Validation:
+  1. Ed25519-verify `sig` over `dest_hash ‖ pub ‖ name_hash ‖ random_hash ‖ ratchet ‖ app_data`.
+  2. Check that `dest_hash` equals SHA-256(name_hash ‖ identity_hash)[:16].
+  3. Reject any announce whose pubkey differs from the one already stored for that destination.
+
+**Encryption to a SINGLE destination (`Identity.encrypt`, `Token.py`, `HKDF.py`)**
+1. Generate an ephemeral X25519 keypair.
+2. `shared = X25519(eph_prv, ratchet_pub if known else dest_x25519_pub)`.
+3. `derived = HKDF-SHA256(len = 64, ikm = shared, salt = identity_hash, info = "")`. This is RFC 5869.
+4. Split the key: `signing_key = derived[:32]`, `enc_key = derived[32:]`. The cipher is AES-256-CBC.
+5. Output: `eph_pub[32] | IV[16] | AES-256-CBC(PKCS7(pt)) | HMAC-SHA256(signing_key, IV ‖ ct)[32]`.
+- With the 500-byte MTU, the maximum plaintext is 383 bytes.
+
+**Proof (`Identity.prove`, `ProofDestination`, `PacketReceipt.validate_proof`)**
+- The proof is a PROOF-type packet, `dest_type` SINGLE, addressed to `packet_hash[:16]`.
+- Data is either implicit (`sig[64]`, the default) or explicit (`packet_hash[32] | sig[64]`).
+- Validation: Ed25519-verify `sig` over the full 32-byte `packet_hash`, using the destination's Ed25519 key.
+
+**Routing through rnsd**
+- `Transport.outbound` rule: if path hops > 1, convert the packet to H2/TRANSPORT with `transport_id` set to the announce's transport_id. Otherwise send it as H1/BROADCAST. ret-client copies this rule.
+- rnsd with `enable_transport = False` still works for this setup:
+  - It forwards packets addressed to destinations owned by its local clients (`for_local_client`, Transport.py:1968/2006).
+  - It routes the proof back through its reverse table (Transport.py:2734).
+  - It rebroadcasts announces from local clients out to TCP clients (Transport.py:2351).
+
+**Gotcha:** Monocypher's default `crypto_eddsa_*` uses BLAKE2b. Use `crypto_ed25519_check` from `src/optional/monocypher-ed25519.c`, which uses SHA-512 per RFC 8032.

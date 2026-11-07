@@ -1,0 +1,23 @@
+manifest:
+  projects:
+    - name: zephyr
+      # Same Zephyr line as lion-client's vanilla manifest (matches the
+      # revision NCS ships, so sample configs stay valid in both).
+      revision: v4.2.2
+      url: https://github.com/zephyrproject-rtos/zephyr
+      west-commands: scripts/west-commands.yml
+      # native_sim-only workspace: mbedTLS for the PSA Crypto API and
+      # picolibc for the embedded libc the sample selects.
+      import:
+        name-allowlist:
+          - mbedtls
+          - picolibc
+    - name: monocypher
+      # X25519 and RFC 8032 Ed25519. Not a Zephyr module: ret-client's
+      # port/zephyr/CMakeLists.txt compiles it from this path.
+      url: https://github.com/LoupVaillant/Monocypher
+      revision: 4.0.2
+      path: modules/crypto/monocypher
+
+  self:
+    path: ret-client

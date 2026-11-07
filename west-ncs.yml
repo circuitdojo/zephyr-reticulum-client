@@ -1,0 +1,17 @@
+manifest:
+  projects:
+    - name: nrf
+      revision: v3.2.1
+      url: https://github.com/nrfconnect/sdk-nrf
+      import: true
+    - name: nfed
+      url: https://github.com/circuitdojo/nrf9160-feather-examples-and-drivers
+      revision: v3.2.x
+      path: nfed
+    - name: monocypher
+      url: https://github.com/LoupVaillant/Monocypher
+      revision: 4.0.2
+      path: modules/crypto/monocypher
+
+  self:
+    path: ret-client

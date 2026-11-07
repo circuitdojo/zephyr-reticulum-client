@@ -1,0 +1,4 @@
+name: ret-client
+build:
+  cmake: port/zephyr
+  kconfig: port/zephyr/Kconfig

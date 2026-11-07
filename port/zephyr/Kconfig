@@ -1,0 +1,89 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+config RET_CORE
+	bool "Reticulum protocol core"
+	select PSA_CRYPTO
+	imply PSA_WANT_ALG_SHA_256
+	imply PSA_WANT_ALG_HMAC
+	imply PSA_WANT_KEY_TYPE_HMAC
+	imply PSA_WANT_KEY_TYPE_AES
+	imply PSA_WANT_ALG_CBC_NO_PADDING
+	select ENTROPY_GENERATOR
+	help
+	  Reticulum wire protocol without networking: HDLC framing, packet
+	  codec, identity/destination hashing, announce validation,
+	  encryption to SINGLE destinations and proof validation. Curve
+	  operations come from Monocypher; hashing, HMAC and AES come from
+	  the PSA Crypto API. Selected by RET_CLIENT; unit tests enable it
+	  on its own.
+
+menuconfig RET_CLIENT
+	bool "Reticulum client"
+	select RET_CORE
+	select NET_SOCKETS
+	select EVENTFD
+	help
+	  Reticulum client that connects to an rnsd TCPServerInterface,
+	  learns destinations from announces, sends encrypted DATA packets
+	  and validates delivery proofs.
+
+if RET_CORE
+
+config RET_MAX_KNOWN_DESTINATIONS
+	int "Known destinations table size"
+	default 8
+	help
+	  Destinations learned from validated announces. The least
+	  recently seen entry is evicted when the table is full.
+
+config RET_MAX_PENDING_RECEIPTS
+	int "Pending delivery receipts"
+	default 8
+
+config RET_RECEIPT_TIMEOUT_MS
+	int "Delivery proof timeout (ms)"
+	default 30000
+
+module = RET
+module-str = Reticulum
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # RET_CORE
+
+if RET_CLIENT
+
+configdefault ZVFS_EVENTFD_MAX
+	int
+	default 3
+
+config RET_SERVER_HOST
+	string "rnsd host"
+	default "127.0.0.1"
+	help
+	  Host (IP literal or hostname) of the rnsd TCPServerInterface.
+
+config RET_SERVER_PORT
+	int "rnsd TCP port"
+	default 4242
+
+config RET_THREAD_STACK_SIZE
+	int "Client thread stack size"
+	default 6144
+
+config RET_THREAD_PRIORITY
+	int "Client thread priority"
+	default 7
+
+config RET_TX_QUEUE_DEPTH
+	int "Outbound send queue depth"
+	default 4
+
+config RET_RECONNECT_BACKOFF_MAX_S
+	int "Maximum reconnect backoff (s)"
+	default 60
+	help
+	  Reconnect delay doubles from 1 s after each failed attempt, up
+	  to this limit.
+
+endif # RET_CLIENT
