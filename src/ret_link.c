@@ -147,10 +147,11 @@ int ret_link_proof_validate(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 	return 0;
 }
 
-static int build(const uint8_t link_id[RET_TRUNC_HASH_LEN], const uint8_t *key, uint8_t context,
-		 const uint8_t *pt, size_t len, const uint8_t *iv, uint8_t *out, size_t cap)
+static int build(const uint8_t link_id[RET_TRUNC_HASH_LEN], uint8_t packet_type, const uint8_t *key,
+		 uint8_t context, const uint8_t *pt, size_t len, const uint8_t *iv, uint8_t *out,
+		 size_t cap)
 {
-	/* Header (H1, BROADCAST, LINK, DATA, hops 0, link_id, context), then
+	/* Header (H1, BROADCAST, LINK, type, hops 0, link_id, context), then
 	 * the body written straight into @p out: no second MTU-sized buffer
 	 * on the client thread's stack.
 	 */
@@ -162,7 +163,7 @@ static int build(const uint8_t link_id[RET_TRUNC_HASH_LEN], const uint8_t *key, 
 		return -EMSGSIZE;
 	}
 	out[0] = (uint8_t)((RET_HEADER_1 << 6) | (RET_TRANSPORT_BROADCAST << 4) |
-			   (RET_DEST_LINK << 2) | RET_PKT_DATA);
+			   (RET_DEST_LINK << 2) | packet_type);
 	out[1] = 0;
 	memcpy(&out[2], link_id, RET_TRUNC_HASH_LEN);
 	out[2 + RET_TRUNC_HASH_LEN] = context;
@@ -187,7 +188,7 @@ int ret_link_packet_build(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 			  const uint8_t key[RET_TOKEN_KEY_LEN], uint8_t context, const uint8_t *pt,
 			  size_t len, uint8_t *out, size_t cap)
 {
-	return build(link_id, key, context, pt, len, NULL, out, cap);
+	return build(link_id, RET_PKT_DATA, key, context, pt, len, NULL, out, cap);
 }
 
 int ret_link_packet_build_det(const uint8_t link_id[RET_TRUNC_HASH_LEN],
@@ -195,7 +196,16 @@ int ret_link_packet_build_det(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 			      const uint8_t *pt, size_t len, const uint8_t iv[RET_AES_BLOCK_LEN],
 			      uint8_t *out, size_t cap)
 {
-	return build(link_id, key, context, pt, len, iv, out, cap);
+	return build(link_id, RET_PKT_DATA, key, context, pt, len, iv, out, cap);
+}
+
+int ret_link_resource_proof_build(const uint8_t link_id[RET_TRUNC_HASH_LEN],
+				  const uint8_t proof[RET_LINK_RESOURCE_PROOF_LEN], uint8_t *out,
+				  size_t cap)
+{
+	/* Resource proofs travel unencrypted (Packet.pack, RESOURCE_PRF). */
+	return build(link_id, RET_PKT_PROOF, NULL, RET_CTX_RESOURCE_PRF, proof,
+		     RET_LINK_RESOURCE_PROOF_LEN, NULL, out, cap);
 }
 
 int ret_link_rtt_plain(double rtt_s, uint8_t *out, size_t cap)

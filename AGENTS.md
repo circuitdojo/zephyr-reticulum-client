@@ -137,9 +137,14 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
 - `src/ret_link.c`: link packet formats (request, link_id, proof validation and key, link
   packets, request/response/identify/RTT payloads). Pure functions, tested against RNS-built
   vectors in `tests/lib/ret_link`.
+- `src/ret_resource.c`: receiving Resources (responses larger than a packet): advertisement parsing,
+  windowed part requests, hashmap updates, assembly against the resource hash, and the proof.
+  Pure functions, tested in `tests/lib/ret_resource`. Compressed, split and oversized resources
+  are refused, not decompressed.
 - `src/ret_client_link.c`: the link driver (one link, initiator side): path wait, handshake, RTT,
-  requests with timeouts, identify, keepalive, stale and close. It runs on the client thread;
-  shared state is in `src/ret_client_internal.h`.
+  requests with timeouts, response resources (one at a time, `CONFIG_RET_RESOURCE_MAX_SIZE` each
+  for the stream and plaintext buffers), identify, keepalive, stale and close. It runs on the
+  client thread; shared state is in `src/ret_client_internal.h`.
 - `src/ret_client.c`: a single static instance and one thread polling the socket plus an
   eventfd. Sends are queued with `k_msgq`. All protocol state is confined to that thread.
   - With `dest_name` configured the client has its own destination (address): an identity
@@ -249,11 +254,16 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   - `--no-prove` exercises receipt timeouts.
   - `--stop-proving-after N` simulates a link that dies after N proofs.
   - `--reply` answers every message with `echo: ...` to the client's `retclient.node`.
-  - It always serves an `/echo` link request handler (`pong:<data>:<identity|anonymous>`) and logs
-    link established, identified and closed.
+  - It always serves link request handlers and logs link established, identified and closed:
+    - `/echo` answers `pong:<data>:<identity|anonymous>`.
+    - `/big` answers a 4000-byte (or `<data>`-byte) payload as an uncompressed Resource, and logs
+      `RESOURCE PROVED`.
+    - `/bigz` answers the same with compression allowed, which ret-client must refuse; it logs
+      `RESOURCE REFUSED`.
   - `--print-hash` prints the destination hash for `CONFIG_RET_SAMPLE_DEST_HASH`.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
-  (a link: open, identify, request, 15 s idle on keepalives, request, close; then bidirectional
+  (a link: open, identify, request, a resource response and a refused compressed one, 15 s idle on
+  keepalives, request, close; then bidirectional
   replies to the client's own destination, proved both ways),
   plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
   `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash

@@ -123,8 +123,41 @@ regenerate the test vectors.
 - **Request:** msgpack `[timestamp float64, SHA256(path)[:16] bin, data]`.
   - `request_id` is the truncated hash of the encrypted request packet.
   - Response is `[request_id bin16, response]`.
-  - Anything larger than the link MDU (431) travels as a Resource; see P3.
+  - A response larger than the link MDU (431) travels as a Resource; see below.
 - **Identify:** `identity pub (64) | Ed25519 sig(link_id | pub)`.
 - **Close:** LINKCLOSE carrying the encrypted link_id.
 - **Keepalive:** the initiator sends at `clamp(rtt * 360 / 1.75, 5, 360)` s. The responder only answers, and marks the link stale after 2× that without traffic. rnsd drops idle link-table entries after 900 s.
 
+## Resources (receiving side; RNS/Resource.py)
+
+ret-client receives Resources only as responses to its own requests (advertisement flag `p`, with `q` = request_id). Any other advertisement is refused.
+
+- **Stream:** `Token(random4 | data)` under the link key. It is cut into parts of SDU 464 (MTU 500 − 35 header − 1 IFAC). Parts are sent as link DATA, context RESOURCE `0x01`, without another link token.
+- **Hashes:**
+  - `r` is a random 4 bytes.
+  - The resource hash is `h = SHA256(data | r)`, over the plaintext, after the random prefix is removed.
+  - The map hash of each part is `SHA256(part | r)[:4]`.
+- **Advertisement:** RESOURCE_ADV `0x02`, encrypted. It is a msgpack map:
+  - `t` transfer size (stream length), `d` data size, `n` parts
+  - `h`, `r`, `o` original hash
+  - `i` segment index, `l` total segments (1 and 1 unless split)
+  - `q` request_id or nil
+  - `f` flags: `e`=1 encrypted, `c`=2 compressed, `s`=4 split, `u`=8 request, `p`=16 response, `x`=32 metadata
+  - `m` the first 74 map hashes (concatenated)
+- **Request:** RESOURCE_REQ `0x03`, encrypted.
+  - `00 | h | map hashes` for the next missing parts across the window. The window starts at 4, grows by one per completed window up to 10, and shrinks on timeout down to 2.
+  - When the window runs past the known hashmap: `FF | last known map hash | h | map hashes`. The sender answers with a hashmap update.
+- **Hashmap update:** RESOURCE_HMU `0x04`, encrypted: `h | msgpack [segment, bin(74 map hashes)]`.
+- **Completion:**
+  1. Decrypt the whole stream: verify the HMAC, unpad, drop `random4`.
+  2. Check `SHA256(data | r) == h`.
+  3. Send RESOURCE_PRF `0x05` as an unencrypted PROOF packet on the link: `h | SHA256(data | h)`.
+  4. The data is the packed response, `[request_id, response]`.
+- **Cancel:** RESOURCE_ICL `0x06` (sender) and RESOURCE_RCL `0x07` (receiver) are encrypted and carry `h`. RNS's receiver sends RCL when it gives up, and so does ret-client.
+- **Timeouts (receiver):** wait `rtt × 4 + grace` for parts (plus 0.5 s per retry used), then re-request. Give up and refuse after 16 retries without progress. The request's own deadline is suspended while its resource arrives.
+- **Refused with RCL:**
+  - compressed (`c`): bz2 decompression needs megabytes of RAM
+  - split (`l` > 1), metadata, or unencrypted
+  - larger than `CONFIG_RET_RESOURCE_MAX_SIZE` (stream bytes)
+
+  The request then fails with `-ENOTSUP` or `-EFBIG`, never silently. RNS compresses only when that makes the data smaller, and encrypted payloads such as LXMF messages don't compress, so the propagation sync flow should not meet compressed resources.

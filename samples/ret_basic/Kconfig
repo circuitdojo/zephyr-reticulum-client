@@ -44,7 +44,9 @@ config RET_SAMPLE_LINK_TEST
 	help
 	  Once the destination is known: open a link to it, identify (when
 	  the sample has its own destination), request "/echo" with "ping",
-	  check the response, and close the link. Success then also
+	  check the response, request "/big" (a 4000-byte response, received
+	  as a resource) and "/bigz" (compressed, which must be refused),
+	  and close the link. Success then also
 	  requires the link test to pass. For tools/rns_peer/peer.py.
 
 config RET_SAMPLE_SEND_INTERVAL_S

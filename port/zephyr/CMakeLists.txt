@@ -62,6 +62,7 @@ zephyr_library_sources(
     ../../src/ret_receipt.c
     ../../src/ret_link.c
     ../../src/ret_mp.c
+    ../../src/ret_resource.c
     ${RET_MONOCYPHER_DIR}/src/monocypher.c
     ${RET_MONOCYPHER_DIR}/src/optional/monocypher-ed25519.c
     ${RET_MPACK_DIR}/src/mpack/mpack-common.c

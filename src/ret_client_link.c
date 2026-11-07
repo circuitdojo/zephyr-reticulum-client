@@ -8,6 +8,9 @@
  *   NONE -> WAIT_PATH (no current path: path request) -> PENDING
  *   (LINKREQUEST sent) -> ACTIVE (proof valid, RTT sent) <-> STALE
  *   -> NONE (closed, failed, or the connection dropped)
+ *
+ * A response too large for one packet arrives as a Resource
+ * (ret_resource.c): at most one at a time, into the client's buffers.
  */
 
 #include <errno.h>
@@ -29,6 +32,39 @@ LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 #define STALE_GRACE_MS       5000
 /* Link.request: rtt * 6 + 10 * 1.125 s. */
 #define REQUEST_TIMEOUT_EXTRA_MS 11250
+/* Resource.py receiver watchdog: retries, and the wait for the sender
+ * (rtt * PART_TIMEOUT_FACTOR + RETRY_GRACE_TIME + PER_RETRY_DELAY per retry
+ * used). The extra second covers a window of parts in flight, which RNS
+ * estimates from the measured rate.
+ */
+#define RESOURCE_MAX_RETRIES     16
+#define RESOURCE_TIMEOUT_FACTOR  4
+#define RESOURCE_GRACE_MS        1250
+#define RESOURCE_PER_RETRY_MS    500
+
+static void request_done(struct link_request *q, int err, const uint8_t *resp, size_t len)
+{
+	ret_link_response_cb_t cb = q->cb;
+	void *user = q->user;
+
+	q->used = false;
+	q->receiving = false;
+	if (cb != NULL) {
+		cb(err, resp, len, user);
+	}
+}
+
+/* Forget the incoming resource; returns the request it was answering. */
+static struct link_request *resource_end(struct ret_client *c)
+{
+	struct link_resource *res = &c->res;
+	struct link_request *q = res->req;
+
+	res->active = false;
+	res->req = NULL;
+	ret_wipe(res->plain, sizeof(res->plain));
+	return q;
+}
 
 static void finish(struct ret_client *c, enum ret_link_event ev, int reason)
 {
@@ -36,14 +72,12 @@ static void finish(struct ret_client *c, enum ret_link_event ev, int reason)
 	ret_link_cb_t cb = l->cb;
 	void *user = l->user;
 
+	if (c->res.active) {
+		(void)resource_end(c);
+	}
 	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		struct link_request *q = &l->req[i];
-
-		if (q->used) {
-			q->used = false;
-			if (q->cb != NULL) {
-				q->cb(-ECONNRESET, NULL, 0, q->user);
-			}
+		if (l->req[i].used) {
+			request_done(&l->req[i], -ECONNRESET, NULL, 0);
 		}
 	}
 	ret_wipe(l->key, sizeof(l->key));
@@ -55,13 +89,10 @@ static void finish(struct ret_client *c, enum ret_link_event ev, int reason)
 	}
 }
 
-/* Encrypt (with the link key) and send one link packet. */
-static int send_link(struct ret_client *c, uint8_t context, const uint8_t *pt, size_t len,
-		     bool encrypt, uint8_t hash_out[RET_HASH_LEN])
+/* Send the link packet of length @p n (or error) built in c->tx_raw. */
+static int send_built(struct ret_client *c, int n, uint8_t hash_out[RET_HASH_LEN])
 {
 	struct link *l = &c->link;
-	int n = ret_link_packet_build(l->id, encrypt ? l->key : NULL, context, pt, len, c->tx_raw,
-				      sizeof(c->tx_raw));
 	int err;
 
 	if (n < 0) {
@@ -80,6 +111,18 @@ static int send_link(struct ret_client *c, uint8_t context, const uint8_t *pt, s
 		l->last_tx_ms = k_uptime_get();
 	}
 	return err;
+}
+
+/* Encrypt (with the link key) and send one link packet. */
+static int send_link(struct ret_client *c, uint8_t context, const uint8_t *pt, size_t len,
+		     bool encrypt, uint8_t hash_out[RET_HASH_LEN])
+{
+	struct link *l = &c->link;
+
+	return send_built(c,
+			  ret_link_packet_build(l->id, encrypt ? l->key : NULL, context, pt, len,
+						c->tx_raw, sizeof(c->tx_raw)),
+			  hash_out);
 }
 
 static void send_link_request(struct ret_client *c, const struct ret_destination *d)
@@ -240,15 +283,206 @@ static void on_response(struct ret_client *c, const uint8_t *plain, size_t len)
 	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
 		struct link_request *q = &l->req[i];
 
-		if (q->used && memcmp(q->id, id, RET_TRUNC_HASH_LEN) == 0) {
-			q->used = false;
-			if (q->cb != NULL) {
-				q->cb(0, resp, resp_len, q->user);
-			}
+		if (q->used && !q->receiving && memcmp(q->id, id, RET_TRUNC_HASH_LEN) == 0) {
+			request_done(q, 0, resp, resp_len);
 			return;
 		}
 	}
 	LOG_DBG("response for an unknown request");
+}
+
+/* --- Resources ------------------------------------------------------- */
+
+/* Refuse a resource (RESOURCE_RCL carries its hash). */
+static void send_rcl(struct ret_client *c, const uint8_t h[RET_SHA256_LEN])
+{
+	(void)send_link(c, RET_CTX_RESOURCE_RCL, h, RET_SHA256_LEN, true, NULL);
+}
+
+static void resource_touch(struct ret_client *c)
+{
+	struct link_resource *res = &c->res;
+
+	res->deadline_ms = k_uptime_get() +
+			   (int64_t)c->link.rtt_ms * RESOURCE_TIMEOUT_FACTOR + RESOURCE_GRACE_MS +
+			   (int64_t)(RESOURCE_MAX_RETRIES - res->retries) * RESOURCE_PER_RETRY_MS;
+}
+
+static void resource_request(struct ret_client *c)
+{
+	struct link_resource *res = &c->res;
+	uint8_t buf[1 + RET_RESOURCE_MAPHASH_LEN + RET_SHA256_LEN +
+		    RET_RESOURCE_WINDOW_MAX * RET_RESOURCE_MAPHASH_LEN];
+	int n = ret_resource_rx_request(&res->rx, buf, sizeof(buf));
+
+	if (n > 0) {
+		(void)send_link(c, RET_CTX_RESOURCE_REQ, buf, (size_t)n, true, NULL);
+	}
+	resource_touch(c);
+}
+
+static void resource_fail(struct ret_client *c, int err, bool refuse)
+{
+	if (refuse) {
+		send_rcl(c, c->res.rx.h);
+	}
+	request_done(resource_end(c), err, NULL, 0);
+}
+
+static void on_resource_adv(struct ret_client *c, const uint8_t *plain, size_t len)
+{
+	struct link *l = &c->link;
+	struct link_resource *res = &c->res;
+	struct link_request *q = NULL;
+	struct ret_resource_adv adv;
+	int err;
+
+	if (ret_resource_adv_parse(plain, len, &adv) != 0) {
+		LOG_WRN("malformed resource advertisement");
+		return;
+	}
+	if (res->active && memcmp(res->rx.h, adv.h, RET_SHA256_LEN) == 0) {
+		/* Advertised again: the sender never saw our request. */
+		resource_request(c);
+		return;
+	}
+	if (adv.q != NULL) {
+		for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
+			if (l->req[i].used && !l->req[i].receiving &&
+			    memcmp(l->req[i].id, adv.q, RET_TRUNC_HASH_LEN) == 0) {
+				q = &l->req[i];
+				break;
+			}
+		}
+	}
+	if (q == NULL) {
+		LOG_WRN("refusing unsolicited resource");
+		send_rcl(c, adv.h);
+		return;
+	}
+	if (res->active || !(adv.f & RET_RESOURCE_F_RESPONSE)) {
+		/* For a pending request, but not receivable: fail it now rather
+		 * than leave it to its deadline.
+		 */
+		LOG_WRN("refusing response resource: %s",
+			res->active ? "another one is arriving" : "not marked as a response");
+		send_rcl(c, adv.h);
+		request_done(q, res->active ? -EBUSY : -EBADMSG, NULL, 0);
+		return;
+	}
+
+	err = ret_resource_rx_init(&res->rx, &adv, res->stream, sizeof(res->stream));
+	if (err) {
+		LOG_WRN("refusing response resource (%u bytes, flags 0x%02x): %d", (uint32_t)adv.t,
+			(uint32_t)adv.f, err);
+		send_rcl(c, adv.h);
+		request_done(q, err, NULL, 0);
+		return;
+	}
+	res->active = true;
+	res->req = q;
+	res->retries = RESOURCE_MAX_RETRIES;
+	q->receiving = true;
+	LOG_INF("receiving response: %u bytes in %u parts", res->rx.t, res->rx.n);
+	resource_request(c);
+}
+
+static void resource_complete(struct ret_client *c)
+{
+	struct link *l = &c->link;
+	struct link_resource *res = &c->res;
+	struct link_request *q;
+	uint8_t proof[RET_RESOURCE_PROOF_LEN];
+	uint8_t id[RET_TRUNC_HASH_LEN];
+	const uint8_t *resp;
+	size_t resp_len;
+	int n;
+	int err;
+
+	n = ret_resource_rx_assemble(&res->rx, l->key, res->plain, sizeof(res->plain));
+	if (n < 0) {
+		LOG_WRN("response resource corrupt: %d", n);
+		resource_fail(c, n, true); /* RCL: the sender stops waiting for a proof */
+		return;
+	}
+
+	/* Prove it whatever it holds: the sender is done either way. */
+	err = ret_resource_proof(&res->rx, res->plain, (size_t)n, proof);
+	if (!err) {
+		err = send_built(c,
+				 ret_link_resource_proof_build(l->id, proof, c->tx_raw,
+							       sizeof(c->tx_raw)),
+				 NULL);
+	}
+	if (err) {
+		LOG_WRN("resource proof not sent: %d", err);
+	}
+
+	q = res->req;
+	err = ret_link_response_parse(res->plain, (size_t)n, id, &resp, &resp_len);
+	if (err || memcmp(id, q->id, RET_TRUNC_HASH_LEN) != 0) {
+		LOG_WRN("malformed response resource");
+		request_done(resource_end(c), -EBADMSG, NULL, 0);
+		return;
+	}
+	LOG_INF("response resource complete: %u bytes", (uint32_t)n);
+	/* resp points into res->plain: deliver, then wipe. */
+	request_done(q, 0, resp, resp_len);
+	(void)resource_end(c);
+}
+
+static void on_resource_part(struct ret_client *c, const uint8_t *data, size_t len)
+{
+	struct link_resource *res = &c->res;
+
+	if (!res->active) {
+		return;
+	}
+	switch (ret_resource_rx_part(&res->rx, data, len)) {
+	case RET_RESOURCE_PART_IGNORED:
+		return;
+	case RET_RESOURCE_PART_ACCEPTED:
+		res->retries = RESOURCE_MAX_RETRIES;
+		resource_touch(c);
+		return;
+	case RET_RESOURCE_PART_WINDOW:
+		res->retries = RESOURCE_MAX_RETRIES;
+		if (res->rx.waiting_hmu) {
+			resource_touch(c); /* the hashmap update triggers the next request */
+		} else {
+			resource_request(c);
+		}
+		return;
+	case RET_RESOURCE_PART_COMPLETE:
+		resource_complete(c);
+		return;
+	}
+}
+
+static void on_resource_hmu(struct ret_client *c, const uint8_t *plain, size_t len)
+{
+	struct link_resource *res = &c->res;
+
+	if (!res->active || len < RET_SHA256_LEN ||
+	    memcmp(plain, res->rx.h, RET_SHA256_LEN) != 0) {
+		return;
+	}
+	if (ret_resource_rx_hmu(&res->rx, plain, len) != 0) {
+		LOG_WRN("bad hashmap update");
+		return;
+	}
+	res->retries = RESOURCE_MAX_RETRIES;
+	resource_request(c);
+}
+
+static void on_resource_icl(struct ret_client *c, const uint8_t *plain, size_t len)
+{
+	struct link_resource *res = &c->res;
+
+	if (res->active && len == RET_SHA256_LEN && memcmp(plain, res->rx.h, RET_SHA256_LEN) == 0) {
+		LOG_WRN("sender cancelled the response resource");
+		resource_fail(c, -ECANCELED, false);
+	}
 }
 
 void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt)
@@ -276,13 +510,17 @@ void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt)
 	switch (pkt->context) {
 	case RET_CTX_KEEPALIVE:
 		return; /* unencrypted; any inbound already refreshed last_rx */
+	case RET_CTX_RESOURCE:
+		/* A slice of the already encrypted stream: no link token. */
+		on_resource_part(c, pkt->data, pkt->data_len);
+		return;
 	case RET_CTX_RESPONSE:
 	case RET_CTX_LINKCLOSE:
+	case RET_CTX_RESOURCE_ADV:
+	case RET_CTX_RESOURCE_HMU:
+	case RET_CTX_RESOURCE_ICL:
 		break;
 	default:
-		/* Resources (large responses) come with P3; until then such a
-		 * request simply times out.
-		 */
 		LOG_DBG("unhandled link context 0x%02x", pkt->context);
 		return;
 	}
@@ -293,11 +531,25 @@ void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt)
 		return;
 	}
 
-	if (pkt->context == RET_CTX_RESPONSE) {
+	switch (pkt->context) {
+	case RET_CTX_RESPONSE:
 		on_response(c, c->rx_plain, (size_t)n);
-	} else if (n == RET_TRUNC_HASH_LEN && memcmp(c->rx_plain, l->id, RET_TRUNC_HASH_LEN) == 0) {
-		LOG_INF("link closed by peer");
-		finish(c, RET_LINK_EVT_CLOSED, 0);
+		break;
+	case RET_CTX_RESOURCE_ADV:
+		on_resource_adv(c, c->rx_plain, (size_t)n);
+		break;
+	case RET_CTX_RESOURCE_HMU:
+		on_resource_hmu(c, c->rx_plain, (size_t)n);
+		break;
+	case RET_CTX_RESOURCE_ICL:
+		on_resource_icl(c, c->rx_plain, (size_t)n);
+		break;
+	default: /* LINKCLOSE */
+		if (n == RET_TRUNC_HASH_LEN && memcmp(c->rx_plain, l->id, RET_TRUNC_HASH_LEN) == 0) {
+			LOG_INF("link closed by peer");
+			finish(c, RET_LINK_EVT_CLOSED, 0);
+		}
+		break;
 	}
 	ret_wipe(c->rx_plain, (size_t)n);
 }
@@ -429,11 +681,19 @@ void ret_link_drv_service(struct ret_client *c)
 	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
 		struct link_request *q = &l->req[i];
 
-		if (q->used && now >= q->deadline_ms) {
-			q->used = false;
-			if (q->cb != NULL) {
-				q->cb(-ETIMEDOUT, NULL, 0, q->user);
-			}
+		if (q->used && !q->receiving && now >= q->deadline_ms) {
+			request_done(q, -ETIMEDOUT, NULL, 0);
+		}
+	}
+
+	if (c->res.active && now >= c->res.deadline_ms) {
+		if (c->res.retries == 0) {
+			LOG_WRN("response resource timed out");
+			resource_fail(c, -ETIMEDOUT, true);
+		} else {
+			c->res.retries--;
+			ret_resource_rx_timeout(&c->res.rx);
+			resource_request(c);
 		}
 	}
 
@@ -478,9 +738,12 @@ int64_t ret_link_drv_next_event(const struct ret_client *c)
 		break;
 	}
 	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		if (l->req[i].used) {
+		if (l->req[i].used && !l->req[i].receiving) {
 			next = MIN(next, l->req[i].deadline_ms);
 		}
+	}
+	if (c->res.active) {
+		next = MIN(next, c->res.deadline_ms);
 	}
 	next = MIN(next, keepalive_due(l));
 	if (l->state == LINK_ACTIVE) {

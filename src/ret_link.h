@@ -92,6 +92,19 @@ int ret_link_packet_build(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 			  const uint8_t key[RET_TOKEN_KEY_LEN], uint8_t context, const uint8_t *pt,
 			  size_t len, uint8_t *out, size_t cap);
 
+/** A resource proof: h | SHA256(data | h). */
+#define RET_LINK_RESOURCE_PROOF_LEN (2 * RET_SHA256_LEN)
+
+/**
+ * Build the PROOF packet (context RESOURCE_PRF, unencrypted) that confirms a
+ * received resource.
+ *
+ * @return packet length, or a negative errno
+ */
+int ret_link_resource_proof_build(const uint8_t link_id[RET_TRUNC_HASH_LEN],
+				  const uint8_t proof[RET_LINK_RESOURCE_PROOF_LEN], uint8_t *out,
+				  size_t cap);
+
 /** As ret_link_packet_build() with a caller-supplied IV (tests). */
 int ret_link_packet_build_det(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 			      const uint8_t key[RET_TOKEN_KEY_LEN], uint8_t context,

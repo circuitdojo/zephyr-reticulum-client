@@ -4,6 +4,15 @@
 
 ### Added
 
+- Resources, receiving side: link request responses larger than one packet arrive as a Resource,
+  are reassembled into `CONFIG_RET_RESOURCE_MAX_SIZE` (default 8 KB) of buffers, verified and
+  proved.
+  - Windowed part requests, with hashmap updates for large transfers, timeouts and retries.
+  - Compressed, split or oversized resources are refused with RESOURCE_RCL, and the request fails
+    with `-ENOTSUP`/`-EFBIG`.
+  - Tested against RNS-built vectors (including a 78-part transfer), and end to end with a
+    4000-byte response from a real RNS destination plus a compressed one that must be refused.
+
 - Links, initiator side: `ret_client_link_open/request/identify/close`.
   - Handshake with proof validation and the RTT packet.
   - Single-packet requests and responses with timeouts.
