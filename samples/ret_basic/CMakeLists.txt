@@ -9,3 +9,9 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(ret_basic)
 
 target_sources(app PRIVATE src/main.c)
+
+if(CONFIG_NRF_MODEM_LIB)
+    target_sources(app PRIVATE src/network_modem.c)
+else()
+    target_sources(app PRIVATE src/network_sim.c)
+endif()

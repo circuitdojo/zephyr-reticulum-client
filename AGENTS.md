@@ -7,8 +7,12 @@ client. It connects to a Python `rnsd` TCPServerInterface and supports:
 - sending encrypted DATA packets to SINGLE destinations
 - validating delivery proofs
 
-Targets: `native_sim` (the first target; NSOS host sockets, PSA Crypto from mbedTLS) and later
-`circuitdojo_feather_nrf9151_ns`. It is structured like `lion-client`.
+Targets:
+- `native_sim`: NSOS host sockets, PSA Crypto from mbedTLS.
+- `circuitdojo_feather_nrf9151/nrf9151/ns`: modem-offloaded sockets, PSA Crypto from TF-M. See
+  "Hardware (nRF9151 Feather)" below.
+
+It is structured like `lion-client`.
 
 Only commit code related to the changes at hand. Stage files by name. Never
 `git add -A` / `git add .`.
@@ -19,12 +23,14 @@ Read it before touching packet, crypto or announce code.
 ## Build
 
 Everything builds from the **workspace root** (`nrf9160-feather-examples-and-drivers/`),
-not from inside this repo. That workspace's manifest is this repo's
-`west-vanilla.yml` (vanilla Zephyr v4.2.2, mbedTLS, picolibc, Monocypher), so
-`west update` fetches everything. `west-ncs.yml` is the NCS workspace used for
-the nRF9151 target. Code must build in both: they differ in Kconfig (for
-example, only NCS has `PSA_CRYPTO`), and NCS defaults to sysbuild, so builds
-pass `--no-sysbuild` to keep output paths identical.
+not from inside this repo. Its manifest is one of this repo's:
+- `west-vanilla.yml`: vanilla Zephyr v4.2.2, mbedTLS, picolibc and Monocypher. native_sim only.
+- `west-ncs.yml`: NCS v3.2.1, needed for the nRF9151.
+
+Switch with `west config manifest.file <file>` and `west update`. Code must build in both: they
+differ in Kconfig (for example, only NCS has `PSA_CRYPTO`). native_sim builds pass
+`--no-sysbuild` to keep output paths identical. Hardware builds use sysbuild, which NCS
+requires.
 
 Toolchain environment:
 
@@ -46,6 +52,67 @@ west build -b native_sim ret-client/samples/ret_basic -d build/ret_basic -p --no
 # End to end against an isolated rnsd + Python test peer (goals 1-4)
 ret-client/tools/run_e2e.sh
 ```
+
+## Hardware (nRF9151 Feather)
+
+Needs the NCS workspace (`west-ncs.yml`).
+
+```bash
+# Per-device settings (server address etc.): copy the template; env/* is gitignored.
+cp ret-client/samples/ret_basic/env/example.conf ret-client/samples/ret_basic/env/<name>.conf
+west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_basic \
+    -d build/ret_nrf9151 -p -- -DEXTRA_CONF_FILE=env/<name>.conf
+
+# Flash: always through scripts/flash.py, never `west flash`
+uv run ret-client/scripts/flash.py build/ret_nrf9151
+
+# flash.py's tests (ported from Zephyr Tools' uicr/flash-hex suites)
+uv run --with pytest pytest ret-client/scripts
+```
+
+The 9151 build is not in twister: nfed's board YAML still carries the pre-HWMv2 identifier
+(`circuitdojo_feather_nrf9151_ns`), and twister does not pick the board up. Build it with
+`west build` as above. That is also the plan for its CI job.
+
+**Flashing** must follow the Zephyr Tools load sequence (`~/Git/zephyr-tools`,
+`src/commands/flash.ts`). `scripts/flash.py` reproduces it:
+1. Program `build/<dir>/merged.hex`: TF-M plus the app, chosen as Zephyr Tools does for a
+   Partition Manager build. `west flash` programs only the app and leaves whatever TF-M was on
+   the chip, and every PSA call then fails.
+2. Run `recovery --unlock-only`, the nRF91 recovery tool from Zephyr Tools setup.
+3. Check UICR. If the device already has the hex's UICR words, strip them from the download.
+   Otherwise a full chip erase is required (`--erase` or a typed confirmation), and it wipes
+   internal flash.
+4. Run `probe-rs download`, then `probe-rs reset`.
+
+**Board config** is in `samples/ret_basic/boards/circuitdojo_feather_nrf9151_ns.conf`.
+- **TF-M:** must be `TFM_PROFILE_TYPE_NOT_SET`. NCS's minimal profile builds the secure image
+  with random generation only and ignores `PSA_WANT_*`, so SHA-256, HMAC and AES calls fail
+  with `PSA_ERROR_NOT_SUPPORTED` (-134). `port/zephyr/CMakeLists.txt` refuses to build with it.
+  To check what TF-M really contains, look at the symbols in `ret_basic/tfm/bin/tfm_s.elf`,
+  not the non-secure API headers.
+- **Settings:** stored in `/lfs/ret-settings` on LittleFS on the external W25Q128 NOR, as in
+  lion_sleep. Internal flash holds only firmware, so a re-layout, reflash or UICR erase keeps
+  the board's identity (its address). Deleting that file gives the board a new address.
+- **External flash size:** nfed's devicetree gives the W25Q128 `size` in bits as 2 MiB, so
+  `CONFIG_SPI_NOR_SFDP_RUNTIME=y`, which reads the real 16 MiB from the chip, is required for
+  the 16 MiB LittleFS.
+- **Logging:** `CONFIG_LOG_MODE_IMMEDIATE=y`. Deferred logging drops the thread analyzer's first
+  lines and can lose a fault report before a reset.
+- **PMIC:** the board's startup code configures the nPM1300, so `MFD_NPM13XX` must stay
+  enabled.
+- **Stack:** the thread analyzer prints stack use every 60 s.
+
+**Test setup:** an rnsd reachable over LTE (`tools/rnsd-hw`: 0.0.0.0:4242, behind a router port
+forward) and the peer:
+
+```bash
+uv run --project ret-client/tools/rns_peer rnsd --config ret-client/tools/rnsd-hw -vv
+uv run --project ret-client/tools/rns_peer ret-client/tools/rns_peer/peer.py \
+    --config ret-client/tools/rnsd-hw --reply --announce-interval 30
+```
+
+The console is the Feather's onboard probe UART (`/dev/ttyACM0`, 115200).
 
 The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7`
 (`uv run --project ret-client/tools/rns_peer ...`). Always use `uv`, never bare pip.
@@ -111,8 +178,10 @@ Kconfig notes carried over from lion-client:
      must build without warnings.
    - `ret-client/tools/run_e2e.sh` when anything on the wire path changed: framing, packet,
      crypto, announce, receipt or client.
-   - `uv run --group dev ruff check` and `ruff format --check` in `tools/rns_peer` when
-     Python changed.
+   - When Python changed: `uv run --group dev ruff check` and `ruff format --check` in
+     `tools/rns_peer`, plus `uv run --with pytest pytest ret-client/scripts`.
+   - When the hardware path changed: the nRF9151 build in the NCS workspace, and a board run
+     (flash with `scripts/flash.py`).
 5. **Independent review.** Before committing a finished milestone or fix, run a review in a
    fresh context: a review subagent, or `/code-review`, on the branch diff, with the intent
    of the change.
@@ -169,8 +238,9 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   - `--print-hash` prints the destination hash for `CONFIG_RET_SAMPLE_DEST_HASH`.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
   (bidirectional: replies to the client's own destination, proved both ways),
-  plus `late` (path request), `stall` (receipt watchdog) and `restart` (rnsd restarted
-  mid-run) using a known-hash build. Each known-hash scenario starts a fresh rnsd, because
+  plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
+  `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash
+  build. Each known-hash scenario starts a fresh rnsd, because
   rnsd drops repeat path requests for a destination for 45 s.
   Pass names to run a subset. Logs go to `build/ret_e2e-logs/`.
 - Run the venv's `python` and `rnsd` (`tools/rns_peer/.venv/bin/`) when backgrounding them.

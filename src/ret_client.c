@@ -70,6 +70,8 @@ struct ret_client {
 	int consecutive_timeouts;
 	/** Set from inside frame handling when a send broke the connection. */
 	bool conn_broken;
+	/** A connect is in progress: queued sends are held until it is done. */
+	bool connecting;
 	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
 
 	/* The client's own destination, when cfg.dest_name is set. */
@@ -649,7 +651,12 @@ static bool process_queue(struct ret_client *c)
 			}
 			continue;
 		}
-		if (c->state != RET_STATE_CONNECTED) {
+		if (c->connecting) {
+			/* Released (path request included) once connected, or
+			 * failed at the held-send deadline.
+			 */
+			err = hold(c, &c->req);
+		} else if (c->state != RET_STATE_CONNECTED) {
 			err = -ENOTCONN;
 		} else {
 			err = transmit(c, &c->req);
@@ -822,6 +829,86 @@ static void backoff(struct ret_client *c, int ms)
 	}
 }
 
+/**
+ * Connect to the server without blocking the thread: wait for each
+ * non-blocking connect alongside the eventfd and the held-send deadlines,
+ * so queued sends are answered and held sends expire on time even while
+ * a connect over LTE takes tens of seconds. Tries each resolved address
+ * in turn (an IPv6 result may be unreachable on an IPv4-only bearer).
+ *
+ * @return connected fd, or -errno
+ */
+static int connect_serviced_inner(struct ret_client *c);
+
+static int connect_serviced(struct ret_client *c)
+{
+	int fd;
+
+	c->connecting = true;
+	fd = connect_serviced_inner(c);
+	c->connecting = false;
+	return fd;
+}
+
+static int connect_serviced_inner(struct ret_client *c)
+{
+	static struct ret_tcp_addrs addrs;
+	int err = ret_tcp_resolve(c->host, c->port, &addrs);
+
+	if (err) {
+		return err;
+	}
+
+	for (int i = 0; i < addrs.count; i++) {
+		bool in_progress;
+		int fd = ret_tcp_connect_start(&addrs, i, &in_progress);
+		int64_t deadline = k_uptime_get() + CONFIG_RET_CONNECT_TIMEOUT_MS;
+
+		if (fd < 0) {
+			err = fd;
+			continue;
+		}
+		/* An earlier address's failure must not condemn this attempt,
+		 * which may already have connected.
+		 */
+		err = 0;
+
+		while (in_progress) {
+			struct zsock_pollfd fds[2] = {
+				{ .fd = fd, .events = ZSOCK_POLLOUT },
+				{ .fd = c->efd, .events = ZSOCK_POLLIN },
+			};
+			int n = zsock_poll(fds, ARRAY_SIZE(fds),
+					   poll_timeout_ms(MIN(deadline, held_next_event(c))));
+
+			if (n < 0 && errno != EINTR) {
+				err = -errno;
+				break;
+			}
+			if (n > 0 && (fds[1].revents & ZSOCK_POLLIN)) {
+				drain_eventfd(c);
+				(void)process_queue(c); /* holds sends until connected */
+			}
+			(void)service_held(c);
+
+			if (n > 0 && (fds[0].revents & (ZSOCK_POLLOUT | ZSOCK_POLLERR |
+							ZSOCK_POLLHUP))) {
+				err = ret_tcp_connect_finish(fd);
+				in_progress = false;
+			} else if (k_uptime_get() >= deadline) {
+				err = -ETIMEDOUT;
+				in_progress = false;
+			}
+		}
+		if (err == 0) {
+			return fd;
+		}
+		zsock_close(fd);
+		LOG_DBG("address %d of %d failed: %d", i + 1, addrs.count, err);
+	}
+	return err;
+}
+
 static void client_thread(void *p1, void *p2, void *p3)
 {
 	struct ret_client *c = p1;
@@ -835,7 +922,7 @@ static void client_thread(void *p1, void *p2, void *p3)
 								 : RET_STATE_RECONNECTING);
 		LOG_INF("connecting to %s:%u", c->host, c->port);
 
-		c->sock = ret_tcp_connect(c->host, c->port);
+		c->sock = connect_serviced(c);
 		if (c->sock < 0) {
 			LOG_WRN("connect failed: %d, retry in %d s", c->sock, delay_s);
 			c->sock = -1;

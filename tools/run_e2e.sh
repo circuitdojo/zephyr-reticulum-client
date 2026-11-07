@@ -22,6 +22,9 @@
 #             to learn the path is a path request   -> 6/6 delivered, exit 0
 #   stall     peer proves #1 then goes silent: 3 timeouts from a destination
 #             known to prove trip the receipt watchdog, which reconnects
+#   bootdown  rnsd is down when the device boots and comes up a few seconds
+#             later: connects fail and back off, then the client connects
+#             and the later messages are delivered over a fresh path
 #   restart   rnsd is restarted mid-run (new transport identity, empty path
 #             table): the client reconnects, treats its paths as stale and
 #             requests them again                   -> last message delivered
@@ -49,7 +52,7 @@ COUNT_NAME=3
 COUNT_HASH=6
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo late stall restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -130,7 +133,7 @@ FLASH="$LOGS/flash.bin"
 
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
 needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y
-if needs late stall restart; then
+if needs late stall bootdown restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
 	# The peer takes ~18 s to re-attach and re-announce after an rnsd
 	# restart, during which every send is held: size the table for that.
@@ -293,6 +296,32 @@ scenario_stall() {
 	echo "   watchdog reconnected after 3 timeouts"
 }
 
+scenario_bootdown() {
+	local peer_log="$LOGS/peer-bootdown.log" dev_log="$LOGS/device-bootdown.log"
+
+	stop_rnsd
+	RC=0
+	timeout 120 "$BUILD_HASH/zephyr/zephyr.exe" --seed-random --flash="$FLASH" \
+		>"$dev_log" 2>&1 &
+	local dev=$!
+	pids+=("$dev")
+
+	wait_for 30 "a failed connect" grep -q "connect failed" "$dev_log"
+	start_rnsd
+	start_peer "$peer_log" --announce-interval 3600
+
+	wait "$dev" || RC=$?
+	stop_peer
+	[ $RC -ne 124 ] || fail "bootdown: device timed out, see $dev_log"
+
+	grep -q -- "-> CONNECTED" "$dev_log" || fail "bootdown: never connected once rnsd was up"
+	check_messages bootdown "$dev_log" "$peer_log" $COUNT_HASH proof $COUNT_HASH
+	local done_line
+	done_line=$(grep -o "DONE [0-9]*/$COUNT_HASH delivered" "$dev_log") ||
+		fail "bootdown: no DONE line, see $dev_log"
+	echo "   $done_line (sends while rnsd was down fail)"
+}
+
 scenario_restart() {
 	local peer_log="$LOGS/peer-restart.log" dev_log="$LOGS/device-restart.log"
 
@@ -333,6 +362,7 @@ for s in "${scenarios[@]}"; do
 	echo) scenario_echo ;;
 	late) scenario_late ;;
 	stall) scenario_stall ;;
+	bootdown) scenario_bootdown ;;
 	restart) scenario_restart ;;
 	*) fail "unknown scenario $s" ;;
 	esac

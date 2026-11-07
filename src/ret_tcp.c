@@ -5,6 +5,9 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
+
+#include <zephyr/sys/fdtable.h>
 
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
@@ -55,7 +58,7 @@ static int configure(int s)
 	return err;
 }
 
-int ret_tcp_connect(const char *host, uint16_t port)
+int ret_tcp_resolve(const char *host, uint16_t port, struct ret_tcp_addrs *out)
 {
 	struct zsock_addrinfo hints = {
 		.ai_family = AF_UNSPEC,
@@ -63,7 +66,6 @@ int ret_tcp_connect(const char *host, uint16_t port)
 	};
 	struct zsock_addrinfo *res = NULL;
 	char port_str[6];
-	int fd = -EHOSTUNREACH;
 	int err;
 
 	snprintf(port_str, sizeof(port_str), "%u", port);
@@ -73,29 +75,79 @@ int ret_tcp_connect(const char *host, uint16_t port)
 		return -EHOSTUNREACH;
 	}
 
-	for (struct zsock_addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-		int s = zsock_socket(ai->ai_family, ai->ai_socktype, IPPROTO_TCP);
-
-		if (s < 0) {
-			fd = -errno;
+	out->count = 0;
+	for (struct zsock_addrinfo *ai = res; ai != NULL && out->count < RET_TCP_MAX_ADDRS;
+	     ai = ai->ai_next) {
+		if (ai->ai_addrlen > sizeof(out->addr[0])) {
 			continue;
 		}
-		err = configure(s);
-		if (err) {
-			zsock_close(s);
-			fd = err;
-			break;
-		}
-		if (zsock_connect(s, ai->ai_addr, ai->ai_addrlen) == 0) {
-			fd = s;
-			break;
-		}
-		fd = -errno;
+		out->family[out->count] = ai->ai_family;
+		out->len[out->count] = ai->ai_addrlen;
+		memcpy(&out->addr[out->count], ai->ai_addr, ai->ai_addrlen);
+		out->count++;
+	}
+	zsock_freeaddrinfo(res);
+	return out->count > 0 ? 0 : -EHOSTUNREACH;
+}
+
+static int set_nonblocking(int s, bool on)
+{
+	int flags = zsock_fcntl(s, ZVFS_F_GETFL, 0);
+
+	if (flags < 0) {
+		return -errno;
+	}
+	flags = on ? (flags | ZVFS_O_NONBLOCK) : (flags & ~ZVFS_O_NONBLOCK);
+	return zsock_fcntl(s, ZVFS_F_SETFL, flags) < 0 ? -errno : 0;
+}
+
+int ret_tcp_connect_start(const struct ret_tcp_addrs *addrs, int i, bool *in_progress)
+{
+	int s = zsock_socket(addrs->family[i], SOCK_STREAM, IPPROTO_TCP);
+	int err;
+
+	if (s < 0) {
+		return -errno;
+	}
+	err = configure(s);
+	if (!err) {
+		err = set_nonblocking(s, true);
+	}
+	if (err) {
 		zsock_close(s);
+		return err;
 	}
 
-	zsock_freeaddrinfo(res);
-	return fd;
+	*in_progress = false;
+	if (zsock_connect(s, (const struct sockaddr *)&addrs->addr[i], addrs->len[i]) == 0) {
+		err = set_nonblocking(s, false);
+		if (err) {
+			zsock_close(s);
+			return err;
+		}
+		return s;
+	}
+	if (errno == EINPROGRESS) {
+		*in_progress = true;
+		return s;
+	}
+	err = -errno;
+	zsock_close(s);
+	return err;
+}
+
+int ret_tcp_connect_finish(int fd)
+{
+	int so_err = 0;
+	socklen_t len = sizeof(so_err);
+
+	if (zsock_getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &len) < 0) {
+		return -errno;
+	}
+	if (so_err != 0) {
+		return -so_err;
+	}
+	return set_nonblocking(fd, false);
 }
 
 int ret_tcp_send_all(int fd, const uint8_t *buf, size_t len)

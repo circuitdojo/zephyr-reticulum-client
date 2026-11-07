@@ -16,6 +16,8 @@
 
 #include <ret/ret_client.h>
 
+#include "network.h"
+
 #if defined(CONFIG_ARCH_POSIX)
 #include <nsi_main.h>
 #endif
@@ -139,6 +141,8 @@ int main(void)
 		cfg.dest_name = CONFIG_RET_SAMPLE_LOCAL_NAME;
 	}
 	client = ret_client_create(&cfg);
+
+	wait_for_network();
 
 	/* Before start: an announce may arrive as soon as the thread runs. */
 	err = ret_client_name_hash(CONFIG_RET_SAMPLE_DEST_NAME, target_name_hash);

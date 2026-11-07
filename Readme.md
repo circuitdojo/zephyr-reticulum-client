@@ -17,6 +17,10 @@ west build -b native_sim ret-client/samples/ret_basic -d build/ret_basic -p --no
 ./build/ret_basic/zephyr/zephyr.exe --seed-random
 ```
 
+For the nRF9151 Feather (NCS workspace), see "Hardware" in `AGENTS.md`:
+build with sysbuild and flash `merged.hex` with `scripts/flash.py`, which
+follows the Zephyr Tools load sequence.
+
 The sample connects to `127.0.0.1:4242`, waits for an announce from
 `retclient.echo`, then sends it `hello #N` every 10 s and logs each delivery
 proof. `--seed-random` is required on native_sim: without it the test RNG

@@ -55,6 +55,10 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked gen_vectors.py ../../tests/common/vectors_rns.h
           git -C ../.. diff --exit-code -- tests/common/vectors_rns.h
+          # scripts/flash.py: tests ported from Zephyr Tools' own suites.
+          uv run --with pytest pytest -q ../../scripts
+          uv run --locked ruff check ../../scripts
+          uv run --locked ruff format --check ../../scripts
 
       - name: Unit tests
         working-directory: /west-workspace
