@@ -1,0 +1,26 @@
+# rnsd for testing a board over LTE. Listens on all interfaces, port 4242,
+# so a router port-forward can reach it; own instance name and ports keep
+# it apart from a default instance on the same machine (which also uses
+# 4242 by default: stop that one first).
+#
+#   uv run --project ret-client/tools/rns_peer rnsd --config ret-client/tools/rnsd-hw -vv
+#   uv run --project ret-client/tools/rns_peer ret-client/tools/rns_peer/peer.py \
+#       --config ret-client/tools/rnsd-hw --reply --announce-interval 30
+
+[reticulum]
+  enable_transport = False
+  share_instance = Yes
+  instance_name = ret-hw
+  shared_instance_port = 37448
+  instance_control_port = 37449
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[ret-client TCP]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 0.0.0.0
+    listen_port = 4242

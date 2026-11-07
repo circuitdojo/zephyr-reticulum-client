@@ -19,6 +19,16 @@ if(NOT EXISTS "${RET_MONOCYPHER_DIR}/src/optional/monocypher-ed25519.c")
         "${RET_MONOCYPHER_DIR}")
 endif()
 
+# The minimal TF-M profile fixes the secure image's crypto to random
+# generation and ignores PSA_WANT_*, so every hash/HMAC/AES call would fail
+# at runtime with PSA_ERROR_NOT_SUPPORTED. Refuse the build instead.
+if(CONFIG_TFM_PROFILE_TYPE_MINIMAL)
+    message(FATAL_ERROR
+        "ret-client needs SHA-256, HMAC and AES-CBC from TF-M, which the minimal "
+        "TF-M profile (CONFIG_TFM_PROFILE_TYPE_MINIMAL) does not provide. Set "
+        "CONFIG_TFM_PROFILE_TYPE_NOT_SET=y and size CONFIG_PM_PARTITION_SIZE_TFM.")
+endif()
+
 zephyr_include_directories(../../include)
 
 zephyr_library()

@@ -8,3 +8,8 @@ tools/rns_peer/peer_identity*
 .claude/settings.local.json
 .claude/worktrees/
 .env
+samples/ret_basic/env/*
+!samples/ret_basic/env/example.conf
+tools/rnsd-hw/storage/
+tools/rnsd-hw/logfile
+samples/*/log-*.log

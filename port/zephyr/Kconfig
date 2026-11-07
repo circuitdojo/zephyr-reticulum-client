@@ -112,6 +112,13 @@ config RET_PATH_REQUEST_TIMEOUT_MS
 	  retry interval, or a request made soon after an earlier one for
 	  the same destination can never be answered in time.
 
+config RET_CONNECT_TIMEOUT_MS
+	int "TCP connect timeout per address (ms)"
+	default 30000
+	help
+	  The connect runs non-blocking, so the client keeps answering
+	  queued sends and expiring held ones while it waits.
+
 config RET_SEND_TIMEOUT_MS
 	int "Socket send timeout (ms)"
 	default 10000

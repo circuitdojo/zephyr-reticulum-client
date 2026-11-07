@@ -1,0 +1,2 @@
+# Repo-wide ruff settings (tools/rns_peer keeps its own in pyproject.toml).
+line-length = 100

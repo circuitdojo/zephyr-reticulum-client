@@ -4,6 +4,16 @@
 
 ### Added
 
+- nRF9151 Feather support (NCS): LTE through the modem's offloaded sockets,
+  PSA Crypto from TF-M, settings on LittleFS on the external NOR flash.
+  Verified on hardware over LTE: messages and proofs both ways, identity
+  kept across resets, client thread stack peak 2632 of 6144 bytes.
+- `scripts/flash.py`: flashes a hardware build with the Zephyr Tools load
+  sequence (merged.hex, recovery unlock, UICR check, probe-rs download and
+  reset), with tests ported from Zephyr Tools' own suites.
+- `tools/rnsd-hw`: rnsd config for testing a board over LTE.
+- e2e `bootdown` scenario: rnsd down at boot, up shortly after.
+
 - The client's own destination (`ret_client_config.dest_name`): an identity
   created on first start and persisted in settings gives it a stable
   address. It is announced on every connect (and every
@@ -57,6 +67,12 @@
   scenarios: plain, ratchets, no-prove.
 
 ### Changed
+
+- The TCP connect is non-blocking and polled with the client's queue and
+  deadlines, trying each resolved address in turn; sends queued while
+  connecting are held instead of failed.
+- Building with NCS's minimal TF-M profile is refused: it leaves out the
+  SHA-256, HMAC and AES the client needs.
 
 - Builds pass `--no-sysbuild`, so output paths match in the vanilla Zephyr
   and NCS workspaces; the dev workspace now uses `west-vanilla.yml`.
