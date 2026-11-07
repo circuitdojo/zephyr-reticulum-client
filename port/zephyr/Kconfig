@@ -3,7 +3,11 @@
 
 config RET_CORE
 	bool "Reticulum protocol core"
-	select PSA_CRYPTO
+	# PSA Crypto provider: Zephyr's mbedTLS, unless TF-M or nrf_security
+	# provide the API. (NCS also has PSA_CRYPTO, vanilla 4.2 does not;
+	# MBEDTLS_PSA_CRYPTO_C exists in both.)
+	select MBEDTLS if !BUILD_WITH_TFM && !NRF_SECURITY
+	select MBEDTLS_PSA_CRYPTO_C if !BUILD_WITH_TFM && !NRF_SECURITY
 	imply PSA_WANT_ALG_SHA_256
 	imply PSA_WANT_ALG_HMAC
 	imply PSA_WANT_KEY_TYPE_HMAC
@@ -78,6 +82,85 @@ config RET_THREAD_PRIORITY
 config RET_TX_QUEUE_DEPTH
 	int "Outbound send queue depth"
 	default 4
+
+config RET_MAX_HELD_SENDS
+	int "Sends held while a path is requested"
+	default 4
+	help
+	  A send to a destination with no current path (never announced
+	  to us, or learned on a previous connection) is held while a path
+	  request goes out, and released by the announce or path response.
+
+config RET_PATH_REQUEST_INTERVAL_MS
+	int "Path request retry interval (ms)"
+	default 15000
+	help
+	  While a send is held, its path request is repeated this often.
+	  rnsd batches repeat requests for the same destination for 45 s
+	  (Transport.PATH_REQUEST_GATE_TIMEOUT) unless one was answered, so
+	  faster retries only add traffic.
+
+config RET_PATH_REQUEST_TIMEOUT_MS
+	int "Path request timeout (ms)"
+	default 60000
+	help
+	  A held send fails with RET_RECEIPT_FAILED if no path arrives in
+	  this time. Keep it above rnsd's 45 s path request gate plus one
+	  retry interval, or a request made soon after an earlier one for
+	  the same destination can never be answered in time.
+
+config RET_SEND_TIMEOUT_MS
+	int "Socket send timeout (ms)"
+	default 10000
+	help
+	  SO_SNDTIMEO on the TCP socket, so a stalled connection cannot
+	  block the client thread indefinitely. A send that times out
+	  drops the connection.
+
+config RET_TCP_KEEPALIVE
+	bool "TCP keepalive"
+	default y
+	depends on NET_NATIVE_OFFLOADED_SOCKETS || NET_TCP_KEEPALIVE
+	help
+	  Enable TCP keepalive probes so a connection silently dropped by a
+	  NAT is detected. Only offered where the socket layer implements
+	  them (host sockets on native_sim, Zephyr's TCP stack with
+	  NET_TCP_KEEPALIVE). The nRF91 modem does not; there the receipt
+	  watchdog below detects a dead connection.
+
+if RET_TCP_KEEPALIVE
+
+config RET_TCP_KEEPALIVE_IDLE_S
+	int "Idle time before the first probe (s)"
+	default 60
+
+config RET_TCP_KEEPALIVE_INTERVAL_S
+	int "Interval between probes (s)"
+	default 10
+
+config RET_TCP_KEEPALIVE_COUNT
+	int "Unanswered probes before the connection is dropped"
+	default 3
+
+endif # RET_TCP_KEEPALIVE
+
+config RET_RECONNECT_AFTER_TIMEOUTS
+	int "Reconnect after this many consecutive receipt timeouts"
+	default 3
+	help
+	  Consecutive sends that time out without a proof suggest the
+	  connection is dead even though the socket looks open. Only sends
+	  to destinations that have proved before count: RNS destinations
+	  do not prove by default, and their silence says nothing about the
+	  link. A delivered proof resets the count. 0 disables.
+
+config RET_RX_SILENCE_TIMEOUT_S
+	int "Reconnect after this long without receiving anything (s)"
+	default 0
+	help
+	  Off by default: a quiet network may legitimately send nothing for
+	  a long time. Useful where the upstream is known to announce
+	  regularly. 0 disables.
 
 config RET_RECONNECT_BACKOFF_MAX_S
 	int "Maximum reconnect backoff (s)"

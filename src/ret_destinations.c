@@ -90,6 +90,7 @@ int ret_destinations_update(const struct ret_packet *pkt, const struct ret_annou
 		memcpy(d->ratchet, a->ratchet, RET_RATCHET_LEN);
 	}
 
+	d->path_valid = true;
 	d->hops = pkt->hops < UINT8_MAX ? pkt->hops + 1 : UINT8_MAX;
 	d->has_transport_id = pkt->header_type == RET_HEADER_2;
 	if (d->has_transport_id) {
@@ -104,6 +105,23 @@ int ret_destinations_update(const struct ret_packet *pkt, const struct ret_annou
 		*fresh = is_fresh;
 	}
 	return 0;
+}
+
+void ret_destinations_mark_proves(const uint8_t dest_hash[RET_TRUNC_HASH_LEN])
+{
+	struct ret_destination *d = (struct ret_destination *)ret_destinations_find(dest_hash);
+
+	if (d != NULL) {
+		d->proves = true;
+	}
+}
+
+void ret_destinations_invalidate_paths(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(table); i++) {
+		table[i].path_valid = false;
+		table[i].has_transport_id = false;
+	}
 }
 
 void ret_destinations_address(const struct ret_destination *d, struct ret_packet *pkt)

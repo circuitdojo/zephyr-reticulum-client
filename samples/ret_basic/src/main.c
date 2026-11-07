@@ -120,8 +120,18 @@ int main(void)
 		return err;
 	}
 
-	LOG_INF("waiting for announce from %s", CONFIG_RET_SAMPLE_DEST_NAME);
-	k_sem_take(&target_sem, K_FOREVER);
+	if (strlen(CONFIG_RET_SAMPLE_DEST_HASH) > 0) {
+		if (hex2bin(CONFIG_RET_SAMPLE_DEST_HASH, strlen(CONFIG_RET_SAMPLE_DEST_HASH),
+			    target_dest, sizeof(target_dest)) != sizeof(target_dest)) {
+			LOG_ERR("RET_SAMPLE_DEST_HASH must be 32 hex digits");
+			return -EINVAL;
+		}
+		atomic_set(&target_known, 1);
+		LOG_INF("sending to %s (path requested on demand)", CONFIG_RET_SAMPLE_DEST_HASH);
+	} else {
+		LOG_INF("waiting for announce from %s", CONFIG_RET_SAMPLE_DEST_NAME);
+		k_sem_take(&target_sem, K_FOREVER);
+	}
 
 	for (int n = 1; CONFIG_RET_SAMPLE_MESSAGE_COUNT == 0 || n <= CONFIG_RET_SAMPLE_MESSAGE_COUNT;
 	     n++) {

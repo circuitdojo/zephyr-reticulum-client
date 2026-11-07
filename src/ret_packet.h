@@ -85,4 +85,18 @@ int ret_packet_pack(const struct ret_packet *pkt, uint8_t *out, size_t cap);
  */
 int ret_packet_hash(const uint8_t *raw, size_t len, uint8_t hash[RET_HASH_LEN]);
 
+#define RET_PATH_REQUEST_TAG_LEN 16
+#define RET_PATH_REQUEST_LEN     (RET_H1_HEADER_LEN + RET_TRUNC_HASH_LEN + RET_PATH_REQUEST_TAG_LEN)
+
+/**
+ * Build a path request for @p dest_hash as a non-transport node sends it
+ * (Transport.request_path): HEADER_1 PLAIN DATA to
+ * "rnstransport.path.request", data = dest_hash | tag. The data must be
+ * exactly 32 bytes; anything longer is read as a transport ID.
+ *
+ * @return packet length, or a negative errno.
+ */
+int ret_path_request_build(const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
+			   const uint8_t tag[RET_PATH_REQUEST_TAG_LEN], uint8_t *out, size_t cap);
+
 #endif /* RET_PACKET_H_ */

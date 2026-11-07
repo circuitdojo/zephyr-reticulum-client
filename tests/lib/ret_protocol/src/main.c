@@ -278,6 +278,49 @@ ZTEST(destinations, test_older_announce_ignored)
 	zassert_equal(d->hops, 6);
 }
 
+ZTEST(destinations, test_invalidate_paths)
+{
+	struct ret_packet p, out = { 0 };
+	struct ret_announce a;
+	const struct ret_destination *d;
+
+	zassert_ok(validate_raw(v_announce_ratchet_h2, sizeof(v_announce_ratchet_h2), &p, &a));
+	zassert_ok(ret_destinations_update(&p, &a, 100, &d, NULL));
+	zassert_true(d->path_valid);
+
+	ret_destinations_invalidate_paths();
+	zassert_false(d->path_valid);
+	zassert_false(d->has_transport_id);
+	/* Keys survive: only the path is relearned. */
+	zassert_true(d->has_ratchet);
+	zassert_mem_equal(d->pub, v_identity_pub, RET_PUBKEY_LEN);
+
+	/* A repeat of the same announce (e.g. a path response from a node
+	 * that cached it) revalidates the path.
+	 */
+	zassert_ok(ret_destinations_update(&p, &a, 200, &d, NULL));
+	zassert_true(d->path_valid);
+	ret_destinations_address(d, &out);
+	zassert_equal(out.header_type, RET_HEADER_2);
+}
+
+ZTEST(destinations, test_mark_proves)
+{
+	struct ret_packet p;
+	struct ret_announce a;
+	const struct ret_destination *d;
+
+	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
+	zassert_ok(ret_destinations_update(&p, &a, 100, &d, NULL));
+	zassert_false(d->proves);
+	ret_destinations_mark_proves(v_dest_hash);
+	zassert_true(d->proves);
+	/* Survives path invalidation and later announces. */
+	ret_destinations_invalidate_paths();
+	zassert_ok(ret_destinations_update(&p, &a, 200, &d, NULL));
+	zassert_true(d->proves);
+}
+
 ZTEST(destinations, test_changed_key_rejected)
 {
 	struct ret_packet p;
@@ -351,12 +394,12 @@ static int proof(const uint8_t *raw, size_t len, int64_t now)
 	struct ret_packet p;
 
 	zassert_ok(ret_packet_unpack(raw, len, &p));
-	return ret_receipts_handle_proof(&p, now);
+	return ret_receipts_handle_proof(&p, now, NULL);
 }
 
 ZTEST(receipt, test_implicit_proof)
 {
-	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), 1000, 5000, on_receipt, &logged));
+	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), v_dest_hash, true, 1000, 5000, on_receipt, &logged));
 	zassert_equal(ret_receipts_next_deadline(), 6000);
 	zassert_ok(proof(v_proof_implicit, sizeof(v_proof_implicit), 1250));
 	zassert_equal(logged.calls, 1);
@@ -368,9 +411,36 @@ ZTEST(receipt, test_implicit_proof)
 	zassert_equal(proof(v_proof_implicit, sizeof(v_proof_implicit), 1300), -ENOENT);
 }
 
+ZTEST(receipt, test_proof_reports_destination)
+{
+	struct ret_packet p;
+	uint8_t dest[RET_TRUNC_HASH_LEN] = { 0 };
+
+	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), v_dest_hash, false, 0, 5000,
+				    on_receipt, &logged));
+	zassert_ok(ret_packet_unpack(v_proof_implicit, sizeof(v_proof_implicit), &p));
+	zassert_ok(ret_receipts_handle_proof(&p, 10, dest));
+	zassert_mem_equal(dest, v_dest_hash, RET_TRUNC_HASH_LEN);
+}
+
+ZTEST(receipt, test_only_watched_timeouts_counted)
+{
+	uint8_t h[RET_HASH_LEN];
+
+	memcpy(h, v_packet_hash, sizeof(h));
+	zassert_ok(ret_receipts_add(h, sig_pub(), v_dest_hash, false, 0, 100, on_receipt,
+				    &logged));
+	h[0] ^= 1;
+	zassert_ok(ret_receipts_add(h, sig_pub(), v_dest_hash, true, 0, 100, on_receipt,
+				    &logged));
+	/* Both time out and both callbacks fire; only one counts. */
+	zassert_equal(ret_receipts_expire(100), 1);
+	zassert_equal(logged.calls, 2);
+}
+
 ZTEST(receipt, test_explicit_proof)
 {
-	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), 0, 5000, on_receipt, &logged));
+	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), v_dest_hash, true, 0, 5000, on_receipt, &logged));
 	zassert_ok(proof(v_proof_explicit, sizeof(v_proof_explicit), 10));
 	zassert_equal(logged.status, RET_RECEIPT_DELIVERED);
 }
@@ -379,7 +449,7 @@ ZTEST(receipt, test_bad_proof_keeps_receipt)
 {
 	uint8_t raw[sizeof(v_proof_implicit)];
 
-	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), 0, 5000, on_receipt, &logged));
+	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), v_dest_hash, true, 0, 5000, on_receipt, &logged));
 
 	memcpy(raw, v_proof_implicit, sizeof(raw));
 	raw[sizeof(raw) - 1] ^= 0x01;
@@ -406,7 +476,7 @@ ZTEST(receipt, test_proof_signed_by_other_key)
 
 	memcpy(other, sig_pub(), sizeof(other));
 	other[3] ^= 0x10;
-	zassert_ok(ret_receipts_add(v_packet_hash, other, 0, 5000, on_receipt, &logged));
+	zassert_ok(ret_receipts_add(v_packet_hash, other, v_dest_hash, true, 0, 5000, on_receipt, &logged));
 	zassert_equal(proof(v_proof_implicit, sizeof(v_proof_implicit), 10), -EBADMSG);
 }
 
@@ -417,10 +487,10 @@ ZTEST(receipt, test_unmatched_proof)
 
 ZTEST(receipt, test_timeout)
 {
-	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), 1000, 5000, on_receipt, &logged));
-	ret_receipts_expire(5999);
+	zassert_ok(ret_receipts_add(v_packet_hash, sig_pub(), v_dest_hash, true, 1000, 5000, on_receipt, &logged));
+	zassert_equal(ret_receipts_expire(5999), 0);
 	zassert_equal(logged.calls, 0);
-	ret_receipts_expire(6000);
+	zassert_equal(ret_receipts_expire(6000), 1);
 	zassert_equal(logged.calls, 1);
 	zassert_equal(logged.status, RET_RECEIPT_TIMEOUT);
 	zassert_equal(logged.rtt, 5000);
@@ -435,10 +505,10 @@ ZTEST(receipt, test_fail_all_and_capacity)
 	zassert_false(ret_receipts_full());
 	for (int i = 0; i < CONFIG_RET_MAX_PENDING_RECEIPTS; i++) {
 		h[31] = (uint8_t)i;
-		zassert_ok(ret_receipts_add(h, sig_pub(), 0, 5000, on_receipt, &logged));
+		zassert_ok(ret_receipts_add(h, sig_pub(), v_dest_hash, true, 0, 5000, on_receipt, &logged));
 	}
 	zassert_true(ret_receipts_full());
-	zassert_equal(ret_receipts_add(h, sig_pub(), 0, 5000, on_receipt, &logged), -ENOMEM);
+	zassert_equal(ret_receipts_add(h, sig_pub(), v_dest_hash, true, 0, 5000, on_receipt, &logged), -ENOMEM);
 
 	ret_receipts_fail_all(RET_RECEIPT_DISCONNECTED, 10);
 	zassert_false(ret_receipts_full());

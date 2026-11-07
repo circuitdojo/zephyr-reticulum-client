@@ -13,8 +13,8 @@ From a west workspace containing this repo (`west init -m <repo> --mf west-vanil
 for native_sim only, `west-ncs.yml` for nRF91):
 
 ```bash
-west build -b native_sim ret-client/samples/ret_basic -d build/ret_basic -p
-./build/ret_basic/ret_basic/zephyr/zephyr.exe --seed-random
+west build -b native_sim ret-client/samples/ret_basic -d build/ret_basic -p --no-sysbuild
+./build/ret_basic/zephyr/zephyr.exe --seed-random
 ```
 
 The sample connects to `127.0.0.1:4242`, waits for an announce from

@@ -4,6 +4,29 @@
 
 ### Added
 
+- Path requests: a send to a destination with no current path is held
+  (`CONFIG_RET_MAX_HELD_SENDS`) while a path request goes out, repeated
+  every `CONFIG_RET_PATH_REQUEST_INTERVAL_MS` (15 s), and released by the
+  destination's announce or path response, or failed after
+  `CONFIG_RET_PATH_REQUEST_TIMEOUT_MS` (60 s, above rnsd's 45 s path
+  request gate). A known destination hash can
+  therefore be used before any announce reaches the client.
+- Paths are marked stale on every reconnect (rnsd may have restarted with
+  a new transport identity and an empty path table) and are requested
+  again on demand; keys are kept.
+- Receipt watchdog: reconnect after `CONFIG_RET_RECONNECT_AFTER_TIMEOUTS`
+  consecutive receipt timeouts (default 3) from destinations that have
+  proved before (RNS destinations do not prove by default), and optionally
+  after
+  `CONFIG_RET_RX_SILENCE_TIMEOUT_S` without receiving anything.
+- `SO_SNDTIMEO` on the TCP socket (`CONFIG_RET_SEND_TIMEOUT_MS`) and TCP
+  keepalive (`CONFIG_RET_TCP_KEEPALIVE`) where the socket layer supports
+  it; a rejected socket option fails the connection attempt.
+- `ret_basic`: `CONFIG_RET_SAMPLE_DEST_HASH` sends to a known destination
+  without waiting for its announce.
+- e2e scenarios `late` (destination announced before the device started),
+  `stall` (peer stops proving: watchdog reconnects) and `restart` (rnsd
+  restarted mid-run).
 - Zephyr module scaffold: `RET_CORE` (protocol, no networking) and
   `RET_CLIENT` (TCP client to rnsd), `ret_basic` sample for native_sim.
 - ztest suites (`ret_codec`, `ret_crypto`, `ret_protocol`): RFC/NIST
@@ -16,6 +39,8 @@
 
 ### Changed
 
+- Builds pass `--no-sysbuild`, so output paths match in the vanilla Zephyr
+  and NCS workspaces; the dev workspace now uses `west-vanilla.yml`.
 - `on_announce` fires once per announce; repeats of the same announce
   (rebroadcast and path response) only refresh the path, and announces
   emitted before the last one seen are ignored as replays.
@@ -27,8 +52,12 @@
 
 ### Fixed
 
+- PSA Crypto is now selected through `MBEDTLS_PSA_CRYPTO_C`, which exists
+  in vanilla Zephyr 4.2 as well as NCS (`PSA_CRYPTO` is NCS-only).
+- `run_e2e.sh` no longer leaves test peers running after a scenario.
+- A socket send that hits `SO_SNDTIMEO` now fails and drops the
+  connection instead of being retried forever.
 - Client thread no longer drops the connection when poll is interrupted
   (EINTR).
 - Sends still queued when a socket send fails are now failed with a
   callback instead of being stranded.
-

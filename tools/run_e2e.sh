@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # End-to-end test of ret_basic against a real, isolated rnsd and the Python
-# test peer. Proves the four goals: TCP + HDLC framing, announce
-# validation, encrypted DATA delivery, delivery-proof validation.
+# test peer.
 #
-# Scenarios:
-#   plain     peer proves every packet           -> 3/3 delivered, exit 0
-#   ratchets  peer announces with ratchets       -> 3/3 delivered, exit 0
-#   no-prove  peer never proves                  -> 3 timeouts,    exit 1
+# Announce-driven build (waits for an announce from retclient.echo):
+#   plain     peer proves every packet              -> 3/3 delivered, exit 0
+#   ratchets  peer announces with enforced ratchets -> 3/3 delivered, exit 0
+#   no-prove  peer never proves                     -> 3 timeouts,    exit 1;
+#             a destination that never proved does not trip the watchdog
+#
+# Known-hash build (sends to the peer's destination hash at once):
+#   late      peer announced once before the device started: the only way
+#             to learn the path is a path request   -> 6/6 delivered, exit 0
+#   stall     peer proves #1 then goes silent: 3 timeouts from a destination
+#             known to prove trip the receipt watchdog, which reconnects
+#   restart   rnsd is restarted mid-run (new transport identity, empty path
+#             table): the client reconnects, treats its paths as stale and
+#             requests them again                   -> last message delivered
+#
+# Known-hash scenarios each start a fresh rnsd: rnsd drops repeat path
+# requests for a destination for 45 s, which must not leak between them.
 #
 # Run from anywhere inside the west workspace with the Zephyr toolchain
 # environment active (see AGENTS.md). Pass scenario names to run a subset.
@@ -16,16 +28,18 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RET=$(cd "$HERE/.." && pwd)
 TOP=$(west topdir)
-BUILD="$TOP/build/ret_e2e"
-# Not under $BUILD: a pristine build wipes that directory.
+BUILD_NAME="$TOP/build/ret_e2e-name"
+BUILD_HASH="$TOP/build/ret_e2e-hash"
+# Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
 RNSD_CONFIG="$HERE/rnsd-test"
 PORT=4243
-COUNT=3
+COUNT_NAME=3
+COUNT_HASH=6
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove late stall restart)
 
 pids=()
 cleanup() {
@@ -52,58 +66,123 @@ wait_for() { # <seconds> <description> <command...>
 
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
 
+# Run the venv's binaries directly, not through `uv run` (or a shell
+# function): then $! is the real process and killing it stops it, instead
+# of orphaning a peer that stays attached to rnsd and disturbs later runs.
+uv sync --quiet --project "$PEER_PROJECT"
+PY="$PEER_PROJECT/.venv/bin/python"
+RNSD="$PEER_PROJECT/.venv/bin/rnsd"
+
+build() { # <dir> <count> [extra cmake args...]
+	local dir=$1 count=$2
+	shift 2
+	echo "== build $(basename "$dir") ($count messages)"
+	west build -b native_sim "$RET/samples/ret_basic" -d "$dir" -p --no-sysbuild -- \
+		-DCONFIG_RET_SERVER_PORT=$PORT \
+		-DCONFIG_RET_SAMPLE_MESSAGE_COUNT="$count" \
+		-DCONFIG_RET_SAMPLE_SEND_INTERVAL_S=2 \
+		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
+		"$@" >"$LOGS/build-$(basename "$dir").log" 2>&1 ||
+		fail "build failed, see $LOGS/build-$(basename "$dir").log"
+	[ -x "$dir/zephyr/zephyr.exe" ] || fail "no $dir/zephyr/zephyr.exe"
+}
+
+RNSD_PID=
+rnsd_log_n=0
+start_rnsd() {
+	rnsd_log_n=$((rnsd_log_n + 1))
+	"$RNSD" --config "$RNSD_CONFIG" -vv >"$LOGS/rnsd-$rnsd_log_n.log" 2>&1 &
+	RNSD_PID=$!
+	pids+=("$RNSD_PID")
+	wait_for 30 "rnsd on port $PORT" port_open
+}
+
+stop_rnsd() {
+	kill "$RNSD_PID" 2>/dev/null || true
+	wait "$RNSD_PID" 2>/dev/null || true
+	wait_for 10 "rnsd to release port $PORT" bash -c "! (exec 3<>/dev/tcp/127.0.0.1/$PORT)"
+}
+
+needs() { # <scenario...>: true if any of them was selected
+	local s w
+	for s in "${scenarios[@]}"; do
+		for w in "$@"; do
+			[ "$s" = "$w" ] && return 0
+		done
+	done
+	return 1
+}
+
 mkdir -p "$LOGS"
 
-echo "== build ret_basic (port $PORT, $COUNT messages)"
-west build -b native_sim "$RET/samples/ret_basic" -d "$BUILD" -p -- \
-	-DCONFIG_RET_SERVER_PORT=$PORT \
-	-DCONFIG_RET_SAMPLE_MESSAGE_COUNT=$COUNT \
-	-DCONFIG_RET_SAMPLE_SEND_INTERVAL_S=2 \
-	-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
-	>"$LOGS/build.log" 2>&1 || fail "build failed, see $LOGS/build.log"
-EXE="$BUILD/ret_basic/zephyr/zephyr.exe"
-[ -x "$EXE" ] || fail "no $EXE"
+needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
+if needs late stall restart; then
+	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
+	# The peer takes ~18 s to re-attach and re-announce after an rnsd
+	# restart, during which every send is held: size the table for that.
+	build "$BUILD_HASH" $COUNT_HASH -DCONFIG_RET_SAMPLE_DEST_HASH=\""$DEST"\" \
+		-DCONFIG_RET_MAX_HELD_SENDS=8
+fi
 
 port_open && fail "port $PORT already in use; stop whatever is listening there"
+pgrep -f "$PEER_PROJECT/peer.py" >/dev/null &&
+	fail "a test peer is still running (pgrep -af peer.py); stop it first"
 
 echo "== start rnsd ($RNSD_CONFIG)"
-uv run --quiet --project "$PEER_PROJECT" rnsd --config "$RNSD_CONFIG" -vv \
-	>"$LOGS/rnsd.log" 2>&1 &
-pids+=($!)
-wait_for 30 "rnsd on port $PORT" port_open
+start_rnsd
 
-run_scenario() {
-	local name=$1 peer_args=() want_rc
+start_peer() { # <log> [peer args...]
+	local log=$1
+	shift
+	"$PY" "$PEER_PROJECT/peer.py" --config "$RNSD_CONFIG" "$@" >"$log" 2>&1 &
+	PEER_PID=$!
+	pids+=("$PEER_PID")
+	wait_for 30 "peer ready" grep -q "^PEER READY" "$log"
+	wait_for 10 "first announce" grep -q "^ANNOUNCED$" "$log"
+}
+
+stop_peer() {
+	kill "$PEER_PID" 2>/dev/null || true
+	wait "$PEER_PID" 2>/dev/null || true
+}
+
+# --seed-random: native_sim's test RNG otherwise starts from the same seed
+# every run, so ephemeral keys and IVs (and so packet hashes) repeat, and
+# rnsd drops the packets as duplicates of an earlier run's.
+run_device() { # <exe> <log>  (sets RC)
+	RC=0
+	timeout 120 "$1" --seed-random >"$2" 2>&1 || RC=$?
+	[ $RC -ne 124 ] || fail "device timed out, see $2"
+}
+
+check_messages() { # <name> <dev_log> <peer_log> <count> <proof|timeout> [first]
+	local name=$1 dev=$2 peerlog=$3 count=$4 want=$5 first=${6:-1} n
+	for n in $(seq "$first" "$count"); do
+		grep -q "^RECEIVED hello #$n$" "$peerlog" ||
+			fail "$name: peer did not decrypt hello #$n, see $peerlog"
+		if [ "$want" = proof ]; then
+			grep -q "PROOF VALID #$n " "$dev" || fail "$name: no valid proof for #$n, see $dev"
+		else
+			grep -q "PROOF TIMEOUT #$n " "$dev" || fail "$name: no timeout for #$n, see $dev"
+		fi
+	done
+}
+
+scenario_announced() { # plain | ratchets | no-prove
+	local name=$1 peer_args=() want_rc=0 want=proof
 	case $name in
-	plain) want_rc=0 ;;
-	ratchets) want_rc=0; peer_args=(--ratchets) ;;
-	no-prove) want_rc=1; peer_args=(--no-prove) ;;
-	*) fail "unknown scenario $name" ;;
+	ratchets) peer_args=(--ratchets) ;;
+	no-prove) peer_args=(--no-prove) want_rc=1 want=timeout ;;
 	esac
-
-	echo "== scenario $name"
 	local peer_log="$LOGS/peer-$name.log" dev_log="$LOGS/device-$name.log"
 
-	uv run --quiet --project "$PEER_PROJECT" "$PEER_PROJECT/peer.py" \
-		--config "$RNSD_CONFIG" --announce-interval 3 "${peer_args[@]}" \
-		>"$peer_log" 2>&1 &
-	local peer=$!
-	pids+=("$peer")
-	wait_for 30 "peer ready" grep -q "^PEER READY" "$peer_log"
+	start_peer "$peer_log" --announce-interval 3 "${peer_args[@]}"
 	local dest
 	dest=$(awk '/^PEER READY/ {print $3; exit}' "$peer_log")
+	run_device "$BUILD_NAME/zephyr/zephyr.exe" "$dev_log"
+	stop_peer
 
-	# --seed-random: native_sim's test RNG otherwise starts from the same
-	# seed every run, so ephemeral keys and IVs (and so packet hashes)
-	# repeat, and rnsd drops the packets as duplicates of the last run's.
-	local rc=0
-	timeout 90 "$EXE" --seed-random >"$dev_log" 2>&1 || rc=$?
-	kill "$peer" 2>/dev/null || true
-	wait "$peer" 2>/dev/null || true
-
-	[ $rc -ne 124 ] || fail "$name: device timed out, see $dev_log"
-	[ $rc -eq "$want_rc" ] || fail "$name: device exit $rc, want $want_rc, see $dev_log"
-
+	[ $RC -eq $want_rc ] || fail "$name: device exit $RC, want $want_rc, see $dev_log"
 	grep -q -- "-> CONNECTED" "$dev_log" || fail "$name: never connected"
 	grep -q "ANNOUNCE VALID retclient.echo $dest" "$dev_log" ||
 		fail "$name: no valid announce for $dest"
@@ -111,33 +190,109 @@ run_scenario() {
 		grep -q "ANNOUNCE VALID retclient.echo $dest .*ratchet" "$dev_log" ||
 			fail "$name: announce carried no ratchet"
 	fi
+	if [ "$name" = no-prove ]; then
+		# Never proved, so its timeouts say nothing about the link.
+		! grep -q "receipts in a row timed out" "$dev_log" ||
+			fail "$name: watchdog reconnected over a destination that never proves"
+	fi
+	check_messages "$name" "$dev_log" "$peer_log" $COUNT_NAME $want
 
-	for n in $(seq 1 $COUNT); do
-		grep -q "^RECEIVED hello #$n$" "$peer_log" ||
-			fail "$name: peer did not decrypt hello #$n, see $peer_log"
-		if [ "$want_rc" -eq 0 ]; then
-			grep -q "PROOF VALID #$n " "$dev_log" || fail "$name: no valid proof for #$n"
-		else
-			grep -q "PROOF TIMEOUT #$n " "$dev_log" || fail "$name: no timeout for #$n"
-		fi
-	done
-
-	local want_done=$COUNT
-	[ "$want_rc" -eq 0 ] || want_done=0
-	grep -q "DONE $want_done/$COUNT delivered" "$dev_log" ||
-		fail "$name: want DONE $want_done/$COUNT, see $dev_log"
+	local want_done=$COUNT_NAME
+	[ $want_rc -eq 0 ] || want_done=0
+	grep -q "DONE $want_done/$COUNT_NAME delivered" "$dev_log" ||
+		fail "$name: want DONE $want_done/$COUNT_NAME, see $dev_log"
 
 	# on_announce fires once per announce: the device can never report
-	# more valid announces than the peer sent.
+	# more valid announces than the peer sent (no path requests here).
 	local sent seen
 	sent=$(grep -c "^ANNOUNCED$" "$peer_log" || true)
 	seen=$(grep -c "ANNOUNCE VALID retclient.echo" "$dev_log" || true)
 	[ "$seen" -le "$sent" ] || fail "$name: $seen announce callbacks for $sent announces"
-	echo "   DONE $want_done/$COUNT delivered, $seen/$sent announces seen"
+	echo "   DONE $want_done/$COUNT_NAME delivered, $seen/$sent announces seen"
+}
+
+fresh_rnsd() {
+	stop_rnsd
+	start_rnsd
+}
+
+scenario_late() {
+	local peer_log="$LOGS/peer-late.log" dev_log="$LOGS/device-late.log"
+
+	fresh_rnsd
+	# One announce, long before the device connects; rnsd will not replay it.
+	start_peer "$peer_log" --announce-interval 3600
+	sleep 2
+	run_device "$BUILD_HASH/zephyr/zephyr.exe" "$dev_log"
+	stop_peer
+
+	[ $RC -eq 0 ] || fail "late: device exit $RC, want 0, see $dev_log"
+	grep -q "path request for" "$dev_log" || fail "late: no path request sent"
+	check_messages late "$dev_log" "$peer_log" $COUNT_HASH proof
+	echo "   DONE $COUNT_HASH/$COUNT_HASH delivered via path request"
+}
+
+scenario_stall() {
+	local peer_log="$LOGS/peer-stall.log" dev_log="$LOGS/device-stall.log"
+
+	fresh_rnsd
+	start_peer "$peer_log" --announce-interval 3 --stop-proving-after 1
+	run_device "$BUILD_HASH/zephyr/zephyr.exe" "$dev_log"
+	stop_peer
+
+	grep -q "PROOF VALID #1 " "$dev_log" || fail "stall: no proof for #1"
+	for n in 2 3 4; do
+		grep -q "PROOF TIMEOUT #$n " "$dev_log" || fail "stall: no timeout for #$n"
+	done
+	grep -q "3 receipts in a row timed out, reconnecting" "$dev_log" ||
+		fail "stall: watchdog did not reconnect, see $dev_log"
+	local connects
+	connects=$(grep -c -- "-> CONNECTED" "$dev_log" || true)
+	[ "$connects" -ge 2 ] || fail "stall: did not reconnect after the watchdog"
+	echo "   watchdog reconnected after 3 timeouts"
+}
+
+scenario_restart() {
+	local peer_log="$LOGS/peer-restart.log" dev_log="$LOGS/device-restart.log"
+
+	fresh_rnsd
+	start_peer "$peer_log" --announce-interval 3600
+	RC=0
+	timeout 120 "$BUILD_HASH/zephyr/zephyr.exe" --seed-random >"$dev_log" 2>&1 &
+	local dev=$!
+	pids+=("$dev")
+
+	wait_for 60 "first proof" grep -q "PROOF VALID #1 " "$dev_log"
+	echo "   restarting rnsd"
+	stop_rnsd
+	start_rnsd
+
+	wait "$dev" || RC=$?
+	stop_peer
+	[ $RC -ne 124 ] || fail "restart: device timed out, see $dev_log"
+
+	grep -q -- "-> RECONNECTING" "$dev_log" || fail "restart: never noticed rnsd going away"
+	local connects
+	connects=$(grep -c -- "-> CONNECTED" "$dev_log" || true)
+	[ "$connects" -ge 2 ] || fail "restart: did not reconnect, see $dev_log"
+	# The last message is sent well after the restart, so it can only be
+	# delivered over a path learned again after reconnecting.
+	check_messages restart "$dev_log" "$peer_log" $COUNT_HASH proof $COUNT_HASH
+	local done_line
+	done_line=$(grep -o "DONE [0-9]*/$COUNT_HASH delivered" "$dev_log") ||
+		fail "restart: no DONE line, see $dev_log"
+	echo "   $done_line (messages in flight during the restart may be lost)"
 }
 
 for s in "${scenarios[@]}"; do
-	run_scenario "$s"
+	echo "== scenario $s"
+	case $s in
+	plain | ratchets | no-prove) scenario_announced "$s" ;;
+	late) scenario_late ;;
+	stall) scenario_stall ;;
+	restart) scenario_restart ;;
+	*) fail "unknown scenario $s" ;;
+	esac
 done
 
 echo "PASS: ${scenarios[*]}"

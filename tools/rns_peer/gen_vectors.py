@@ -188,6 +188,24 @@ def main() -> None:
     with mock.patch.object(RNS.Identity, "_remember_ratchet"):
         assert not RNS.Identity.validate_announce(unpack(announce_wrong_dest))
 
+    # Path request as Transport.request_path() builds it on a non-transport
+    # node: PLAIN DATA to rnstransport.path.request, data = dest | tag.
+    pr_hash = RNS.Destination.hash(None, "rnstransport", "path", "request")
+    pr_tag = fixed("path_request_tag", 16)
+    pr_dest = RNS.Destination(
+        None, RNS.Destination.OUT, RNS.Destination.PLAIN, "rnstransport", "path", "request"
+    )
+    pr_pkt = RNS.Packet(
+        pr_dest,
+        dest_hash + pr_tag,
+        packet_type=RNS.Packet.DATA,
+        transport_type=RNS.Transport.BROADCAST,
+        header_type=RNS.Packet.HEADER_1,
+    )
+    pr_pkt.pack()
+    path_request = pr_pkt.raw
+    assert path_request[2:18] == pr_hash
+
     hkdf_ikm = fixed("hkdf_ikm", 32)
     hkdf_out = hkdf(length=64, derive_from=hkdf_ikm, salt=id_hash, context=None)
 
@@ -264,6 +282,9 @@ def main() -> None:
         c_array("v_announce_real", announce_real),
         c_array("v_announce_path_response", announce_path_response),
         c_array("v_announce_max", announce_max),
+        c_array("v_path_request_dest", pr_hash),
+        c_array("v_path_request_tag", pr_tag),
+        c_array("v_path_request", path_request),
         c_array("v_hkdf_ikm", hkdf_ikm),
         c_array("v_hkdf_out", hkdf_out),
         c_array("v_eph_prv", eph_prv),
