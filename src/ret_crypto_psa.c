@@ -197,16 +197,72 @@ void ret_ed25519_key_pair(uint8_t secret_key[64], uint8_t pub[RET_ED25519_PUB_LE
 	crypto_ed25519_key_pair(secret_key, pub, seed_copy);
 }
 
+/* SHA-512 over a prefix and @p iov, reduced mod L (Monocypher's hash_reduce). */
+static void hash_reduce_iov(uint8_t out[32], const uint8_t *a, size_t a_len, const uint8_t *b,
+			    size_t b_len, const struct ret_iov *iov, size_t iov_cnt)
+{
+	uint8_t hash[64];
+	crypto_sha512_ctx ctx;
+
+	crypto_sha512_init(&ctx);
+	crypto_sha512_update(&ctx, a, a_len);
+	crypto_sha512_update(&ctx, b, b_len);
+	for (size_t i = 0; i < iov_cnt; i++) {
+		crypto_sha512_update(&ctx, iov[i].base, iov[i].len);
+	}
+	crypto_sha512_final(&ctx, hash);
+	crypto_eddsa_reduce(out, hash);
+	crypto_wipe(hash, sizeof(hash));
+	crypto_wipe(&ctx, sizeof(ctx));
+}
+
+void ret_ed25519_sign_iov(uint8_t sig[RET_ED25519_SIG_LEN], const uint8_t secret_key[64],
+			  const struct ret_iov *iov, size_t iov_cnt)
+{
+	/* RFC 8032, as crypto_ed25519_sign (ed25519_dom_sign without a
+	 * domain), over a message in pieces.
+	 */
+	uint8_t a[64]; /* secret scalar | prefix */
+	uint8_t r[32]; /* deterministic nonce */
+	uint8_t h[32];
+	uint8_t big_r[32];
+	const uint8_t *pk = secret_key + 32;
+
+	crypto_sha512(a, secret_key, 32);
+	crypto_eddsa_trim_scalar(a, a);
+	hash_reduce_iov(r, a + 32, 32, NULL, 0, iov, iov_cnt);
+	crypto_eddsa_scalarbase(big_r, r);
+	hash_reduce_iov(h, big_r, 32, pk, 32, iov, iov_cnt);
+	memcpy(sig, big_r, 32);
+	crypto_eddsa_mul_add(sig + 32, h, a, r);
+	crypto_wipe(a, sizeof(a));
+	crypto_wipe(r, sizeof(r));
+}
+
 void ret_ed25519_sign(uint8_t sig[RET_ED25519_SIG_LEN], const uint8_t secret_key[64],
 		      const uint8_t *msg, size_t len)
 {
-	crypto_ed25519_sign(sig, secret_key, msg, len);
+	const struct ret_iov iov = { msg, len };
+
+	ret_ed25519_sign_iov(sig, secret_key, &iov, 1);
+}
+
+bool ret_ed25519_verify_iov(const uint8_t sig[RET_ED25519_SIG_LEN],
+			    const uint8_t pub[RET_ED25519_PUB_LEN], const struct ret_iov *iov,
+			    size_t iov_cnt)
+{
+	uint8_t h_ram[32];
+
+	hash_reduce_iov(h_ram, sig, 32, pub, 32, iov, iov_cnt);
+	return crypto_eddsa_check_equation(sig, pub, h_ram) == 0;
 }
 
 bool ret_ed25519_verify(const uint8_t sig[RET_ED25519_SIG_LEN],
 			const uint8_t pub[RET_ED25519_PUB_LEN], const uint8_t *msg, size_t len)
 {
-	return crypto_ed25519_check(sig, pub, msg, len) == 0;
+	const struct ret_iov iov = { msg, len };
+
+	return ret_ed25519_verify_iov(sig, pub, &iov, 1);
 }
 
 int ret_random(uint8_t *buf, size_t len)

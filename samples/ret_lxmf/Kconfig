@@ -1,0 +1,46 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+menu "ret_lxmf sample"
+
+config RET_LXMF_SAMPLE_DISPLAY_NAME
+	string "Display name announced with the LXMF address"
+	default "ret-lxmf"
+
+config RET_LXMF_SAMPLE_CONTACT
+	string "LXMF address to message (32 hex digits)"
+	default ""
+	help
+	  When set, the sample sends "hello #n" to this lxmf.delivery
+	  address every RET_LXMF_SAMPLE_SEND_INTERVAL_S seconds; a path is
+	  requested on demand. Empty: only receive.
+
+config RET_LXMF_SAMPLE_REPLY
+	bool "Answer every received message"
+	default y
+	help
+	  Reply "re: <content>" to the sender of each verified message
+	  received, except to replies ("re: ..."), so two auto-repliers do
+	  not answer each other forever.
+
+config RET_LXMF_SAMPLE_SEND_INTERVAL_S
+	int "Seconds between messages"
+	default 30
+
+config RET_LXMF_SAMPLE_MESSAGE_COUNT
+	int "Messages to send (0 = forever)"
+	default 0
+	help
+	  With a count, once every message has resolved and an
+	  "echo: hello #n" reply arrived (verified) for each, or
+	  RET_LXMF_SAMPLE_REPLY_WAIT_S passed, the sample logs a summary
+	  and, on native_sim, exits with status 0 on full success and 1
+	  otherwise. For tools/rns_peer/lxmf_peer.py.
+
+config RET_LXMF_SAMPLE_REPLY_WAIT_S
+	int "Seconds to wait for outstanding echoes"
+	default 20
+
+endmenu
+
+source "Kconfig.zephyr"

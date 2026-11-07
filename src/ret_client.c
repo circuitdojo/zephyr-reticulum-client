@@ -170,7 +170,7 @@ static int send_announce(struct ret_client *c, uint8_t context)
 	}
 
 	len = ret_announce_build(&c->id, c->local_name_hash, c->local_dest, random_hash,
-				 c->cfg.announce_app_data, c->cfg.announce_app_data_len, context,
+				 c->app_data, c->app_data_len, context,
 				 c->tx_raw, sizeof(c->tx_raw));
 	if (len < 0) {
 		return len;
@@ -229,7 +229,9 @@ static void handle_inbound(struct ret_client *c, const struct ret_packet *pkt,
 		 * must not earn a proof by being repeated.
 		 */
 		remember_packet(c, hash);
-		if (c->cfg.on_data != NULL) {
+		if (c->cfg.on_lxmf != NULL) {
+			ret_lxmf_drv_on_data(c, c->rx_plain, (size_t)n);
+		} else if (c->cfg.on_data != NULL) {
 			c->cfg.on_data(c->rx_plain, (size_t)n, c->cfg.user);
 		}
 		ret_wipe(c->rx_plain, (size_t)n);
@@ -974,9 +976,9 @@ static int setup_local(struct ret_client *c)
 	bool have_id;
 	int err;
 
-	if (c->cfg.announce_app_data_len > RET_MTU - RET_H1_HEADER_LEN - 148) {
+	if (c->app_data_len > RET_MTU - RET_H1_HEADER_LEN - 148) {
 		LOG_ERR("announce_app_data of %zu bytes does not fit an announce",
-			c->cfg.announce_app_data_len);
+			c->app_data_len);
 		return -EMSGSIZE;
 	}
 
@@ -999,7 +1001,7 @@ static int setup_local(struct ret_client *c)
 	}
 	ret_wipe(prv, sizeof(prv));
 	if (!err) {
-		err = ret_name_hash(c->cfg.dest_name, c->local_name_hash);
+		err = ret_name_hash(c->dest_name, c->local_name_hash);
 	}
 	if (!err) {
 		err = ret_dest_hash(c->local_name_hash, c->id.hash, c->local_dest);
@@ -1015,7 +1017,7 @@ static int setup_local(struct ret_client *c)
 	c->has_local = true;
 	LOG_INF("own destination %s: %02x%02x%02x%02x%02x%02x%02x%02x"
 		"%02x%02x%02x%02x%02x%02x%02x%02x",
-		c->cfg.dest_name, c->local_dest[0], c->local_dest[1], c->local_dest[2],
+		c->dest_name, c->local_dest[0], c->local_dest[1], c->local_dest[2],
 		c->local_dest[3], c->local_dest[4], c->local_dest[5], c->local_dest[6],
 		c->local_dest[7], c->local_dest[8], c->local_dest[9], c->local_dest[10],
 		c->local_dest[11], c->local_dest[12], c->local_dest[13], c->local_dest[14],
@@ -1047,7 +1049,19 @@ int ret_client_start(struct ret_client *c)
 	ret_receipts_clear();
 
 	c->next_announce_ms = INT64_MAX;
-	if (c->cfg.dest_name != NULL) {
+	c->dest_name = c->cfg.dest_name;
+	c->app_data = c->cfg.announce_app_data;
+	c->app_data_len = c->cfg.announce_app_data_len;
+	if (c->cfg.on_lxmf != NULL) {
+		err = ret_lxmf_drv_setup(c);
+		if (err) {
+			LOG_ERR("LXMF configuration invalid: %d", err);
+			zsock_close(c->efd);
+			c->efd = -1;
+			return err;
+		}
+	}
+	if (c->dest_name != NULL) {
 		err = setup_local(c);
 		if (err) {
 			LOG_ERR("own destination setup failed: %d", err);

@@ -8,10 +8,11 @@ tools/rns_peer/peer_identity*
 .claude/settings.local.json
 .claude/worktrees/
 .env
-samples/ret_basic/env/*
-!samples/ret_basic/env/example.conf
+samples/*/env/*
+!samples/*/env/example.conf
 tools/rnsd-hw/storage/
 tools/rnsd-hw/logfile
 samples/*/log-*.log
 # Zephyr Tools per-checkout build settings
 **/.zephyr-overrides.json
+tools/rns_peer/lxmf_peer_identity*

@@ -344,4 +344,68 @@ ZTEST(identity, test_sign_verifies)
 					RET_HASH_LEN));
 }
 
+/* RFC 8032 section 7.1, TEST 3 (a 2-byte message), signed in pieces:
+ * independent of ret_ed25519_sign, which wraps the iov version.
+ */
+ZTEST(identity, test_ed25519_iov_rfc8032_test3)
+{
+	static const uint8_t seed[32] = {
+		0xc5, 0xaa, 0x8d, 0xf4, 0x3f, 0x9f, 0x83, 0x7b, 0xed, 0xb7, 0x44,
+		0x2f, 0x31, 0xdc, 0xb7, 0xb1, 0x66, 0xd3, 0x85, 0x35, 0x07, 0x6f,
+		0x09, 0x4b, 0x85, 0xce, 0x3a, 0x2e, 0x0b, 0x44, 0x58, 0xf7,
+	};
+	static const uint8_t want_pub[32] = {
+		0xfc, 0x51, 0xcd, 0x8e, 0x62, 0x18, 0xa1, 0xa3, 0x8d, 0xa4, 0x7e,
+		0xd0, 0x02, 0x30, 0xf0, 0x58, 0x08, 0x16, 0xed, 0x13, 0xba, 0x33,
+		0x03, 0xac, 0x5d, 0xeb, 0x91, 0x15, 0x48, 0x90, 0x80, 0x25,
+	};
+	static const uint8_t want_sig[64] = {
+		0x62, 0x91, 0xd6, 0x57, 0xde, 0xec, 0x24, 0x02, 0x48, 0x27, 0xe6,
+		0x9c, 0x3a, 0xbe, 0x01, 0xa3, 0x0c, 0xe5, 0x48, 0xa2, 0x84, 0x74,
+		0x3a, 0x44, 0x5e, 0x36, 0x80, 0xd7, 0xdb, 0x5a, 0xc3, 0xac, 0x18,
+		0xff, 0x9b, 0x53, 0x8d, 0x16, 0xf2, 0x90, 0xae, 0x67, 0xf7, 0x60,
+		0x98, 0x4d, 0xc6, 0x59, 0x4a, 0x7c, 0x15, 0xe9, 0x71, 0x6e, 0xd2,
+		0x8d, 0xc0, 0x27, 0xbe, 0xce, 0xea, 0x1e, 0xc4, 0x0a,
+	};
+	static const uint8_t m0 = 0xaf;
+	static const uint8_t m1 = 0x82;
+	const struct ret_iov iov[] = { { &m0, 1 }, { &m1, 1 } };
+	uint8_t sk[64];
+	uint8_t pub[32];
+	uint8_t sig[64];
+
+	ret_ed25519_key_pair(sk, pub, seed);
+	zassert_mem_equal(pub, want_pub, sizeof(pub));
+	ret_ed25519_sign_iov(sig, sk, iov, ARRAY_SIZE(iov));
+	zassert_mem_equal(sig, want_sig, sizeof(sig));
+	zassert_true(ret_ed25519_verify_iov(sig, pub, iov, ARRAY_SIZE(iov)));
+	ret_wipe(sk, sizeof(sk));
+}
+
+ZTEST(identity, test_sign_verify_iov)
+{
+	struct ret_local_identity id;
+	uint8_t whole[RET_SIG_LEN];
+	uint8_t pieces[RET_SIG_LEN];
+	uint8_t tampered[RET_HASH_LEN];
+	const uint8_t *pub = &v_identity_pub[RET_X25519_LEN];
+	const struct ret_iov iov[] = {
+		{ v_packet_hash, 5 }, { NULL, 0 }, { &v_packet_hash[5], 20 },
+		{ &v_packet_hash[25], RET_HASH_LEN - 25 },
+	};
+
+	/* A message in pieces signs and verifies as the whole message. */
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	ret_ed25519_sign(whole, id.ed25519_sk, v_packet_hash, RET_HASH_LEN);
+	ret_ed25519_sign_iov(pieces, id.ed25519_sk, iov, ARRAY_SIZE(iov));
+	zassert_mem_equal(whole, pieces, RET_SIG_LEN);
+	zassert_true(ret_ed25519_verify_iov(whole, pub, iov, ARRAY_SIZE(iov)));
+
+	memcpy(tampered, v_packet_hash, sizeof(tampered));
+	tampered[31] ^= 1;
+	const struct ret_iov bad[] = { { tampered, 16 }, { &tampered[16], 16 } };
+
+	zassert_false(ret_ed25519_verify_iov(whole, pub, bad, ARRAY_SIZE(bad)));
+}
+
 ZTEST_SUITE(identity, NULL, setup, NULL, NULL, NULL);

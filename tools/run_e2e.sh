@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end test of ret_basic against a real, isolated rnsd and the Python
-# test peer.
+# End-to-end test of ret_basic and ret_lxmf against a real, isolated rnsd and
+# the Python test peers.
 #
 # Announce-driven build (waits for an announce from retclient.echo):
 #   plain     peer proves every packet              -> 3/3 delivered, exit 0
@@ -17,6 +17,12 @@
 # runs after three earlier boots against the same rnsd: the client's
 # announce only reaches the peer if its persisted announce clock moved
 # forward over each reboot.
+#
+# ret_lxmf build (messages tools/rns_peer/lxmf_peer.py, a real LXMRouter):
+#   lxmf      the device announces lxmf.delivery and sends 3 opportunistic
+#             LXMF messages; the peer validates each signature and answers
+#             "echo: ...", which the device verifies, delivers and answers
+#             in turn -> 3/3 delivered, 3/3 echoes, replies validated, exit 0
 #
 # Known-hash build (sends to the peer's destination hash at once):
 #   late      peer announced once before the device started: the only way
@@ -44,6 +50,7 @@ TOP=$(west topdir)
 BUILD_NAME="$TOP/build/ret_e2e-name"
 BUILD_HASH="$TOP/build/ret_e2e-hash"
 BUILD_ECHO="$TOP/build/ret_e2e-echo"
+BUILD_LXMF="$TOP/build/ret_e2e-lxmf"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
@@ -51,9 +58,10 @@ RNSD_CONFIG="$HERE/rnsd-test"
 PORT=4243
 COUNT_NAME=3
 COUNT_HASH=6
+COUNT_LXMF=3
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -135,6 +143,18 @@ FLASH="$LOGS/flash.bin"
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
 needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
 	-DCONFIG_RET_SAMPLE_LINK_TEST=y
+if needs lxmf; then
+	LXMF_PEER=$("$PY" "$PEER_PROJECT/lxmf_peer.py" --print-hash)
+	echo "== build $(basename "$BUILD_LXMF") ($COUNT_LXMF messages)"
+	west build -b native_sim "$RET/samples/ret_lxmf" -d "$BUILD_LXMF" -p --no-sysbuild -- \
+		-DCONFIG_RET_SERVER_PORT=$PORT \
+		-DCONFIG_RET_LXMF_SAMPLE_CONTACT=\""$LXMF_PEER"\" \
+		-DCONFIG_RET_LXMF_SAMPLE_MESSAGE_COUNT=$COUNT_LXMF \
+		-DCONFIG_RET_LXMF_SAMPLE_SEND_INTERVAL_S=2 \
+		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
+		>"$LOGS/build-$(basename "$BUILD_LXMF").log" 2>&1 ||
+		fail "build failed, see $LOGS/build-$(basename "$BUILD_LXMF").log"
+fi
 if needs late stall bootdown restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
 	# The peer takes ~18 s to re-attach and re-announce after an rnsd
@@ -144,7 +164,7 @@ if needs late stall bootdown restart; then
 fi
 
 port_open && fail "port $PORT already in use; stop whatever is listening there"
-pgrep -f "$PEER_PROJECT/peer.py" >/dev/null &&
+pgrep -f "$PEER_PROJECT/(lxmf_)?peer.py" >/dev/null &&
 	fail "a test peer is still running (pgrep -af peer.py); stop it first"
 
 echo "== start rnsd ($RNSD_CONFIG)"
@@ -281,6 +301,45 @@ scenario_echo() {
 	echo "   $COUNT_NAME/$COUNT_NAME each way, proved both ways (client $own)"
 }
 
+scenario_lxmf() {
+	local peer_log="$LOGS/peer-lxmf.log" dev_log="$LOGS/device-lxmf.log" n
+
+	"$PY" "$PEER_PROJECT/lxmf_peer.py" --config "$RNSD_CONFIG" --announce-interval 3 \
+		>"$peer_log" 2>&1 &
+	PEER_PID=$!
+	pids+=("$PEER_PID")
+	wait_for 30 "LXMF peer ready" grep -q "^PEER READY" "$peer_log"
+	wait_for 10 "first announce" grep -q "^ANNOUNCED$" "$peer_log"
+	run_device "$BUILD_LXMF/zephyr/zephyr.exe" "$dev_log"
+	# The device's last replies are in flight as it exits.
+	sleep 2
+	stop_peer
+
+	[ $RC -eq 0 ] || fail "lxmf: device exit $RC, want 0, see $dev_log"
+	local own
+	own=$(awk '/LXMF ADDRESS/ {print $(NF-1); exit}' "$dev_log" | tr -d '\r' |
+		sed 's/\x1b\[[0-9;]*m//g')
+	[ -n "$own" ] || fail "lxmf: device reported no address"
+	# The announce carries LXMF app_data: display name, no stamp cost.
+	grep -q "^LXMF DEVICE ANNOUNCE $own ret-lxmf stamp_cost=None$" "$peer_log" ||
+		fail "lxmf: peer did not parse the device's LXMF announce, see $peer_log"
+	for n in $(seq 1 $COUNT_LXMF); do
+		grep -q "^LXMF RECEIVED validated $own |hello #$n$" "$peer_log" ||
+			fail "lxmf: peer did not validate hello #$n, see $peer_log"
+		grep -q "LXMF DELIVERED #$n " "$dev_log" ||
+			fail "lxmf: no delivery proof for #$n, see $dev_log"
+		grep -q "LXMF RECEIVED verified from $LXMF_PEER: |echo: hello #$n" "$dev_log" ||
+			fail "lxmf: device did not verify echo #$n, see $dev_log"
+		grep -q "^REPLY DELIVERED echo: hello #$n$" "$peer_log" ||
+			fail "lxmf: device did not prove echo #$n, see $peer_log"
+		grep -q "^LXMF RECEIVED validated $own |re: echo: hello #$n$" "$peer_log" ||
+			fail "lxmf: peer did not validate the device's reply to #$n, see $peer_log"
+	done
+	grep -q "DONE $COUNT_LXMF/$COUNT_LXMF delivered, $COUNT_LXMF/$COUNT_LXMF echoes" "$dev_log" ||
+		fail "lxmf: want DONE $COUNT_LXMF/$COUNT_LXMF, see $dev_log"
+	echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
+}
+
 fresh_rnsd() {
 	stop_rnsd
 	start_rnsd
@@ -386,6 +445,7 @@ for s in "${scenarios[@]}"; do
 	case $s in
 	plain | ratchets | no-prove) scenario_announced "$s" ;;
 	echo) scenario_echo ;;
+	lxmf) scenario_lxmf ;;
 	late) scenario_late ;;
 	stall) scenario_stall ;;
 	bootdown) scenario_bootdown ;;
