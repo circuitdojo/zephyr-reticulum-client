@@ -27,6 +27,9 @@ menuconfig RET_CLIENT
 	select RET_CORE
 	select NET_SOCKETS
 	select EVENTFD
+	# The client identity (its address) and announce clock persist here;
+	# the application picks the backend (e.g. SETTINGS_NVS).
+	select SETTINGS
 	help
 	  Reticulum client that connects to an rnsd TCPServerInterface,
 	  learns destinations from announces, sends encrypted DATA packets
@@ -161,6 +164,41 @@ config RET_RX_SILENCE_TIMEOUT_S
 	  Off by default: a quiet network may legitimately send nothing for
 	  a long time. Useful where the upstream is known to announce
 	  regularly. 0 disables.
+
+config RET_ANNOUNCE_INTERVAL_S
+	int "Re-announce the client's destination every N seconds"
+	default 0
+	help
+	  The client's own destination (when the application registers
+	  one) is announced on every connect and on ret_client_announce().
+	  A non-zero value also re-announces it periodically. Each announce
+	  persists the announce clock, so keep this modest on flash.
+
+config RET_ANNOUNCE_CLOCK_BLOCK
+	int "Announce clock values reserved per flash write"
+	default 64
+	range 1 65536
+	help
+	  Each announce needs an emission time newer than any used before,
+	  across reboots. The client persists a reservation and uses values
+	  from it in RAM, writing flash once per this many announces. A
+	  reboot skips the rest of the block, which costs nothing (the
+	  clock has 40 bits).
+
+config RET_PATH_RESPONSE_INTERVAL_MS
+	int "Minimum time between path responses for our destination (ms)"
+	default 5000
+	help
+	  Answering a path request means signing and sending an announce.
+	  Requests arriving faster than this, or repeating a recent tag, are
+	  ignored, so the network cannot make the client announce at will.
+
+config RET_RECENT_PACKETS
+	int "Recently received packets remembered for duplicate filtering"
+	default 8
+	help
+	  A DATA packet whose hash was seen recently is dropped instead of
+	  being delivered and proved again.
 
 config RET_RECONNECT_BACKOFF_MAX_S
 	int "Maximum reconnect backoff (s)"

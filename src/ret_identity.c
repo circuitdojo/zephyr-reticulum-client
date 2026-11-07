@@ -140,3 +140,85 @@ int ret_identity_encrypt(const uint8_t target_pub[RET_X25519_LEN],
 	ret_wipe(eph_prv, sizeof(eph_prv));
 	return err;
 }
+
+int ret_local_identity_load(struct ret_local_identity *id, const uint8_t prv[RET_PRVKEY_LEN])
+{
+	memcpy(id->x25519_prv, prv, RET_X25519_LEN);
+	ret_x25519_public_key(id->pub, id->x25519_prv);
+	ret_ed25519_key_pair(id->ed25519_sk, &id->pub[RET_X25519_LEN], &prv[RET_X25519_LEN]);
+	return ret_identity_hash(id->pub, id->hash);
+}
+
+int ret_local_identity_generate(struct ret_local_identity *id, uint8_t prv_out[RET_PRVKEY_LEN])
+{
+	int err = ret_random(prv_out, RET_PRVKEY_LEN);
+
+	return err ? err : ret_local_identity_load(id, prv_out);
+}
+
+void ret_local_identity_sign(const struct ret_local_identity *id, const uint8_t *msg,
+			     size_t len, uint8_t sig[RET_SIG_LEN])
+{
+	ret_ed25519_sign(sig, id->ed25519_sk, msg, len);
+}
+
+int ret_local_identity_decrypt(const struct ret_local_identity *id, const uint8_t *token,
+			       size_t len, uint8_t *out, size_t out_cap)
+{
+	const uint8_t *eph_pub = token;
+	const uint8_t *iv = token + RET_X25519_LEN;
+	const uint8_t *ct = iv + RET_AES_BLOCK_LEN;
+	uint8_t shared[RET_X25519_LEN];
+	uint8_t derived[64];
+	uint8_t mac[RET_SHA256_LEN];
+	size_t ct_len;
+	int err;
+
+	if (len < RET_TOKEN_OVERHEAD + RET_AES_BLOCK_LEN) {
+		return -EBADMSG;
+	}
+	ct_len = len - RET_TOKEN_OVERHEAD;
+	if (ct_len % RET_AES_BLOCK_LEN != 0) {
+		return -EBADMSG;
+	}
+	if (out_cap < ct_len) {
+		return -ENOBUFS;
+	}
+
+	err = ret_x25519(shared, id->x25519_prv, eph_pub);
+	if (err) {
+		return -EBADMSG;
+	}
+	err = ret_hkdf_sha256(shared, sizeof(shared), id->hash, RET_TRUNC_HASH_LEN, NULL, 0,
+			      derived, sizeof(derived));
+	ret_wipe(shared, sizeof(shared));
+	if (err) {
+		goto out;
+	}
+
+	/* Authenticate before decrypting (Token.decrypt verifies first). */
+	const struct ret_iov signed_parts[] = { { iv, RET_AES_BLOCK_LEN + ct_len } };
+
+	err = ret_hmac_sha256(&derived[0], 32, signed_parts, 1, mac);
+	if (err) {
+		goto out;
+	}
+	if (!ret_ct_equal(mac, &token[len - RET_SHA256_LEN], RET_SHA256_LEN)) {
+		err = -EBADMSG;
+		goto out;
+	}
+
+	err = ret_aes256_cbc_decrypt(&derived[32], iv, ct, ct_len, out);
+	if (err) {
+		goto out;
+	}
+	err = ret_pkcs7_unpad(out, ct_len);
+	if (err < 0) {
+		ret_wipe(out, ct_len);
+	}
+
+out:
+	ret_wipe(derived, sizeof(derived));
+	return err;
+}
+

@@ -39,4 +39,33 @@ struct ret_announce {
  */
 int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *out);
 
+#define RET_CONTEXT_PATH_RESPONSE 0x0B
+
+/**
+ * Build an announce for a destination owned by @p id, as
+ * Destination.announce() does (no ratchet): HEADER_1 BROADCAST SINGLE
+ * ANNOUNCE, data = pub | name_hash | random_hash | sig | app_data.
+ *
+ * @param random_hash 5 random bytes then the big-endian emission time;
+ *                    receivers ignore announces not newer than the last
+ * @param context     RET_CONTEXT_NONE, or RET_CONTEXT_PATH_RESPONSE when
+ *                    answering a path request
+ * @return packet length, or a negative errno
+ */
+int ret_announce_build(const struct ret_local_identity *id,
+		       const uint8_t name_hash[RET_NAME_HASH_LEN],
+		       const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
+		       const uint8_t random_hash[RET_RANDOM_HASH_LEN], const uint8_t *app_data,
+		       size_t app_data_len, uint8_t context, uint8_t *out, size_t cap);
+
+/**
+ * Build the implicit proof for a received packet (Identity.prove):
+ * HEADER_1 PROOF to packet_hash[:16], data = Ed25519 signature over the
+ * full packet hash.
+ *
+ * @return packet length, or a negative errno
+ */
+int ret_proof_build(const struct ret_local_identity *id, const uint8_t packet_hash[RET_HASH_LEN],
+		    uint8_t *out, size_t cap);
+
 #endif /* RET_ANNOUNCE_H_ */

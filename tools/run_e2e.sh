@@ -7,6 +7,15 @@
 #   ratchets  peer announces with enforced ratchets -> 3/3 delivered, exit 0
 #   no-prove  peer never proves                     -> 3 timeouts,    exit 1;
 #             a destination that never proved does not trip the watchdog
+#   echo      peer answers each message to the client's own destination
+#             (retclient.node), which decrypts and proves the reply
+#             -> 3/3 delivered both ways, both directions proved, exit 0
+#
+# Every device run shares one simulated flash file, so the client keeps its
+# identity (address) across scenarios, as it would across reboots. echo
+# runs after three earlier boots against the same rnsd: the client's
+# announce only reaches the peer if its persisted announce clock moved
+# forward over each reboot.
 #
 # Known-hash build (sends to the peer's destination hash at once):
 #   late      peer announced once before the device started: the only way
@@ -30,6 +39,7 @@ RET=$(cd "$HERE/.." && pwd)
 TOP=$(west topdir)
 BUILD_NAME="$TOP/build/ret_e2e-name"
 BUILD_HASH="$TOP/build/ret_e2e-hash"
+BUILD_ECHO="$TOP/build/ret_e2e-echo"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
@@ -39,7 +49,7 @@ COUNT_NAME=3
 COUNT_HASH=6
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove late stall restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo late stall restart)
 
 pids=()
 cleanup() {
@@ -113,9 +123,13 @@ needs() { # <scenario...>: true if any of them was selected
 	return 1
 }
 
+# Start clean: stale logs from an earlier run must not pass for this one's.
+rm -rf "$LOGS"
 mkdir -p "$LOGS"
+FLASH="$LOGS/flash.bin"
 
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
+needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y
 if needs late stall restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
 	# The peer takes ~18 s to re-attach and re-announce after an rnsd
@@ -151,7 +165,7 @@ stop_peer() {
 # rnsd drops the packets as duplicates of an earlier run's.
 run_device() { # <exe> <log>  (sets RC)
 	RC=0
-	timeout 120 "$1" --seed-random >"$2" 2>&1 || RC=$?
+	timeout 120 "$1" --seed-random --flash="$FLASH" >"$2" 2>&1 || RC=$?
 	[ $RC -ne 124 ] || fail "device timed out, see $2"
 }
 
@@ -211,6 +225,33 @@ scenario_announced() { # plain | ratchets | no-prove
 	echo "   DONE $want_done/$COUNT_NAME delivered, $seen/$sent announces seen"
 }
 
+scenario_echo() {
+	local peer_log="$LOGS/peer-echo.log" dev_log="$LOGS/device-echo.log" n
+
+	start_peer "$peer_log" --announce-interval 3 --reply
+	run_device "$BUILD_ECHO/zephyr/zephyr.exe" "$dev_log"
+	# Give the peer a moment to log the client's last proof.
+	sleep 1
+	stop_peer
+
+	[ $RC -eq 0 ] || fail "echo: device exit $RC, want 0, see $dev_log"
+	local own
+	own=$(awk '/OWN ADDRESS/ {print $NF; exit}' "$dev_log" | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g')
+	[ -n "$own" ] || fail "echo: device reported no address"
+	grep -q "^CLIENT ANNOUNCE $own$" "$peer_log" ||
+		fail "echo: peer never received the client's announce for $own, see $peer_log"
+	check_messages echo "$dev_log" "$peer_log" $COUNT_NAME proof
+	for n in $(seq 1 $COUNT_NAME); do
+		grep -q "RECEIVED echo: hello #$n" "$dev_log" ||
+			fail "echo: device did not receive the reply to #$n, see $dev_log"
+		grep -q "^REPLY PROVED echo: hello #$n$" "$peer_log" ||
+			fail "echo: peer got no proof from the client for reply #$n, see $peer_log"
+	done
+	grep -q "DONE $COUNT_NAME/$COUNT_NAME delivered, $COUNT_NAME/$COUNT_NAME replies" "$dev_log" ||
+		fail "echo: want DONE $COUNT_NAME/$COUNT_NAME, $COUNT_NAME/$COUNT_NAME replies"
+	echo "   $COUNT_NAME/$COUNT_NAME each way, proved both ways (client $own)"
+}
+
 fresh_rnsd() {
 	stop_rnsd
 	start_rnsd
@@ -258,7 +299,8 @@ scenario_restart() {
 	fresh_rnsd
 	start_peer "$peer_log" --announce-interval 3600
 	RC=0
-	timeout 120 "$BUILD_HASH/zephyr/zephyr.exe" --seed-random >"$dev_log" 2>&1 &
+	timeout 120 "$BUILD_HASH/zephyr/zephyr.exe" --seed-random --flash="$FLASH" \
+		>"$dev_log" 2>&1 &
 	local dev=$!
 	pids+=("$dev")
 
@@ -288,6 +330,7 @@ for s in "${scenarios[@]}"; do
 	echo "== scenario $s"
 	case $s in
 	plain | ratchets | no-prove) scenario_announced "$s" ;;
+	echo) scenario_echo ;;
 	late) scenario_late ;;
 	stall) scenario_stall ;;
 	restart) scenario_restart ;;

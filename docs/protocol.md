@@ -87,3 +87,21 @@ regenerate the test vectors.
 - `Destination.proof_strategy` defaults to PROVE_NONE. Most destinations
   never prove, so a missing proof is not by itself a sign of a dead link.
 
+## Being a destination
+
+- Private key: X25519 private key (32) || Ed25519 seed (32), as
+  `Identity.get_private_key()`. Address = H(name_hash | H(pub)[:16])[:16].
+- Announce: as above without a ratchet; `random_hash` is 5 random bytes then
+  the emission time as 5 big-endian bytes. A node keeps the destination's
+  newest emission time and ignores announces not newer than it (Transport.py
+  ~L2236), and its path does not expire for days, so the emission time must
+  be monotonic across reboots: ret-client persists it ("announce clock"),
+  reserving values in blocks so it does not write flash on every announce.
+- A non-transport rnsd passes a TCP client's announce on to its local
+  clients when it updates its path table with it.
+- Receiving: decrypt with HKDF salt = our identity hash; verify the HMAC
+  before decrypting (Token.decrypt order).
+- Proving: implicit proof, as above, signed with our Ed25519 key.
+- Path requests for our address arrive as PLAIN DATA to the path request
+  destination; answer with an announce with context PATH_RESPONSE.
+

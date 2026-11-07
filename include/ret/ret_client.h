@@ -70,6 +70,14 @@ typedef void (*ret_receipt_cb_t)(const uint8_t packet_hash[RET_PACKET_HASH_LEN],
 
 typedef void (*ret_state_cb_t)(enum ret_client_state state, void *user);
 
+/**
+ * Called on the client thread with the decrypted payload of a packet sent
+ * to the client's own destination. @p data is wiped after the callback
+ * returns; copy what you need. The packet is proved to its sender right
+ * after the callback.
+ */
+typedef void (*ret_data_cb_t)(const uint8_t *data, size_t len, void *user);
+
 struct ret_client_config {
 	/** NULL selects CONFIG_RET_SERVER_HOST. */
 	const char *host;
@@ -77,6 +85,19 @@ struct ret_client_config {
 	uint16_t port;
 	ret_announce_cb_t on_announce;
 	ret_state_cb_t on_state;
+	/**
+	 * Full name ("app.aspect...") of the client's own IN SINGLE
+	 * destination, which makes it reachable: it is announced on every
+	 * connect, path requests for it are answered, and packets sent to
+	 * it are decrypted, passed to @ref on_data and proved. Its address
+	 * comes from an identity generated on first start and persisted in
+	 * settings. NULL for a send-only client.
+	 */
+	const char *dest_name;
+	/** Optional app_data carried in the destination's announces. */
+	const uint8_t *announce_app_data;
+	size_t announce_app_data_len;
+	ret_data_cb_t on_data;
 	void *user;
 };
 
@@ -115,6 +136,17 @@ int ret_client_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_
 int ret_client_name_hash(const char *full_name, uint8_t out[10]);
 
 enum ret_client_state ret_client_state(const struct ret_client *client);
+
+/**
+ * The client's own destination hash (its address), valid after
+ * ret_client_start() when a dest_name was configured.
+ *
+ * @retval -ENOENT no destination configured or client not started
+ */
+int ret_client_dest_hash(const struct ret_client *client, uint8_t out[RET_DEST_HASH_LEN]);
+
+/** Queue an announce of the client's own destination. */
+int ret_client_announce(struct ret_client *client);
 
 #ifdef __cplusplus
 }

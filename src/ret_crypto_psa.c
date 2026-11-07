@@ -187,6 +187,22 @@ int ret_x25519(uint8_t shared[RET_X25519_LEN], const uint8_t prv[RET_X25519_LEN]
 	return 0;
 }
 
+void ret_ed25519_key_pair(uint8_t secret_key[64], uint8_t pub[RET_ED25519_PUB_LEN],
+			  const uint8_t seed[32])
+{
+	uint8_t seed_copy[32];
+
+	/* Monocypher wipes the seed it is given. */
+	memcpy(seed_copy, seed, sizeof(seed_copy));
+	crypto_ed25519_key_pair(secret_key, pub, seed_copy);
+}
+
+void ret_ed25519_sign(uint8_t sig[RET_ED25519_SIG_LEN], const uint8_t secret_key[64],
+		      const uint8_t *msg, size_t len)
+{
+	crypto_ed25519_sign(sig, secret_key, msg, len);
+}
+
 bool ret_ed25519_verify(const uint8_t sig[RET_ED25519_SIG_LEN],
 			const uint8_t pub[RET_ED25519_PUB_LEN], const uint8_t *msg, size_t len)
 {

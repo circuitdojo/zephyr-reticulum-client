@@ -25,6 +25,7 @@
 #include "ret_identity.h"
 #include "ret_packet.h"
 #include "ret_receipt.h"
+#include "ret_storage.h"
 #include "ret_tcp.h"
 
 LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
@@ -37,6 +38,8 @@ BUILD_ASSERT(RET_DEST_HASH_LEN == RET_TRUNC_HASH_LEN);
 BUILD_ASSERT(RET_PACKET_HASH_LEN == RET_HASH_LEN);
 
 struct send_req {
+	/** Announce the client's own destination instead of sending. */
+	bool announce;
 	uint8_t dest_hash[RET_DEST_HASH_LEN];
 	uint16_t len;
 	uint8_t data[RET_MAX_PAYLOAD];
@@ -68,6 +71,23 @@ struct ret_client {
 	/** Set from inside frame handling when a send broke the connection. */
 	bool conn_broken;
 	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
+
+	/* The client's own destination, when cfg.dest_name is set. */
+	bool has_local;
+	struct ret_local_identity id;
+	uint8_t local_dest[RET_TRUNC_HASH_LEN];
+	uint8_t local_name_hash[RET_NAME_HASH_LEN];
+	uint8_t path_request_dest[RET_TRUNC_HASH_LEN];
+	/** Last emission time used, and the persisted reservation above it. */
+	uint64_t aclk;
+	uint64_t aclk_reserved;
+	int64_t next_announce_ms;
+	int64_t last_path_response_ms;
+	uint8_t path_request_tags[4][RET_PATH_REQUEST_TAG_LEN];
+	size_t path_request_tag_next;
+	uint8_t recent[CONFIG_RET_RECENT_PACKETS][RET_HASH_LEN];
+	size_t recent_next;
+	uint8_t rx_plain[RET_MTU];
 	uint8_t rx_frame[RET_MTU];
 	uint8_t rx_chunk[256];
 	uint8_t tx_raw[RET_MTU];
@@ -164,11 +184,182 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 	}
 }
 
+static int send_frame(struct ret_client *c, size_t raw_len);
+
+/**
+ * Announce the client's destination. The announce clock is persisted
+ * before use: an announce that is not newer than the last one a node has
+ * seen is ignored, so a clock that went backwards over a reboot would
+ * make the client unreachable until that node's path expired.
+ */
+static int send_announce(struct ret_client *c, uint8_t context)
+{
+	uint8_t random_hash[RET_RANDOM_HASH_LEN];
+	uint64_t emitted = c->aclk + 1;
+	int len;
+	int err;
+
+	/* Reschedule first, so a failure cannot make the loop spin on it. */
+	if (CONFIG_RET_ANNOUNCE_INTERVAL_S > 0) {
+		c->next_announce_ms =
+			k_uptime_get() + (int64_t)CONFIG_RET_ANNOUNCE_INTERVAL_S * MSEC_PER_SEC;
+	}
+
+	if (emitted > c->aclk_reserved) {
+		uint64_t reserve = emitted + CONFIG_RET_ANNOUNCE_CLOCK_BLOCK - 1;
+
+		err = ret_storage_save_aclk(reserve);
+		if (err) {
+			return err;
+		}
+		c->aclk_reserved = reserve;
+	}
+	c->aclk = emitted;
+
+	err = ret_random(random_hash, 5);
+	if (err) {
+		return err;
+	}
+	for (int i = 9; i >= 5; i--) {
+		random_hash[i] = (uint8_t)emitted;
+		emitted >>= 8;
+	}
+
+	len = ret_announce_build(&c->id, c->local_name_hash, c->local_dest, random_hash,
+				 c->cfg.announce_app_data, c->cfg.announce_app_data_len, context,
+				 c->tx_raw, sizeof(c->tx_raw));
+	if (len < 0) {
+		return len;
+	}
+	err = send_frame(c, (size_t)len);
+	if (!err) {
+		LOG_INF("announced own destination%s",
+			context == RET_CONTEXT_PATH_RESPONSE ? " (path response)" : "");
+	}
+	return err;
+}
+
+static bool seen_recently(const struct ret_client *c, const uint8_t hash[RET_HASH_LEN])
+{
+	for (size_t i = 0; i < ARRAY_SIZE(c->recent); i++) {
+		if (memcmp(c->recent[i], hash, RET_HASH_LEN) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void remember_packet(struct ret_client *c, const uint8_t hash[RET_HASH_LEN])
+{
+	memcpy(c->recent[c->recent_next], hash, RET_HASH_LEN);
+	c->recent_next = (c->recent_next + 1) % ARRAY_SIZE(c->recent);
+}
+
+/** DATA for the client's own destination: decrypt, deliver, prove. */
+static void handle_inbound(struct ret_client *c, const struct ret_packet *pkt,
+			   const uint8_t *frame, size_t len)
+{
+	uint8_t hash[RET_HASH_LEN];
+	int n;
+	int err;
+
+	if (pkt->context != RET_CONTEXT_NONE) {
+		LOG_DBG("ignoring DATA with context 0x%02x", pkt->context);
+		return;
+	}
+	if (ret_packet_hash(frame, len, hash) != 0) {
+		return;
+	}
+
+	if (seen_recently(c, hash)) {
+		/* Delivered already; prove again in case our proof was lost. */
+		LOG_DBG("duplicate packet, proving again");
+	} else {
+		n = ret_local_identity_decrypt(&c->id, pkt->data, pkt->data_len, c->rx_plain,
+					       sizeof(c->rx_plain));
+		if (n < 0) {
+			LOG_WRN("undecryptable packet for own destination: %d", n);
+			return;
+		}
+		/* Only packets that decrypted count as seen: a forged packet
+		 * must not earn a proof by being repeated.
+		 */
+		remember_packet(c, hash);
+		if (c->cfg.on_data != NULL) {
+			c->cfg.on_data(c->rx_plain, (size_t)n, c->cfg.user);
+		}
+		ret_wipe(c->rx_plain, (size_t)n);
+	}
+
+	n = ret_proof_build(&c->id, hash, c->tx_raw, sizeof(c->tx_raw));
+	err = n < 0 ? n : send_frame(c, (size_t)n);
+	if (err == -ECONNRESET) {
+		c->conn_broken = true;
+	} else if (err) {
+		LOG_WRN("proof not sent: %d", err);
+	}
+}
+
+/** A path request for the client's own destination: announce in reply. */
+static void handle_path_request(struct ret_client *c, const struct ret_packet *pkt)
+{
+	const uint8_t *tag;
+	size_t tag_len;
+	int64_t now = k_uptime_get();
+
+	if (pkt->data_len < RET_TRUNC_HASH_LEN ||
+	    memcmp(pkt->data, c->local_dest, RET_TRUNC_HASH_LEN) != 0) {
+		return;
+	}
+
+	/* Tag position as path_request_handler reads it: after the
+	 * requesting transport ID if one is present. Tagless requests are
+	 * ignored, as RNS does.
+	 */
+	if (pkt->data_len > 2 * RET_TRUNC_HASH_LEN) {
+		tag = &pkt->data[2 * RET_TRUNC_HASH_LEN];
+		tag_len = pkt->data_len - 2 * RET_TRUNC_HASH_LEN;
+	} else if (pkt->data_len > RET_TRUNC_HASH_LEN) {
+		tag = &pkt->data[RET_TRUNC_HASH_LEN];
+		tag_len = pkt->data_len - RET_TRUNC_HASH_LEN;
+	} else {
+		return;
+	}
+	tag_len = MIN(tag_len, RET_PATH_REQUEST_TAG_LEN);
+
+	uint8_t key[RET_PATH_REQUEST_TAG_LEN] = { 0 };
+
+	memcpy(key, tag, tag_len);
+	for (size_t i = 0; i < ARRAY_SIZE(c->path_request_tags); i++) {
+		if (memcmp(c->path_request_tags[i], key, sizeof(key)) == 0) {
+			return;
+		}
+	}
+	if (c->last_path_response_ms != 0 &&
+	    now - c->last_path_response_ms < CONFIG_RET_PATH_RESPONSE_INTERVAL_MS) {
+		LOG_DBG("path request for own destination rate-limited");
+		return;
+	}
+
+	memcpy(c->path_request_tags[c->path_request_tag_next], key, sizeof(key));
+	c->path_request_tag_next = (c->path_request_tag_next + 1) % ARRAY_SIZE(c->path_request_tags);
+	c->last_path_response_ms = now;
+
+	if (send_announce(c, RET_CONTEXT_PATH_RESPONSE) == -ECONNRESET) {
+		c->conn_broken = true;
+	}
+}
+
 static void on_frame(const uint8_t *frame, size_t len, void *user)
 {
 	struct ret_client *c = user;
 	struct ret_packet pkt;
 	int err;
+
+	if (c->conn_broken) {
+		/* A send failed earlier in this read; the connection is gone. */
+		return;
+	}
 
 	err = ret_packet_unpack(frame, len, &pkt);
 	if (err) {
@@ -196,8 +387,20 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 		}
 		break;
 	}
+	case RET_PKT_DATA:
+		if (!c->has_local) {
+			break;
+		}
+		if (pkt.dest_type == RET_DEST_SINGLE &&
+		    memcmp(pkt.dest_hash, c->local_dest, RET_TRUNC_HASH_LEN) == 0) {
+			handle_inbound(c, &pkt, frame, len);
+		} else if (pkt.dest_type == RET_DEST_PLAIN &&
+			   memcmp(pkt.dest_hash, c->path_request_dest, RET_TRUNC_HASH_LEN) == 0) {
+			handle_path_request(c, &pkt);
+		}
+		break;
 	default:
-		/* No local destinations yet: DATA and link traffic is not for us. */
+		/* Link requests and other traffic are not for us. */
 		break;
 	}
 }
@@ -438,6 +641,14 @@ static bool process_queue(struct ret_client *c)
 	while (k_msgq_get(&ret_send_q, &c->req, K_NO_WAIT) == 0) {
 		int err;
 
+		if (c->req.announce) {
+			if (c->state == RET_STATE_CONNECTED &&
+			    send_announce(c, RET_CONTEXT_NONE) == -ECONNRESET) {
+				(void)zvfs_eventfd_write(c->efd, 1);
+				return false;
+			}
+			continue;
+		}
 		if (c->state != RET_STATE_CONNECTED) {
 			err = -ENOTCONN;
 		} else {
@@ -535,10 +746,20 @@ static void run_connected(struct ret_client *c)
 	if (!service_held(c)) {
 		return;
 	}
+	if (c->has_local) {
+		int err = send_announce(c, RET_CONTEXT_NONE);
+
+		if (err == -ECONNRESET) {
+			return;
+		}
+		if (err) {
+			LOG_ERR("announce failed: %d", err);
+		}
+	}
 
 	for (;;) {
 		int64_t next = MIN(MIN(ret_receipts_next_deadline(), held_next_event(c)),
-				   silence_deadline(c));
+				   MIN(silence_deadline(c), c->next_announce_ms));
 		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(next));
 
 		if (n < 0) {
@@ -575,6 +796,10 @@ static void run_connected(struct ret_client *c)
 		}
 
 		if (!service_held(c) || watchdog(c)) {
+			return;
+		}
+		if (c->has_local && k_uptime_get() >= c->next_announce_ms &&
+		    send_announce(c, RET_CONTEXT_NONE) == -ECONNRESET) {
 			return;
 		}
 	}
@@ -655,6 +880,62 @@ struct ret_client *ret_client_create(const struct ret_client_config *cfg)
 	return &client;
 }
 
+/** Load (or create and store) the identity behind the client's address. */
+static int setup_local(struct ret_client *c)
+{
+	uint8_t prv[RET_PRVKEY_LEN];
+	bool have_id;
+	int err;
+
+	if (c->cfg.announce_app_data_len > RET_MTU - RET_H1_HEADER_LEN - 148) {
+		LOG_ERR("announce_app_data of %zu bytes does not fit an announce",
+			c->cfg.announce_app_data_len);
+		return -EMSGSIZE;
+	}
+
+	err = ret_storage_load(prv, &have_id, &c->aclk_reserved);
+	if (err) {
+		return err;
+	}
+	/* Every value up to the reservation may have been used already. */
+	c->aclk = c->aclk_reserved;
+	if (have_id) {
+		err = ret_local_identity_load(&c->id, prv);
+	} else {
+		err = ret_local_identity_generate(&c->id, prv);
+		if (!err) {
+			err = ret_storage_save_identity(prv);
+		}
+		if (!err) {
+			LOG_INF("created new identity");
+		}
+	}
+	ret_wipe(prv, sizeof(prv));
+	if (!err) {
+		err = ret_name_hash(c->cfg.dest_name, c->local_name_hash);
+	}
+	if (!err) {
+		err = ret_dest_hash(c->local_name_hash, c->id.hash, c->local_dest);
+	}
+	if (!err) {
+		err = ret_plain_dest_hash("rnstransport.path.request", c->path_request_dest);
+	}
+	if (err) {
+		ret_wipe(&c->id, sizeof(c->id));
+		return err;
+	}
+
+	c->has_local = true;
+	LOG_INF("own destination %s: %02x%02x%02x%02x%02x%02x%02x%02x"
+		"%02x%02x%02x%02x%02x%02x%02x%02x",
+		c->cfg.dest_name, c->local_dest[0], c->local_dest[1], c->local_dest[2],
+		c->local_dest[3], c->local_dest[4], c->local_dest[5], c->local_dest[6],
+		c->local_dest[7], c->local_dest[8], c->local_dest[9], c->local_dest[10],
+		c->local_dest[11], c->local_dest[12], c->local_dest[13], c->local_dest[14],
+		c->local_dest[15]);
+	return 0;
+}
+
 int ret_client_start(struct ret_client *c)
 {
 	int err;
@@ -677,6 +958,17 @@ int ret_client_start(struct ret_client *c)
 	ret_hdlc_decoder_init(&c->hdlc, c->rx_frame, sizeof(c->rx_frame));
 	ret_destinations_clear();
 	ret_receipts_clear();
+
+	c->next_announce_ms = INT64_MAX;
+	if (c->cfg.dest_name != NULL) {
+		err = setup_local(c);
+		if (err) {
+			LOG_ERR("own destination setup failed: %d", err);
+			zsock_close(c->efd);
+			c->efd = -1;
+			return err;
+		}
+	}
 
 	k_thread_create(&ret_thread, ret_stack, K_THREAD_STACK_SIZEOF(ret_stack), client_thread,
 			c, NULL, NULL, CONFIG_RET_THREAD_PRIORITY, 0, K_NO_WAIT);
@@ -724,3 +1016,27 @@ enum ret_client_state ret_client_state(const struct ret_client *c)
 {
 	return c->state;
 }
+
+int ret_client_dest_hash(const struct ret_client *c, uint8_t out[RET_DEST_HASH_LEN])
+{
+	if (!c->started || !c->has_local) {
+		return -ENOENT;
+	}
+	memcpy(out, c->local_dest, RET_DEST_HASH_LEN);
+	return 0;
+}
+
+int ret_client_announce(struct ret_client *c)
+{
+	struct send_req r = { .announce = true };
+
+	if (!c->started || !c->has_local) {
+		return -ENOENT;
+	}
+	if (k_msgq_put(&ret_send_q, &r, K_NO_WAIT) != 0) {
+		return -EAGAIN;
+	}
+	(void)zvfs_eventfd_write(c->efd, 1);
+	return 0;
+}
+

@@ -73,6 +73,14 @@ void ret_x25519_public_key(uint8_t pub[RET_X25519_LEN], const uint8_t prv[RET_X2
 int ret_x25519(uint8_t shared[RET_X25519_LEN], const uint8_t prv[RET_X25519_LEN],
 	       const uint8_t pub[RET_X25519_LEN]);
 
+/** Derive the 64-byte signing key and public key from a 32-byte seed. */
+void ret_ed25519_key_pair(uint8_t secret_key[64], uint8_t pub[RET_ED25519_PUB_LEN],
+			  const uint8_t seed[32]);
+
+/** RFC 8032 Ed25519 signature (deterministic). */
+void ret_ed25519_sign(uint8_t sig[RET_ED25519_SIG_LEN], const uint8_t secret_key[64],
+		      const uint8_t *msg, size_t len);
+
 /** RFC 8032 Ed25519 (SHA-512) signature check. */
 bool ret_ed25519_verify(const uint8_t sig[RET_ED25519_SIG_LEN],
 			const uint8_t pub[RET_ED25519_PUB_LEN], const uint8_t *msg, size_t len);

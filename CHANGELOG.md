@@ -4,6 +4,25 @@
 
 ### Added
 
+- The client's own destination (`ret_client_config.dest_name`): an identity
+  created on first start and persisted in settings gives it a stable
+  address. It is announced on every connect (and every
+  `CONFIG_RET_ANNOUNCE_INTERVAL_S`, or on `ret_client_announce()`), path
+  requests for it are answered, and packets sent to it are decrypted,
+  passed to `on_data`, duplicate-filtered and proved.
+- Persisted announce clock, so announces stay newer than those a node saw
+  before a reboot. Values are reserved in blocks
+  (`CONFIG_RET_ANNOUNCE_CLOCK_BLOCK`), one flash write per block.
+- Path requests for the client's destination are answered once per tag and
+  at most every `CONFIG_RET_PATH_RESPONSE_INTERVAL_MS`; tagless requests are
+  ignored.
+- `ret_basic` announces `retclient.node` and logs replies;
+  `CONFIG_RET_SAMPLE_EXPECT_REPLIES` makes success require one per message.
+- `peer.py --reply` and the e2e `echo` scenario: messages and proofs in
+  both directions.
+- Forgejo CI (`.forgejo/workflows/ci.yml`, `ci/Dockerfile`): ruff, golden
+  vector check, unit tests, warning-free build and the full e2e.
+
 - Path requests: a send to a destination with no current path is held
   (`CONFIG_RET_MAX_HELD_SENDS`) while a path request goes out, repeated
   every `CONFIG_RET_PATH_REQUEST_INTERVAL_MS` (15 s), and released by the

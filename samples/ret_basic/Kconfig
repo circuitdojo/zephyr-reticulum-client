@@ -18,6 +18,27 @@ config RET_SAMPLE_DEST_HASH
 	  instead of waiting for an announce matching RET_SAMPLE_DEST_NAME;
 	  the client requests a path to it on demand.
 
+config RET_SAMPLE_LOCAL_NAME
+	string "The sample's own destination name"
+	default "retclient.node"
+	help
+	  The sample announces this destination, logs what is sent to it,
+	  and proves it. Its address comes from an identity created on
+	  first start and kept in settings. Empty makes the sample
+	  send-only.
+
+config RET_SAMPLE_EXPECT_REPLIES
+	bool "Require a reply to every message"
+	help
+	  For the end-to-end test against tools/rns_peer/peer.py --reply:
+	  success also requires an "echo: ..." packet for every message
+	  sent, waiting up to RET_SAMPLE_REPLY_WAIT_S for late ones.
+
+config RET_SAMPLE_REPLY_WAIT_S
+	int "Seconds to wait for outstanding replies"
+	default 10
+	depends on RET_SAMPLE_EXPECT_REPLIES
+
 config RET_SAMPLE_SEND_INTERVAL_S
 	int "Seconds between messages"
 	default 10

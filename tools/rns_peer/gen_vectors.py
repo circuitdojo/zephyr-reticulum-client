@@ -270,6 +270,7 @@ def main() -> None:
         f'#define V_APP_DATA "{APP_DATA.decode()}"',
         f'#define V_PLAINTEXT "{PLAINTEXT.decode()}"',
         "",
+        c_array("v_identity_prv", prv),
         c_array("v_identity_pub", pub),
         c_array("v_identity_hash", id_hash),
         c_array("v_name_hash", name_hash),
