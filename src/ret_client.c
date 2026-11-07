@@ -19,6 +19,7 @@
 #include <ret/ret_client.h>
 
 #include "ret_announce.h"
+#include "ret_client_internal.h"
 #include "ret_crypto.h"
 #include "ret_destinations.h"
 #include "ret_hdlc.h"
@@ -36,66 +37,7 @@ LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 BUILD_ASSERT(RET_MAX_PAYLOAD == RET_ENCRYPTED_MDU);
 BUILD_ASSERT(RET_DEST_HASH_LEN == RET_TRUNC_HASH_LEN);
 BUILD_ASSERT(RET_PACKET_HASH_LEN == RET_HASH_LEN);
-
-struct send_req {
-	/** Announce the client's own destination instead of sending. */
-	bool announce;
-	uint8_t dest_hash[RET_DEST_HASH_LEN];
-	uint16_t len;
-	uint8_t data[RET_MAX_PAYLOAD];
-	ret_receipt_cb_t cb;
-	void *user;
-};
-
-/* A send waiting for a path to its destination. */
-struct held_send {
-	bool used;
-	int64_t deadline_ms;
-	int64_t next_request_ms;
-	struct send_req req;
-};
-
-struct ret_client {
-	struct ret_client_config cfg;
-	const char *host;
-	uint16_t port;
-	enum ret_client_state state;
-	bool started;
-	int sock;
-	int efd;
-	struct ret_hdlc_decoder hdlc;
-	/** Valid packets received on the current connection. */
-	uint32_t rx_packets;
-	int64_t last_rx_ms;
-	int consecutive_timeouts;
-	/** Set from inside frame handling when a send broke the connection. */
-	bool conn_broken;
-	/** A connect is in progress: queued sends are held until it is done. */
-	bool connecting;
-	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
-
-	/* The client's own destination, when cfg.dest_name is set. */
-	bool has_local;
-	struct ret_local_identity id;
-	uint8_t local_dest[RET_TRUNC_HASH_LEN];
-	uint8_t local_name_hash[RET_NAME_HASH_LEN];
-	uint8_t path_request_dest[RET_TRUNC_HASH_LEN];
-	/** Last emission time used, and the persisted reservation above it. */
-	uint64_t aclk;
-	uint64_t aclk_reserved;
-	int64_t next_announce_ms;
-	int64_t last_path_response_ms;
-	uint8_t path_request_tags[4][RET_PATH_REQUEST_TAG_LEN];
-	size_t path_request_tag_next;
-	uint8_t recent[CONFIG_RET_RECENT_PACKETS][RET_HASH_LEN];
-	size_t recent_next;
-	uint8_t rx_plain[RET_MTU];
-	uint8_t rx_frame[RET_MTU];
-	uint8_t rx_chunk[256];
-	uint8_t tx_raw[RET_MTU];
-	uint8_t tx_frame[RET_HDLC_MAX_ENCODED(RET_MTU)];
-	struct send_req req;
-};
+BUILD_ASSERT(RET_MAX_PAYLOAD <= RET_LINK_MDU);
 
 K_MSGQ_DEFINE(ret_send_q, sizeof(struct send_req), CONFIG_RET_TX_QUEUE_DEPTH, 4);
 K_THREAD_STACK_DEFINE(ret_stack, CONFIG_RET_THREAD_STACK_SIZE);
@@ -160,6 +102,7 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 	 */
 	if (d->path_valid) {
 		release_held(c, d->dest_hash);
+		ret_link_drv_on_path(c, d);
 	}
 
 	if (!fresh) {
@@ -186,7 +129,6 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 	}
 }
 
-static int send_frame(struct ret_client *c, size_t raw_len);
 
 /**
  * Announce the client's destination. The announce clock is persisted
@@ -233,7 +175,7 @@ static int send_announce(struct ret_client *c, uint8_t context)
 	if (len < 0) {
 		return len;
 	}
-	err = send_frame(c, (size_t)len);
+	err = ret_client_send_frame(c, (size_t)len);
 	if (!err) {
 		LOG_INF("announced own destination%s",
 			context == RET_CONTEXT_PATH_RESPONSE ? " (path response)" : "");
@@ -294,7 +236,7 @@ static void handle_inbound(struct ret_client *c, const struct ret_packet *pkt,
 	}
 
 	n = ret_proof_build(&c->id, hash, c->tx_raw, sizeof(c->tx_raw));
-	err = n < 0 ? n : send_frame(c, (size_t)n);
+	err = n < 0 ? n : ret_client_send_frame(c, (size_t)n);
 	if (err == -ECONNRESET) {
 		c->conn_broken = true;
 	} else if (err) {
@@ -370,6 +312,12 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 	}
 	c->rx_packets++;
 
+	if (pkt.dest_type == RET_DEST_LINK && c->link.state != LINK_NONE &&
+	    memcmp(pkt.dest_hash, c->link.id, RET_TRUNC_HASH_LEN) == 0) {
+		ret_link_drv_on_packet(c, &pkt);
+		return;
+	}
+
 	LOG_DBG("rx type %u hdr %u hops %u ctx 0x%02x len %zu", pkt.packet_type,
 		pkt.header_type + 1, pkt.hops, pkt.context, pkt.data_len);
 
@@ -416,7 +364,7 @@ static void fail_req(const struct send_req *r, enum ret_receipt_status status)
 	}
 }
 
-static int send_frame(struct ret_client *c, size_t raw_len)
+int ret_client_send_frame(struct ret_client *c, size_t raw_len)
 {
 	int flen = ret_hdlc_encode(c->tx_raw, raw_len, c->tx_frame, sizeof(c->tx_frame));
 	int err;
@@ -432,7 +380,7 @@ static int send_frame(struct ret_client *c, size_t raw_len)
 	return 0;
 }
 
-static int send_path_request(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC_HASH_LEN])
+int ret_client_send_path_request(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC_HASH_LEN])
 {
 	uint8_t tag[RET_PATH_REQUEST_TAG_LEN];
 	int len;
@@ -446,7 +394,7 @@ static int send_path_request(struct ret_client *c, const uint8_t dest_hash[RET_T
 	if (len < 0) {
 		return len;
 	}
-	err = send_frame(c, (size_t)len);
+	err = ret_client_send_frame(c, (size_t)len);
 	if (!err) {
 		LOG_INF("path request for %02x%02x%02x%02x..", dest_hash[0], dest_hash[1],
 			dest_hash[2], dest_hash[3]);
@@ -496,7 +444,7 @@ static int transmit(struct ret_client *c, const struct send_req *r)
 		return -ENOMEM;
 	}
 
-	err = send_frame(c, (size_t)len);
+	err = ret_client_send_frame(c, (size_t)len);
 	if (err) {
 		return err;
 	}
@@ -587,7 +535,7 @@ static bool service_held(struct ret_client *c)
 			continue;
 		}
 
-		int err = send_path_request(c, h->req.dest_hash);
+		int err = ret_client_send_path_request(c, h->req.dest_hash);
 
 		if (err == -ECONNRESET) {
 			return false;
@@ -637,19 +585,64 @@ static void release_held(struct ret_client *c, const uint8_t dest_hash[RET_TRUNC
 	}
 }
 
+/* Link operations need a live connection; while connecting or
+ * disconnected they fail immediately and the caller retries.
+ */
+static void process_link_req(struct ret_client *c, const struct send_req *r)
+{
+	if (c->state != RET_STATE_CONNECTED || c->connecting) {
+		if (r->kind == REQ_LINK_OPEN && r->link_cb != NULL) {
+			r->link_cb(RET_LINK_EVT_FAILED, -ENOTCONN, r->user);
+		} else if (r->kind == REQ_LINK_REQUEST && r->response_cb != NULL) {
+			r->response_cb(-ENOTCONN, NULL, 0, r->user);
+		}
+		return;
+	}
+	switch (r->kind) {
+	case REQ_LINK_OPEN:
+		ret_link_drv_open(c, r);
+		break;
+	case REQ_LINK_REQUEST:
+		ret_link_drv_request(c, r);
+		break;
+	case REQ_LINK_IDENTIFY:
+		ret_link_drv_identify(c);
+		break;
+	case REQ_LINK_CLOSE:
+		ret_link_drv_close(c);
+		break;
+	default:
+		break;
+	}
+}
+
 /** @return false if the connection must be dropped. */
 static bool process_queue(struct ret_client *c)
 {
 	while (k_msgq_get(&ret_send_q, &c->req, K_NO_WAIT) == 0) {
 		int err;
 
-		if (c->req.announce) {
+		switch (c->req.kind) {
+		case REQ_ANNOUNCE:
 			if (c->state == RET_STATE_CONNECTED &&
 			    send_announce(c, RET_CONTEXT_NONE) == -ECONNRESET) {
 				(void)zvfs_eventfd_write(c->efd, 1);
 				return false;
 			}
 			continue;
+		case REQ_LINK_OPEN:
+		case REQ_LINK_REQUEST:
+		case REQ_LINK_IDENTIFY:
+		case REQ_LINK_CLOSE:
+			process_link_req(c, &c->req);
+			ret_wipe(c->req.data, sizeof(c->req.data));
+			if (c->conn_broken) {
+				(void)zvfs_eventfd_write(c->efd, 1);
+				return false;
+			}
+			continue;
+		default:
+			break;
 		}
 		if (c->connecting) {
 			/* Released (path request included) once connected, or
@@ -688,6 +681,7 @@ static void disconnect(struct ret_client *c)
 	}
 	ret_hdlc_decoder_reset(&c->hdlc);
 	ret_receipts_fail_all(RET_RECEIPT_DISCONNECTED, k_uptime_get());
+	ret_link_drv_teardown(c);
 
 	/* Held sends survive until their deadline; ask again on reconnect. */
 	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
@@ -767,6 +761,8 @@ static void run_connected(struct ret_client *c)
 	for (;;) {
 		int64_t next = MIN(MIN(ret_receipts_next_deadline(), held_next_event(c)),
 				   MIN(silence_deadline(c), c->next_announce_ms));
+
+		next = MIN(next, ret_link_drv_next_event(c));
 		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(next));
 
 		if (n < 0) {
@@ -803,6 +799,10 @@ static void run_connected(struct ret_client *c)
 		}
 
 		if (!service_held(c) || watchdog(c)) {
+			return;
+		}
+		ret_link_drv_service(c);
+		if (c->conn_broken) {
 			return;
 		}
 		if (c->has_local && k_uptime_get() >= c->next_announce_ms &&
@@ -1068,6 +1068,7 @@ int ret_client_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_
 		    const uint8_t *data, size_t len, ret_receipt_cb_t cb, void *user)
 {
 	struct send_req r = {
+		.kind = REQ_SEND,
 		.len = (uint16_t)len,
 		.cb = cb,
 		.user = user,
@@ -1115,7 +1116,7 @@ int ret_client_dest_hash(const struct ret_client *c, uint8_t out[RET_DEST_HASH_L
 
 int ret_client_announce(struct ret_client *c)
 {
-	struct send_req r = { .announce = true };
+	struct send_req r = { .kind = REQ_ANNOUNCE };
 
 	if (!c->started || !c->has_local) {
 		return -ENOENT;
@@ -1125,5 +1126,64 @@ int ret_client_announce(struct ret_client *c)
 	}
 	(void)zvfs_eventfd_write(c->efd, 1);
 	return 0;
+}
+
+static int queue_req(struct ret_client *c, const struct send_req *r)
+{
+	if (!c->started) {
+		return -ENOTCONN;
+	}
+	if (k_msgq_put(&ret_send_q, r, K_NO_WAIT) != 0) {
+		return -EAGAIN;
+	}
+	(void)zvfs_eventfd_write(c->efd, 1);
+	return 0;
+}
+
+int ret_client_link_open(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LEN],
+			 ret_link_cb_t cb, void *user)
+{
+	struct send_req r = { .kind = REQ_LINK_OPEN, .link_cb = cb, .user = user };
+
+	memcpy(r.dest_hash, dest_hash, RET_DEST_HASH_LEN);
+	return queue_req(c, &r);
+}
+
+int ret_client_link_request(struct ret_client *c, const char *path, const uint8_t *data_mp,
+			    size_t len, ret_link_response_cb_t cb, void *user)
+{
+	/* Must fit one request packet: [float64, bin16, data] in RET_LINK_MDU. */
+	struct send_req r = { .kind = REQ_LINK_REQUEST, .response_cb = cb, .user = user };
+	size_t path_len = path != NULL ? strlen(path) : 0;
+
+	if (path_len == 0 || path_len > RET_LINK_PATH_MAX) {
+		return -EINVAL;
+	}
+	if (len > RET_LINK_MDU - 32) {
+		return -EMSGSIZE;
+	}
+	memcpy(r.path, path, path_len + 1);
+	if (data_mp != NULL && len > 0) {
+		memcpy(r.data, data_mp, len);
+		r.len = (uint16_t)len;
+	}
+	return queue_req(c, &r);
+}
+
+int ret_client_link_identify(struct ret_client *c)
+{
+	struct send_req r = { .kind = REQ_LINK_IDENTIFY };
+
+	if (!c->has_local) {
+		return -ENOENT;
+	}
+	return queue_req(c, &r);
+}
+
+int ret_client_link_close(struct ret_client *c)
+{
+	struct send_req r = { .kind = REQ_LINK_CLOSE };
+
+	return queue_req(c, &r);
 }
 

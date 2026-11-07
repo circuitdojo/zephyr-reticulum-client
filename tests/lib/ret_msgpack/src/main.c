@@ -8,11 +8,13 @@
  * (tools/rns_peer/gen_vectors.py).
  */
 
+#include <errno.h>
 #include <string.h>
 
 #include <mpack.h>
 #include <zephyr/ztest.h>
 
+#include "ret_mp.h"
 #include "vectors_rns.h"
 
 static uint8_t buf[1024];
@@ -358,3 +360,45 @@ ZTEST(msgpack_decode, test_truncated_input)
 }
 
 ZTEST_SUITE(msgpack_decode, NULL, NULL, NULL, NULL, NULL);
+
+/* --- ret_mp_skip: bounded, non-recursive ---------------------------- */
+
+static int skip_nested(int levels)
+{
+	static uint8_t data[64];
+	mpack_reader_t r;
+	int err;
+
+	memset(data, 0x91, levels); /* fixarray of one element, repeated */
+	data[levels] = 0xc0;        /* innermost: nil */
+	mpack_reader_init_data(&r, (const char *)data, levels + 1);
+	err = ret_mp_skip(&r);
+	if (!err && mpack_reader_remaining(&r, NULL) != 0) {
+		err = -1;
+	}
+	mpack_reader_destroy(&r);
+	return err;
+}
+
+ZTEST(msgpack_skip, test_depth_limit)
+{
+	zassert_ok(skip_nested(RET_MP_MAX_DEPTH));
+	zassert_equal(skip_nested(RET_MP_MAX_DEPTH + 1), -EBADMSG);
+}
+
+ZTEST(msgpack_skip, test_skips_real_values)
+{
+	mpack_reader_t r;
+
+	mpack_reader_init_data(&r, (const char *)v_mp_resource_adv, sizeof(v_mp_resource_adv));
+	zassert_ok(ret_mp_skip(&r));
+	zassert_equal(mpack_reader_remaining(&r, NULL), 0);
+	mpack_reader_destroy(&r);
+
+	mpack_reader_init_data(&r, (const char *)v_mp_lxmf_payload, sizeof(v_mp_lxmf_payload) - 1);
+	zassert_equal(ret_mp_skip(&r), -EBADMSG); /* truncated */
+	mpack_reader_destroy(&r);
+}
+
+ZTEST_SUITE(msgpack_skip, NULL, NULL, NULL, NULL, NULL);
+

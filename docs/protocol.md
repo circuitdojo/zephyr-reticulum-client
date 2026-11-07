@@ -105,3 +105,26 @@ regenerate the test vectors.
 - Path requests for our address arrive as PLAIN DATA to the path request
   destination; answer with an announce with context PATH_RESPONSE.
 
+## Links (initiator side; RNS/Link.py)
+
+- **LINKREQUEST:** H1 (or H2 per the path rule), dest type SINGLE, packet type LINKREQUEST, unencrypted.
+  - Data is `eph X25519 pub (32) | eph Ed25519 pub (32) | signalling (3)`.
+  - Signalling is `(mtu & 0x1FFFFF) | ((mode << 5) << 16)` big-endian. With MTU 500 and mode AES-256-CBC (1) that is `20 01 F4`.
+  - Always signal 500. rnsd's TCP interface advertises a far larger hardware MTU, and the responder adopts what it is told.
+- **link_id:** `SHA256(hashable part without the signalling bytes)[:16]`, i.e. `SHA256(0x02 | dest | 0x00 | both pubs)[:16]`. It is independent of hops and of an H2 transport ID.
+- **LRPROOF from the destination:** dest type LINK, PROOF, dest = link_id, context `0xFF`.
+  - Data is `sig (64) | responder ephemeral X25519 pub (32) | signalling (3, optional)`.
+  - The signature covers `link_id | resp pub | dest Ed25519 pub | signalling`.
+- **Link key:** `HKDF-SHA256(64, X25519(eph prv, resp pub), salt = link_id)`. Link packets are a Token under this key (IV | CBC | HMAC), without SINGLE's ephemeral-key prefix.
+- **Link packets:** always H1, BROADCAST, dest type LINK, hops 0, dest = link_id.
+  - Unencrypted: KEEPALIVE (`0xFA`, data `FF`), resource parts, PROOFs.
+  - Encrypted: everything else (REQUEST `0x09`, RESPONSE `0x0A`, LINKIDENTIFY `0xFB`, LINKCLOSE `0xFC`, LRRTT `0xFE`, RESOURCE_* control).
+- **LRRTT:** sent right after the proof, as msgpack float64 seconds. The responder ignores requests until it arrives.
+- **Request:** msgpack `[timestamp float64, SHA256(path)[:16] bin, data]`.
+  - `request_id` is the truncated hash of the encrypted request packet.
+  - Response is `[request_id bin16, response]`.
+  - Anything larger than the link MDU (431) travels as a Resource; see P3.
+- **Identify:** `identity pub (64) | Ed25519 sig(link_id | pub)`.
+- **Close:** LINKCLOSE carrying the encrypted link_id.
+- **Keepalive:** the initiator sends at `clamp(rtt * 360 / 1.75, 5, 360)` s. The responder only answers, and marks the link stale after 2× that without traffic. rnsd drops idle link-table entries after 900 s.
+

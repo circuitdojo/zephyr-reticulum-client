@@ -207,6 +207,10 @@ config RET_RECENT_PACKETS
 	  A DATA packet whose hash was seen recently is dropped instead of
 	  being delivered and proved again.
 
+config RET_LINK_MAX_REQUESTS
+	int "Requests outstanding on the link at once"
+	default 2
+
 config RET_RECONNECT_BACKOFF_MAX_S
 	int "Maximum reconnect backoff (s)"
 	default 60

@@ -148,6 +148,53 @@ int ret_client_dest_hash(const struct ret_client *client, uint8_t out[RET_DEST_H
 /** Queue an announce of the client's own destination. */
 int ret_client_announce(struct ret_client *client);
 
+/* --- Links (one at a time, initiator side) -------------------------- */
+
+enum ret_link_event {
+	/** Handshake complete: requests can be sent. */
+	RET_LINK_EVT_ACTIVE,
+	/** Closed by either side, or the connection dropped. */
+	RET_LINK_EVT_CLOSED,
+	/** Could not be established (no path, no proof, bad proof, busy). */
+	RET_LINK_EVT_FAILED,
+};
+
+/** Called on the client thread; @p reason is 0 or a negative errno. */
+typedef void (*ret_link_cb_t)(enum ret_link_event event, int reason, void *user);
+
+/**
+ * Called on the client thread with a request's outcome: @p status 0 and
+ * the response as its encoded msgpack bytes, or -ETIMEDOUT, -ECONNRESET
+ * (link closed) or -ENOTCONN.
+ */
+typedef void (*ret_link_response_cb_t)(int status, const uint8_t *response, size_t len,
+				       void *user);
+
+/**
+ * Open a link to a destination learned from an announce (a path request
+ * goes out first if there is no current path). @p cb reports
+ * RET_LINK_EVT_ACTIVE, then later RET_LINK_EVT_CLOSED, or
+ * RET_LINK_EVT_FAILED.
+ */
+int ret_client_link_open(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HASH_LEN],
+			 ret_link_cb_t cb, void *user);
+
+/**
+ * Send a request on the open link. @p data_mp is one encoded msgpack value
+ * (NULL for nil) and must fit a single request packet.
+ */
+int ret_client_link_request(struct ret_client *client, const char *path, const uint8_t *data_mp,
+			    size_t len, ret_link_response_cb_t cb, void *user);
+
+/**
+ * Identify on the open link with the client's own identity. A no-op if no
+ * link is active when the client thread gets to it.
+ */
+int ret_client_link_identify(struct ret_client *client);
+
+/** Close the open link (LINKCLOSE to the peer). */
+int ret_client_link_close(struct ret_client *client);
+
 #ifdef __cplusplus
 }
 #endif
