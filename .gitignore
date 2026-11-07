@@ -4,6 +4,6 @@ __pycache__/
 .venv/
 tools/rnsd-test/storage/
 tools/rnsd-test/logfile
-tools/rns_peer/peer_identity
+tools/rns_peer/peer_identity*
 .claude/settings.local.json
 .claude/worktrees/

@@ -176,7 +176,7 @@ ZTEST(destinations, test_direct_path_uses_h1)
 	const struct ret_destination *d;
 
 	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
-	zassert_ok(ret_destinations_update(&p, &a, 100, &d));
+	zassert_ok(ret_destinations_update(&p, &a, 100, &d, NULL));
 	zassert_equal_ptr(ret_destinations_find(v_dest_hash), d);
 	zassert_equal(d->hops, 1);
 	zassert_false(d->has_transport_id);
@@ -195,7 +195,7 @@ ZTEST(destinations, test_transported_path_uses_h2)
 	const struct ret_destination *d;
 
 	zassert_ok(validate_raw(v_announce_ratchet_h2, sizeof(v_announce_ratchet_h2), &p, &a));
-	zassert_ok(ret_destinations_update(&p, &a, 100, &d));
+	zassert_ok(ret_destinations_update(&p, &a, 100, &d, NULL));
 	zassert_equal(d->hops, 2);
 	zassert_true(d->has_transport_id);
 	zassert_true(d->has_ratchet);
@@ -214,14 +214,68 @@ ZTEST(destinations, test_ratchet_kept_and_path_updated)
 	const struct ret_destination *d;
 
 	zassert_ok(validate_raw(v_announce_ratchet_h2, sizeof(v_announce_ratchet_h2), &p, &a));
-	zassert_ok(ret_destinations_update(&p, &a, 100, &d));
+	zassert_ok(ret_destinations_update(&p, &a, 100, &d, NULL));
 	/* A later ratchet-less announce over a direct path. */
 	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
-	zassert_ok(ret_destinations_update(&p, &a, 200, &d));
+	zassert_ok(ret_destinations_update(&p, &a, 200, &d, NULL));
 	zassert_true(d->has_ratchet);
 	zassert_equal(d->hops, 1);
 	zassert_false(d->has_transport_id);
 	zassert_equal(d->last_seen_ms, 200);
+}
+
+ZTEST(destinations, test_repeat_announce_not_fresh)
+{
+	struct ret_packet p;
+	struct ret_announce a;
+	bool fresh;
+
+	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
+	zassert_ok(ret_destinations_update(&p, &a, 100, NULL, &fresh));
+	zassert_true(fresh);
+	/* Same announce again (rebroadcast vs path response). */
+	zassert_ok(ret_destinations_update(&p, &a, 110, NULL, &fresh));
+	zassert_false(fresh);
+	/* A new announce has a new random hash. */
+	zassert_ok(validate_raw(v_announce_real, sizeof(v_announce_real), &p, &a));
+	zassert_ok(ret_destinations_update(&p, &a, 120, NULL, &fresh));
+	zassert_true(fresh);
+}
+
+ZTEST(destinations, test_older_announce_ignored)
+{
+	struct ret_packet p;
+	struct ret_announce a;
+	const struct ret_destination *d;
+	uint8_t rh_new[RET_RANDOM_HASH_LEN] = { 1, 1, 1, 1, 1, 0, 0, 0, 0, 200 };
+	uint8_t rh_old[RET_RANDOM_HASH_LEN] = { 2, 2, 2, 2, 2, 0, 0, 0, 0, 100 };
+	uint8_t rh_newer[RET_RANDOM_HASH_LEN] = { 3, 3, 3, 3, 3, 0, 0, 0, 1, 0 };
+	uint8_t ratchet_old[RET_RATCHET_LEN];
+	bool fresh;
+
+	/* ret_destinations_update trusts its caller to have validated the
+	 * announce, so the random hash can be swapped to test ordering.
+	 */
+	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
+	a.random_hash = rh_new;
+	zassert_ok(ret_destinations_update(&p, &a, 100, &d, &fresh));
+	zassert_true(fresh);
+
+	memset(ratchet_old, 0xAA, sizeof(ratchet_old));
+	a.random_hash = rh_old;
+	a.ratchet = ratchet_old;
+	p.hops = 5;
+	zassert_ok(ret_destinations_update(&p, &a, 200, &d, &fresh));
+	zassert_false(fresh);
+	zassert_false(d->has_ratchet);
+	zassert_equal(d->hops, 1);
+	zassert_mem_equal(d->random_hash, rh_new, RET_RANDOM_HASH_LEN);
+
+	a.random_hash = rh_newer;
+	a.ratchet = NULL;
+	zassert_ok(ret_destinations_update(&p, &a, 300, &d, &fresh));
+	zassert_true(fresh);
+	zassert_equal(d->hops, 6);
 }
 
 ZTEST(destinations, test_changed_key_rejected)
@@ -231,12 +285,12 @@ ZTEST(destinations, test_changed_key_rejected)
 	uint8_t other_pub[RET_PUBKEY_LEN];
 
 	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
-	zassert_ok(ret_destinations_update(&p, &a, 100, NULL));
+	zassert_ok(ret_destinations_update(&p, &a, 100, NULL, NULL));
 
 	memcpy(other_pub, v_identity_pub, sizeof(other_pub));
 	other_pub[0] ^= 0xFF;
 	a.pub = other_pub;
-	zassert_equal(ret_destinations_update(&p, &a, 200, NULL), -EPERM);
+	zassert_equal(ret_destinations_update(&p, &a, 200, NULL, NULL), -EPERM);
 	zassert_mem_equal(ret_destinations_find(v_dest_hash)->pub, v_identity_pub, RET_PUBKEY_LEN);
 }
 
@@ -248,7 +302,7 @@ ZTEST(destinations, test_lru_eviction)
 	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
 	for (int i = 0; i <= CONFIG_RET_MAX_KNOWN_DESTINATIONS; i++) {
 		a.dest_hash[0] = (uint8_t)i;
-		zassert_ok(ret_destinations_update(&p, &a, 1000 + i, NULL));
+		zassert_ok(ret_destinations_update(&p, &a, 1000 + i, NULL, NULL));
 	}
 	/* Entry 0 was the oldest and got evicted by the last insert. */
 	a.dest_hash[0] = 0;
@@ -378,13 +432,16 @@ ZTEST(receipt, test_fail_all_and_capacity)
 	uint8_t h[RET_HASH_LEN];
 
 	memcpy(h, v_packet_hash, sizeof(h));
+	zassert_false(ret_receipts_full());
 	for (int i = 0; i < CONFIG_RET_MAX_PENDING_RECEIPTS; i++) {
 		h[31] = (uint8_t)i;
 		zassert_ok(ret_receipts_add(h, sig_pub(), 0, 5000, on_receipt, &logged));
 	}
+	zassert_true(ret_receipts_full());
 	zassert_equal(ret_receipts_add(h, sig_pub(), 0, 5000, on_receipt, &logged), -ENOMEM);
 
 	ret_receipts_fail_all(RET_RECEIPT_DISCONNECTED, 10);
+	zassert_false(ret_receipts_full());
 	zassert_equal(logged.calls, CONFIG_RET_MAX_PENDING_RECEIPTS);
 	zassert_equal(logged.status, RET_RECEIPT_DISCONNECTED);
 	zassert_equal(ret_receipts_next_deadline(), INT64_MAX);

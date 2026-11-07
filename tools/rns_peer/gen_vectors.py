@@ -33,6 +33,13 @@ def fixed(tag: str, n: int) -> bytes:
     return out[:n]
 
 
+def hand_random_hash() -> bytes:
+    """Random hash for hand-built announces: 5 random bytes, then the
+    emission time (big-endian seconds), set before the real announces'
+    FIXED_TIME so those count as newer."""
+    return fixed("random_hash", 5) + int(FIXED_TIME - 100).to_bytes(5, "big")
+
+
 def full_hash(b: bytes) -> bytes:
     return hashlib.sha256(b).digest()
 
@@ -44,7 +51,7 @@ def unpack(raw: bytes) -> RNS.Packet:
 
 
 def build_announce(identity, dest_hash, name_hash, ratchet_pub, header2):
-    random_hash = fixed("random_hash", 10)
+    random_hash = hand_random_hash()
     pub = identity.get_public_key()
     ratchet = ratchet_pub or b""
     signed = dest_hash + pub + name_hash + random_hash + ratchet + APP_DATA
@@ -165,7 +172,7 @@ def main() -> None:
     # Correctly signed, but for a destination hash that is not
     # H(name_hash | identity_hash): RNS must reject it on the hash check.
     wrong_dest = fixed("wrong_dest", 16)
-    random_hash = fixed("random_hash", 10)
+    random_hash = hand_random_hash()
     signed = wrong_dest + pub + name_hash + random_hash + APP_DATA
     wrong_sig = identity.sign(signed)
     announce_wrong_dest = (
@@ -211,7 +218,7 @@ def main() -> None:
 
     # Largest possible announce: H1, no ratchet, app data filling the MTU.
     max_app = b"m" * (RNS.Reticulum.MTU - 19 - 148)
-    random_hash = fixed("random_hash", 10)
+    random_hash = hand_random_hash()
     max_sig = identity.sign(dest_hash + pub + name_hash + random_hash + max_app)
     announce_max = (
         bytes([0x01, 0x00])
