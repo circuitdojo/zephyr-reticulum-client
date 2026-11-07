@@ -204,11 +204,11 @@ Kconfig notes carried over from lion-client:
 ## CI
 
 `.forgejo/workflows/ci.yml` runs on every PR and push to `main` on the bigbox runner,
-in the `ret-client-ci` image (`ci/Dockerfile`). It runs:
-- ruff and a golden-vector regeneration diff
-- the unit tests
-- a warning-free sample build
-- the full e2e
+in the `ret-client-ci` image (`ci/Dockerfile`). It has two jobs:
+- `native_sim` (vanilla workspace): ruff, a golden-vector regeneration diff, the flash.py
+  tests, the unit tests, a warning-free sample build and the full e2e.
+- `nrf9151` (NCS workspace, after `native_sim`): a warning-free sysbuild of `ret_basic` for the
+  Feather. It uploads `merged.hex` as the `ret_basic-nrf9151` artifact.
 
 Runner setup (image build, volume allowlist) is in `docs/ci-forgejo.md`. After pushing a
 PR, `scripts/forgejo.sh ci` waits for the run.

@@ -88,3 +88,71 @@ jobs:
           for f in build/ret_e2e-logs/*.log; do
             echo "::group::$f"; sed 's/\x1b\[[0-9;]*m//g' "$f"; echo "::endgroup::"
           done
+
+  nrf9151:
+    name: nRF9151 (NCS build)
+    # Builds ret_basic for the nRF9151 Feather in the NCS workspace: the only
+    # build that proves the board config, TF-M profile check and modem path
+    # compile and link. Gated on native_sim so a run that fails the tests
+    # does not spend the NCS build.
+    needs: [native_sim]
+    runs-on: docker
+    container:
+      image: ret-client-ci:latest
+      # Its own workspace: west-ncs.yml (sdk-nrf, nfed, Monocypher) is a
+      # different tree from the vanilla one. The first run on a cold volume
+      # clones all of NCS (the better part of an hour); later runs fetch.
+      # ccache is shared on purpose: safe under concurrent use.
+      options: >-
+        --volume ret-client-ncs-west:/ncs-workspace
+        --volume ret-client-ccache:/ccache
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ret-client
+          persist-credentials: false
+
+      - name: Copy the checkout into the cached NCS workspace
+        run: |
+          rm -rf /ncs-workspace/ret-client
+          cp -a "$GITHUB_WORKSPACE/ret-client" /ncs-workspace/ret-client
+
+      - name: west init/update (NCS)
+        working-directory: /ncs-workspace
+        run: |
+          [ -d .west ] || west init -l --mf west-ncs.yml ret-client
+          west update --narrow -o=--depth=1
+
+      - name: Build ret_basic (nRF9151, sysbuild, no compiler warnings)
+        working-directory: /ncs-workspace
+        # -p: the build directory is on the volume and outlives the run, and
+        # a stale CMake cache is the failure that reproduces nowhere else.
+        # No env/ overlay: per-device settings are gitignored, so CI builds
+        # the sample as checked in. Kconfig's TFM_EXPERIMENTAL notice is not
+        # a compiler warning and does not match.
+        # build/ must exist before tee opens its log (cold volume).
+        run: |
+          set -o pipefail
+          mkdir -p build
+          west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_basic \
+            -d build/ret_nrf9151 -p 2>&1 | tee build/ret_nrf9151.log
+          ! grep -q ": warning:" build/ret_nrf9151.log
+
+      - name: Collect the image
+        # merged.hex is TF-M plus the application: what scripts/flash.py
+        # programs. Copied under GITHUB_WORKSPACE, the only place
+        # upload-artifact collects from.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp /ncs-workspace/build/ret_nrf9151/merged.hex \
+            "$GITHUB_WORKSPACE/dist/ret_basic-circuitdojo_feather_nrf9151_ns.hex"
+
+      - name: Upload image
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ret_basic-nrf9151
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
+

@@ -35,15 +35,15 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
     && uv --version
 
 # Pinned to zephyr/SDK_VERSION on the revision west-vanilla.yml tracks
-# (v4.2.2 wants 0.17.4). Only x86_64-zephyr-elf for now: native_sim. Add
-# arm-zephyr-eabi with the nRF9151 job.
+# (v4.2.2 wants 0.17.4; NCS v3.2.1 in west-ncs.yml wants the same).
+# x86_64-zephyr-elf for native_sim, arm-zephyr-eabi for the nRF9151.
 ARG ZSDK_VERSION=0.17.4
 RUN cd /opt \
     && curl -fsSL -O "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZSDK_VERSION}/zephyr-sdk-${ZSDK_VERSION}_linux-x86_64_minimal.tar.xz" \
     && tar xf "zephyr-sdk-${ZSDK_VERSION}_linux-x86_64_minimal.tar.xz" \
     && rm "zephyr-sdk-${ZSDK_VERSION}_linux-x86_64_minimal.tar.xz" \
     && cd "zephyr-sdk-${ZSDK_VERSION}" \
-    && ./setup.sh -t x86_64-zephyr-elf -c
+    && ./setup.sh -t x86_64-zephyr-elf -t arm-zephyr-eabi -c
 
 # The west workspace is bind-mounted from a host volume owned by another
 # user; without this every git call west makes refuses ("dubious ownership").
@@ -54,4 +54,4 @@ ENV ZEPHYR_TOOLCHAIN_VARIANT=zephyr \
     CCACHE_DIR=/ccache \
     UV_CACHE_DIR=/ccache/uv
 
-RUN mkdir -p /west-workspace /ccache
+RUN mkdir -p /west-workspace /ncs-workspace /ccache
