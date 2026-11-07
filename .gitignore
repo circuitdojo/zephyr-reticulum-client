@@ -13,3 +13,5 @@ samples/ret_basic/env/*
 tools/rnsd-hw/storage/
 tools/rnsd-hw/logfile
 samples/*/log-*.log
+# Zephyr Tools per-checkout build settings
+**/.zephyr-overrides.json

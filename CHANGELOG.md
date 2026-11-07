@@ -4,6 +4,10 @@
 
 ### Added
 
+- CI `nrf9151` job: builds `ret_basic` for the nRF9151 Feather in the NCS
+  workspace (sysbuild, no compiler warnings) and uploads `merged.hex` as a
+  run artifact. The CI image gains the `arm-zephyr-eabi` toolchain.
+
 - nRF9151 Feather support (NCS): LTE through the modem's offloaded sockets,
   PSA Crypto from TF-M, settings on LittleFS on the external NOR flash.
   Verified on hardware over LTE: messages and proofs both ways, identity

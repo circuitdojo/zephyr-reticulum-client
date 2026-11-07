@@ -17,8 +17,13 @@ request. One job, `native_sim`, in the `ret-client-ci` container:
    peer, inside the container (ports and AF_UNIX sockets stay local to it).
    On failure the device, peer and rnsd logs are printed.
 
-An nRF9151 job (NCS workspace, `west-ncs.yml`, `arm-zephyr-eabi`) comes with
-the hardware port.
+Then the `nrf9151` job (needs `native_sim`), in the NCS workspace
+(`west-ncs.yml`) on its own `ret-client-ncs-west` volume. It builds
+`ret_basic` for `circuitdojo_feather_nrf9151/nrf9151/ns` with sysbuild,
+fails on compiler warnings, and uploads `merged.hex` (TF-M plus app, what
+`scripts/flash.py` programs) as the `ret_basic-nrf9151` artifact (14 days).
+Its first run on a cold volume clones all of NCS and takes the better part
+of an hour.
 
 ## Runner setup (once, on bigbox.local)
 
@@ -38,8 +43,9 @@ the hardware port.
    container:
      valid_volumes:
        - ret-client-west
+       - ret-client-ncs-west
        - ret-client-ccache
    ```
 
-Changing the manifest file name or `self: path:` means wiping the workspace
-volume: `docker volume rm ret-client-west`.
+Changing a manifest file name or `self: path:` means wiping that workspace's
+volume: `docker volume rm ret-client-west` (or `ret-client-ncs-west`).
