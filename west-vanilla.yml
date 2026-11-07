@@ -18,6 +18,13 @@ manifest:
       url: https://github.com/LoupVaillant/Monocypher
       revision: 4.0.2
       path: modules/crypto/monocypher
+    - name: mpack
+      # msgpack for Link requests/responses, Resource advertisements and
+      # LXMF. Its encoder picks the same smallest forms as RNS's umsgpack,
+      # which LXMF signatures depend on (tests/lib/ret_msgpack checks it).
+      url: https://github.com/ludocode/mpack
+      revision: v1.1.1
+      path: modules/lib/mpack
 
   self:
     path: ret-client

@@ -29,6 +29,18 @@ if(CONFIG_TFM_PROFILE_TYPE_MINIMAL)
         "CONFIG_TFM_PROFILE_TYPE_NOT_SET=y and size CONFIG_PM_PARTITION_SIZE_TFM.")
 endif()
 
+# mpack (msgpack): pinned in the west manifests like Monocypher. Configured by
+# port/mpack/mpack-config.h, applied everywhere mpack.h is included.
+set(RET_MPACK_DIR "${ZEPHYR_BASE}/../modules/lib/mpack" CACHE PATH "mpack source tree")
+get_filename_component(RET_MPACK_DIR "${RET_MPACK_DIR}" ABSOLUTE)
+if(NOT EXISTS "${RET_MPACK_DIR}/src/mpack/mpack.h")
+    message(FATAL_ERROR
+        "ret-client needs mpack at ${RET_MPACK_DIR} (not found). Run `west update` "
+        "with ret-client's manifest.")
+endif()
+zephyr_compile_definitions(MPACK_HAS_CONFIG=1)
+zephyr_include_directories(../mpack ${RET_MPACK_DIR}/src/mpack)
+
 zephyr_include_directories(../../include)
 
 zephyr_library()
@@ -50,6 +62,11 @@ zephyr_library_sources(
     ../../src/ret_receipt.c
     ${RET_MONOCYPHER_DIR}/src/monocypher.c
     ${RET_MONOCYPHER_DIR}/src/optional/monocypher-ed25519.c
+    ${RET_MPACK_DIR}/src/mpack/mpack-common.c
+    ${RET_MPACK_DIR}/src/mpack/mpack-platform.c
+    ${RET_MPACK_DIR}/src/mpack/mpack-reader.c
+    ${RET_MPACK_DIR}/src/mpack/mpack-expect.c
+    ${RET_MPACK_DIR}/src/mpack/mpack-writer.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_RET_CLIENT
