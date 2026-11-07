@@ -94,9 +94,10 @@ The 9151 build is not in twister: nfed's board YAML still carries the pre-HWMv2 
 - **Settings:** stored in `/lfs/ret-settings` on LittleFS on the external W25Q128 NOR, as in
   lion_sleep. Internal flash holds only firmware, so a re-layout, reflash or UICR erase keeps
   the board's identity (its address). Deleting that file gives the board a new address.
-- **External flash size:** nfed's devicetree gives the W25Q128 `size` in bits as 2 MiB, so
-  `CONFIG_SPI_NOR_SFDP_RUNTIME=y`, which reads the real 16 MiB from the chip, is required for
-  the 16 MiB LittleFS.
+- **External flash size:** the `jedec,spi-nor` devicetree `size` is in bits. nfed declared the
+  W25Q128 as 2 MiB until its `jared/nor-flash-size` fix (`0x8000000` = 128 Mbit).
+  `CONFIG_SPI_NOR_SFDP_RUNTIME=y` reads the real geometry from the chip, so older nfed
+  revisions still work.
 - **Logging:** `CONFIG_LOG_MODE_IMMEDIATE=y`. Deferred logging drops the thread analyzer's first
   lines and can lose a fault report before a reset.
 - **PMIC:** the board's startup code configures the nPM1300, so `MFD_NPM13XX` must stay
