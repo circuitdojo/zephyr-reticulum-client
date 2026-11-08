@@ -56,9 +56,12 @@ config RET_RESOURCE_MAX_SIZE
 	default 8192
 	range 1024 1048576
 	help
-	  Responses larger than one link packet arrive as RNS Resources and
-	  are assembled in RAM: the client holds a stream buffer and a
-	  plaintext buffer of this size. Larger resources are refused.
+	  Responses larger than one link packet, and LXMF DIRECT messages
+	  larger than one (on inbound links), arrive as RNS Resources and are
+	  assembled in RAM: the client holds a stream buffer and a plaintext
+	  buffer of this size, and receives one Resource at a time. A DIRECT
+	  message can be up to about this size minus 69 bytes; larger
+	  resources are refused.
 
 module = RET
 module-str = Reticulum
@@ -225,6 +228,20 @@ config RET_RECONNECT_BACKOFF_MAX_S
 	help
 	  Reconnect delay doubles from 1 s after each failed attempt, up
 	  to this limit.
+
+config RET_INBOUND_LINKS
+	int "Links other nodes may open to the client's destination at once"
+	default 2
+	range 0 8
+	help
+	  Needs a destination (dest_name, or on_lxmf). LXMF senders deliver
+	  DIRECT messages over such a link: one packet, or a Resource when
+	  larger than 431 bytes (bounded by RET_RESOURCE_MAX_SIZE; one
+	  Resource arrives at a time). Data on an inbound link goes to
+	  on_lxmf, or on_data without LXMF. About 150 bytes of RAM each.
+	  When full, a link that has waited over 10 s in handshake is
+	  replaced; otherwise the request is dropped. Repeated (replayed)
+	  link requests are ignored. 0 drops every link request.
 
 config RET_LXMF_SEEN_ENTRIES
 	int "LXMF messages remembered against repeats and replays"

@@ -72,6 +72,14 @@ def main() -> None:
         help=f'answer each message with "echo: ..." to the client\'s {CLIENT_NAME}',
     )
     ap.add_argument(
+        "--link-client",
+        type=int,
+        default=0,
+        metavar="N",
+        help=f"open a link to the client's {CLIENT_NAME}, send N packets (proved), idle 15 s on "
+        "keepalives, send one more, close",
+    )
+    ap.add_argument(
         "--print-hash",
         action="store_true",
         help="print the destination hash (creating the identity if needed) and exit",
@@ -114,8 +122,53 @@ def main() -> None:
             client_known.set()
             out(f"CLIENT ANNOUNCE {destination_hash.hex()}")
 
-    if args.reply:
+    if args.reply or args.link_client:
         RNS.Transport.register_announce_handler(ClientAnnounces())
+
+    def wait_proved(link, text: str) -> bool:
+        receipt = RNS.Packet(link, text.encode()).send()
+        deadline = time.time() + 15
+        while receipt and receipt.status != RNS.PacketReceipt.DELIVERED:
+            if time.time() > deadline or receipt.status == RNS.PacketReceipt.FAILED:
+                return False
+            time.sleep(0.1)
+        return bool(receipt)
+
+    def link_client(n: int) -> None:
+        """The device as a link responder: our link to its destination."""
+        if not client_known.wait(REPLY_PATH_WAIT_S):
+            out("CLIENT LINK FAILED no announce")
+            return
+        target = RNS.Destination(
+            RNS.Identity.recall(client_dest_hash),
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            *CLIENT_NAME.split("."),
+        )
+        link = RNS.Link(target)
+        deadline = time.time() + 30
+        while link.status != RNS.Link.ACTIVE:
+            if time.time() > deadline or link.status == RNS.Link.CLOSED:
+                out("CLIENT LINK FAILED not established")
+                return
+            time.sleep(0.1)
+        out(f"CLIENT LINK ACTIVE mtu {link.mtu}")
+        for i in range(1, n + 1):
+            if not wait_proved(link, f"link #{i}"):
+                out(f"CLIENT LINK DATA FAILED {i}")
+                return
+            out(f"CLIENT LINK DATA PROVED {i}")
+        # Past the 2 x 5 s stale time: only keepalive answers keep it up.
+        time.sleep(15)
+        if link.status != RNS.Link.ACTIVE or not wait_proved(link, f"link #{n + 1}"):
+            out("CLIENT LINK DATA FAILED after idle")
+            return
+        out(f"CLIENT LINK DATA PROVED {n + 1}")
+        link.teardown()
+        out("CLIENT LINK CLOSED")
+
+    if args.link_client:
+        threading.Thread(target=link_client, args=(args.link_client,), daemon=True).start()
 
     def reply(text: str) -> None:
         if not client_known.wait(REPLY_PATH_WAIT_S):

@@ -2,15 +2,27 @@
  * Copyright (c) 2026 Circuit Dojo LLC
  * SPDX-License-Identifier: Apache-2.0
  *
- * Link driver: the state of the client's one link (initiator side), run
- * on the client thread. The packet formats live in ret_link.c.
+ * Link driver, run on the client thread. The packet formats live in
+ * ret_link.c.
+ *
+ * The client opens at most one link itself (struct link_out, initiator):
  *
  *   NONE -> WAIT_PATH (no current path: path request) -> PENDING
  *   (LINKREQUEST sent) -> ACTIVE (proof valid, RTT sent) <-> STALE
  *   -> NONE (closed, failed, or the connection dropped)
  *
- * A response too large for one packet arrives as a Resource
- * (ret_resource.c): at most one at a time, into the client's buffers.
+ * Other nodes may open links to the client's destination (struct link in[],
+ * responder), as RNS's Link.validate_request() does:
+ *
+ *   LINKREQUEST -> HANDSHAKE (proof sent) -> ACTIVE (initiator's RTT
+ *   received) <-> STALE -> NONE
+ *
+ * What every link shares (sending, closing, stale timers, receiving a
+ * Resource) works on struct link, whichever side opened it.
+ *
+ * A Resource (ret_resource.c) arrives at most one at a time, on any link,
+ * into the client's buffers: a response too large for one packet, or data
+ * (LXMF DIRECT) too large for one packet on an inbound link.
  */
 
 #include <errno.h>
@@ -18,6 +30,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/__assert.h>
 
 #include "ret_client_internal.h"
 #include "ret_crypto.h"
@@ -41,6 +54,28 @@ LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 #define RESOURCE_TIMEOUT_FACTOR  4
 #define RESOURCE_GRACE_MS        1250
 #define RESOURCE_PER_RETRY_MS    500
+/* Link.validate_request: establishment timeout per hop + KEEPALIVE (360 s). */
+#define IN_ESTABLISH_EXTRA_MS 360000
+/* However parts trickle in, one resource holds the buffers at most this
+ * long: a peer must not keep them (and so the sync and other senders) for
+ * as long as it likes.
+ */
+#define RESOURCE_MAX_MS 180000
+/* A link still in handshake is only replaced once it is this old: fresh
+ * link requests must not evict a real handshake still waiting for its RTT.
+ */
+#define IN_EVICT_MIN_AGE_MS 10000
+
+static struct link_out *link_out_of(struct link *l)
+{
+	__ASSERT(l->role == LINK_OUT, "not the outbound link");
+	return CONTAINER_OF(l, struct link_out, l);
+}
+
+static bool link_up(const struct link *l)
+{
+	return l->state == LINK_ACTIVE || l->state == LINK_STALE;
+}
 
 static void request_done(struct link_request *q, int err, const uint8_t *resp, size_t len)
 {
@@ -60,39 +95,45 @@ static struct link_request *resource_end(struct ret_client *c)
 	struct link_resource *res = &c->res;
 	struct link_request *q = res->req;
 
-	res->active = false;
+	res->state = RES_IDLE;
+	res->link = NULL;
 	res->req = NULL;
 	ret_wipe(res->plain, sizeof(res->plain));
 	return q;
 }
 
-static void finish(struct ret_client *c, enum ret_link_event ev, int reason)
+/* End link @p l: its resource, its requests (outbound), its key. */
+static void link_end(struct ret_client *c, struct link *l, enum ret_link_event ev, int reason)
 {
-	struct link *l = &c->link;
-	ret_link_cb_t cb = l->cb;
-	void *user = l->user;
+	ret_link_cb_t cb = NULL;
+	void *user = NULL;
 
-	if (c->res.active) {
+	if (c->res.state != RES_IDLE && c->res.link == l) {
 		(void)resource_end(c);
 	}
-	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		if (l->req[i].used) {
-			request_done(&l->req[i], -ECONNRESET, NULL, 0);
+	if (l->role == LINK_OUT) {
+		struct link_out *o = link_out_of(l);
+
+		for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
+			if (o->req[i].used) {
+				request_done(&o->req[i], -ECONNRESET, NULL, 0);
+			}
 		}
+		ret_wipe(&o->keys, sizeof(o->keys));
+		cb = o->cb;
+		user = o->user;
+		o->cb = NULL;
 	}
 	ret_wipe(l->key, sizeof(l->key));
-	ret_wipe(&l->keys, sizeof(l->keys));
 	l->state = LINK_NONE;
-	l->cb = NULL;
 	if (cb != NULL) {
 		cb(ev, reason, user);
 	}
 }
 
 /* Send the link packet of length @p n (or error) built in c->tx_raw. */
-static int send_built(struct ret_client *c, int n, uint8_t hash_out[RET_HASH_LEN])
+static int send_built(struct ret_client *c, struct link *l, int n, uint8_t hash_out[RET_HASH_LEN])
 {
-	struct link *l = &c->link;
 	int err;
 
 	if (n < 0) {
@@ -114,20 +155,28 @@ static int send_built(struct ret_client *c, int n, uint8_t hash_out[RET_HASH_LEN
 }
 
 /* Encrypt (with the link key) and send one link packet. */
-static int send_link(struct ret_client *c, uint8_t context, const uint8_t *pt, size_t len,
-		     bool encrypt, uint8_t hash_out[RET_HASH_LEN])
+static int send_link(struct ret_client *c, struct link *l, uint8_t context, const uint8_t *pt,
+		     size_t len, bool encrypt, uint8_t hash_out[RET_HASH_LEN])
 {
-	struct link *l = &c->link;
-
-	return send_built(c,
+	return send_built(c, l,
 			  ret_link_packet_build(l->id, encrypt ? l->key : NULL, context, pt, len,
 						c->tx_raw, sizeof(c->tx_raw)),
 			  hash_out);
 }
 
+/* LINKCLOSE (it carries the link_id, encrypted), then end the link. */
+static void link_close(struct ret_client *c, struct link *l, enum ret_link_event ev, int reason)
+{
+	(void)send_link(c, l, RET_CTX_LINKCLOSE, l->id, RET_TRUNC_HASH_LEN, true, NULL);
+	link_end(c, l, ev, reason);
+}
+
+/* --- Outbound link (initiator) --------------------------------------- */
+
 static void send_link_request(struct ret_client *c, const struct ret_destination *d)
 {
-	struct link *l = &c->link;
+	struct link_out *o = &c->out;
+	struct link *l = &o->l;
 	uint8_t data[RET_LINK_REQUEST_LEN];
 	struct ret_packet pkt = {
 		.dest_type = RET_DEST_SINGLE,
@@ -139,13 +188,13 @@ static void send_link_request(struct ret_client *c, const struct ret_destination
 	int n;
 	int err;
 
-	err = ret_link_keys_generate(&l->keys);
+	err = ret_link_keys_generate(&o->keys);
 	if (err) {
-		finish(c, RET_LINK_EVT_FAILED, err);
+		link_end(c, l, RET_LINK_EVT_FAILED, err);
 		return;
 	}
-	ret_link_request_data(&l->keys, data);
-	memcpy(l->dest_sig_pub, &d->pub[RET_X25519_LEN], RET_ED25519_PUB_LEN);
+	ret_link_request_data(&o->keys, data);
+	memcpy(o->dest_sig_pub, &d->pub[RET_X25519_LEN], RET_ED25519_PUB_LEN);
 	ret_destinations_address(d, &pkt);
 
 	n = ret_packet_pack(&pkt, c->tx_raw, sizeof(c->tx_raw));
@@ -157,7 +206,7 @@ static void send_link_request(struct ret_client *c, const struct ret_destination
 		if (err == -ECONNRESET) {
 			c->conn_broken = true;
 		}
-		finish(c, RET_LINK_EVT_FAILED, err);
+		link_end(c, l, RET_LINK_EVT_FAILED, err);
 		return;
 	}
 
@@ -173,22 +222,23 @@ static void send_link_request(struct ret_client *c, const struct ret_destination
 
 void ret_link_drv_open(struct ret_client *c, const struct send_req *r)
 {
-	struct link *l = &c->link;
+	struct link_out *o = &c->out;
 	const struct ret_destination *d;
 
-	if (l->state != LINK_NONE) {
+	if (o->l.state != LINK_NONE) {
 		if (r->link_cb != NULL) {
 			r->link_cb(RET_LINK_EVT_FAILED, -EBUSY, r->user);
 		}
 		return;
 	}
 
-	memset(l, 0, sizeof(*l));
-	memcpy(l->dest, r->dest_hash, RET_TRUNC_HASH_LEN);
-	l->cb = r->link_cb;
-	l->user = r->user;
+	memset(o, 0, sizeof(*o));
+	o->l.role = LINK_OUT;
+	memcpy(o->dest, r->dest_hash, RET_TRUNC_HASH_LEN);
+	o->cb = r->link_cb;
+	o->user = r->user;
 
-	d = ret_destinations_find(l->dest);
+	d = ret_destinations_find(o->dest);
 	if (d != NULL && d->path_valid) {
 		send_link_request(c, d);
 		return;
@@ -197,23 +247,24 @@ void ret_link_drv_open(struct ret_client *c, const struct send_req *r)
 	/* No keys or no current path: ask for one; the announce in reply
 	 * continues in ret_link_drv_on_path().
 	 */
-	l->state = LINK_WAIT_PATH;
-	l->deadline_ms = k_uptime_get() + CONFIG_RET_PATH_REQUEST_TIMEOUT_MS;
-	l->next_path_request_ms = 0;
+	o->l.state = LINK_WAIT_PATH;
+	o->l.deadline_ms = k_uptime_get() + CONFIG_RET_PATH_REQUEST_TIMEOUT_MS;
+	o->next_path_request_ms = 0;
 }
 
 void ret_link_drv_on_path(struct ret_client *c, const struct ret_destination *d)
 {
-	struct link *l = &c->link;
+	struct link_out *o = &c->out;
 
-	if (l->state == LINK_WAIT_PATH && memcmp(l->dest, d->dest_hash, RET_TRUNC_HASH_LEN) == 0) {
+	if (o->l.state == LINK_WAIT_PATH &&
+	    memcmp(o->dest, d->dest_hash, RET_TRUNC_HASH_LEN) == 0) {
 		send_link_request(c, d);
 	}
 }
 
-static void on_proof(struct ret_client *c, const struct ret_packet *pkt)
+static void on_proof(struct ret_client *c, struct link_out *o, const struct ret_packet *pkt)
 {
-	struct link *l = &c->link;
+	struct link *l = &o->l;
 	uint8_t plain[16];
 	uint16_t mtu;
 	int64_t now = k_uptime_get();
@@ -223,7 +274,7 @@ static void on_proof(struct ret_client *c, const struct ret_packet *pkt)
 	if (l->state != LINK_PENDING) {
 		return;
 	}
-	err = ret_link_proof_validate(l->id, l->dest_sig_pub, &l->keys, pkt, l->key, &mtu);
+	err = ret_link_proof_validate(l->id, o->dest_sig_pub, &o->keys, pkt, l->key, &mtu);
 	if (err == -EBADMSG) {
 		/* Anyone who saw the cleartext link request knows the link_id:
 		 * an unauthenticated proof must not end the handshake. Keep
@@ -234,44 +285,43 @@ static void on_proof(struct ret_client *c, const struct ret_packet *pkt)
 	}
 	if (err) {
 		LOG_WRN("link proof for an unsupported mode");
-		finish(c, RET_LINK_EVT_FAILED, err);
+		link_end(c, l, RET_LINK_EVT_FAILED, err);
 		return;
 	}
 	/* The ephemeral private keys only served to derive the link key. */
-	ret_wipe(&l->keys, sizeof(l->keys));
+	ret_wipe(&o->keys, sizeof(o->keys));
 
 	if (mtu != RET_MTU) {
 		/* A transport clamped it below 500 (or the peer confirmed
 		 * something we never signalled): requests are sized for 500.
 		 */
 		LOG_WRN("link MTU %u not supported", mtu);
-		finish(c, RET_LINK_EVT_FAILED, -EMSGSIZE);
+		link_end(c, l, RET_LINK_EVT_FAILED, -EMSGSIZE);
 		return;
 	}
 
 	l->rtt_ms = (uint32_t)MAX(1, now - l->opened_ms);
 	l->keepalive_ms = ret_link_keepalive_ms(l->rtt_ms);
 	l->last_rx_ms = now;
-	l->last_keepalive_ms = now;
+	o->last_keepalive_ms = now;
 
 	/* The responder ignores requests until it has the RTT. */
 	n = ret_link_rtt_plain((double)l->rtt_ms / 1000.0, plain, sizeof(plain));
-	err = n < 0 ? n : send_link(c, RET_CTX_LRRTT, plain, (size_t)n, true, NULL);
+	err = n < 0 ? n : send_link(c, l, RET_CTX_LRRTT, plain, (size_t)n, true, NULL);
 	if (err) {
-		finish(c, RET_LINK_EVT_FAILED, err);
+		link_end(c, l, RET_LINK_EVT_FAILED, err);
 		return;
 	}
 
 	l->state = LINK_ACTIVE;
 	LOG_INF("link active, rtt %u ms", l->rtt_ms);
-	if (l->cb != NULL) {
-		l->cb(RET_LINK_EVT_ACTIVE, 0, l->user);
+	if (o->cb != NULL) {
+		o->cb(RET_LINK_EVT_ACTIVE, 0, o->user);
 	}
 }
 
-static void on_response(struct ret_client *c, const uint8_t *plain, size_t len)
+static void on_response(struct link_out *o, const uint8_t *plain, size_t len)
 {
-	struct link *l = &c->link;
 	uint8_t id[RET_TRUNC_HASH_LEN];
 	const uint8_t *resp;
 	size_t resp_len;
@@ -280,8 +330,8 @@ static void on_response(struct ret_client *c, const uint8_t *plain, size_t len)
 		LOG_WRN("malformed link response");
 		return;
 	}
-	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		struct link_request *q = &l->req[i];
+	for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
+		struct link_request *q = &o->req[i];
 
 		if (q->used && !q->receiving && memcmp(q->id, id, RET_TRUNC_HASH_LEN) == 0) {
 			request_done(q, 0, resp, resp_len);
@@ -293,10 +343,10 @@ static void on_response(struct ret_client *c, const uint8_t *plain, size_t len)
 
 /* --- Resources ------------------------------------------------------- */
 
-/* Refuse a resource (RESOURCE_RCL carries its hash). */
-static void send_rcl(struct ret_client *c, const uint8_t h[RET_SHA256_LEN])
+/* Refuse a resource on @p l (RESOURCE_RCL carries its hash). */
+static void send_rcl(struct ret_client *c, struct link *l, const uint8_t h[RET_SHA256_LEN])
 {
-	(void)send_link(c, RET_CTX_RESOURCE_RCL, h, RET_SHA256_LEN, true, NULL);
+	(void)send_link(c, l, RET_CTX_RESOURCE_RCL, h, RET_SHA256_LEN, true, NULL);
 }
 
 static void resource_touch(struct ret_client *c)
@@ -304,7 +354,7 @@ static void resource_touch(struct ret_client *c)
 	struct link_resource *res = &c->res;
 
 	res->deadline_ms = k_uptime_get() +
-			   (int64_t)c->link.rtt_ms * RESOURCE_TIMEOUT_FACTOR + RESOURCE_GRACE_MS +
+			   (int64_t)res->link->rtt_ms * RESOURCE_TIMEOUT_FACTOR + RESOURCE_GRACE_MS +
 			   (int64_t)(RESOURCE_MAX_RETRIES - res->retries) * RESOURCE_PER_RETRY_MS;
 }
 
@@ -316,81 +366,161 @@ static void resource_request(struct ret_client *c)
 	int n = ret_resource_rx_request(&res->rx, buf, sizeof(buf));
 
 	if (n > 0) {
-		(void)send_link(c, RET_CTX_RESOURCE_REQ, buf, (size_t)n, true, NULL);
+		(void)send_link(c, res->link, RET_CTX_RESOURCE_REQ, buf, (size_t)n, true, NULL);
 	}
 	resource_touch(c);
 }
 
+/* Give up on the resource; a response's request fails with @p err.
+ * A delivery is not refused (RCL makes LXMF reject the message for good)
+ * when it failed in transit: its link is closed instead, so the sender
+ * retries.
+ */
 static void resource_fail(struct ret_client *c, int err, bool refuse)
 {
-	if (refuse) {
-		send_rcl(c, c->res.rx.h);
+	struct link_request *q;
+	struct link *l = c->res.link;
+
+	if (c->res.purpose == RES_DELIVERY) {
+		(void)resource_end(c);
+		link_close(c, l, RET_LINK_EVT_CLOSED, err);
+		return;
 	}
-	request_done(resource_end(c), err, NULL, 0);
+	if (refuse) {
+		send_rcl(c, l, c->res.rx.h);
+	}
+	q = resource_end(c);
+	if (q != NULL) {
+		request_done(q, err, NULL, 0);
+	}
 }
 
-static void on_resource_adv(struct ret_client *c, const uint8_t *plain, size_t len)
+/* Start receiving @p adv on @p l. @return 0, or the reason it was refused. */
+static int resource_start(struct ret_client *c, struct link *l, const struct ret_resource_adv *adv,
+			  enum res_purpose purpose, struct link_request *q)
 {
-	struct link *l = &c->link;
+	struct link_resource *res = &c->res;
+	int err = ret_resource_rx_init(&res->rx, adv, res->stream, sizeof(res->stream));
+
+	if (err) {
+		return err;
+	}
+	res->state = RES_RECEIVING;
+	res->purpose = purpose;
+	res->link = l;
+	res->req = q;
+	res->retries = RESOURCE_MAX_RETRIES;
+	res->give_up_ms = k_uptime_get() + RESOURCE_MAX_MS;
+	if (q != NULL) {
+		q->receiving = true;
+	}
+	resource_request(c);
+	return 0;
+}
+
+/* An advertisement on the outbound link: a response to one of its requests. */
+static void on_response_adv(struct ret_client *c, struct link_out *o,
+			    const struct ret_resource_adv *adv)
+{
 	struct link_resource *res = &c->res;
 	struct link_request *q = NULL;
-	struct ret_resource_adv adv;
 	int err;
 
-	if (ret_resource_adv_parse(plain, len, &adv) != 0) {
-		LOG_WRN("malformed resource advertisement");
-		return;
-	}
-	if (res->active && memcmp(res->rx.h, adv.h, RET_SHA256_LEN) == 0) {
-		/* Advertised again: the sender never saw our request. */
-		resource_request(c);
-		return;
-	}
-	if (adv.q != NULL) {
-		for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-			if (l->req[i].used && !l->req[i].receiving &&
-			    memcmp(l->req[i].id, adv.q, RET_TRUNC_HASH_LEN) == 0) {
-				q = &l->req[i];
+	if (adv->q != NULL) {
+		for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
+			if (o->req[i].used && !o->req[i].receiving &&
+			    memcmp(o->req[i].id, adv->q, RET_TRUNC_HASH_LEN) == 0) {
+				q = &o->req[i];
 				break;
 			}
 		}
 	}
 	if (q == NULL) {
 		LOG_WRN("refusing unsolicited resource");
-		send_rcl(c, adv.h);
+		send_rcl(c, &o->l, adv->h);
 		return;
 	}
-	if (res->active || !(adv.f & RET_RESOURCE_F_RESPONSE)) {
+	if (res->state != RES_IDLE || !(adv->f & RET_RESOURCE_F_RESPONSE)) {
 		/* For a pending request, but not receivable: fail it now rather
 		 * than leave it to its deadline.
 		 */
 		LOG_WRN("refusing response resource: %s",
-			res->active ? "another one is arriving" : "not marked as a response");
-		send_rcl(c, adv.h);
-		request_done(q, res->active ? -EBUSY : -EBADMSG, NULL, 0);
+			res->state != RES_IDLE ? "another one is arriving"
+					       : "not marked as a response");
+		send_rcl(c, &o->l, adv->h);
+		request_done(q, res->state != RES_IDLE ? -EBUSY : -EBADMSG, NULL, 0);
 		return;
 	}
 
-	err = ret_resource_rx_init(&res->rx, &adv, res->stream, sizeof(res->stream));
+	err = resource_start(c, &o->l, adv, RES_RESPONSE, q);
 	if (err) {
-		LOG_WRN("refusing response resource (%u bytes, flags 0x%02x): %d", (uint32_t)adv.t,
-			(uint32_t)adv.f, err);
-		send_rcl(c, adv.h);
+		LOG_WRN("refusing response resource (%u bytes, flags 0x%02x): %d",
+			(uint32_t)adv->t, (uint32_t)adv->f, err);
+		send_rcl(c, &o->l, adv->h);
 		request_done(q, err, NULL, 0);
 		return;
 	}
-	res->active = true;
-	res->req = q;
-	res->retries = RESOURCE_MAX_RETRIES;
-	q->receiving = true;
 	LOG_INF("receiving response: %u bytes in %u parts", res->rx.t, res->rx.n);
-	resource_request(c);
+}
+
+static void on_resource_adv(struct ret_client *c, struct link *l, const uint8_t *plain, size_t len)
+{
+	struct link_resource *res = &c->res;
+	struct ret_resource_adv adv;
+
+	if (ret_resource_adv_parse(plain, len, &adv) != 0) {
+		LOG_WRN("malformed resource advertisement");
+		return;
+	}
+	if (res->state == RES_RECEIVING && res->link == l &&
+	    memcmp(res->rx.h, adv.h, RET_SHA256_LEN) == 0) {
+		/* Advertised again: the sender never saw our request. */
+		resource_request(c);
+		return;
+	}
+	if (l->role == LINK_OUT) {
+		on_response_adv(c, link_out_of(l), &adv);
+		return;
+	}
+
+	/* An inbound link: data sent to us, as LXMF DIRECT sends a packed
+	 * message too large for one packet.
+	 */
+	if (adv.q != NULL || (adv.f & (RET_RESOURCE_F_REQUEST | RET_RESOURCE_F_RESPONSE))) {
+		LOG_WRN("refusing request/response resource on an inbound link");
+		send_rcl(c, l, adv.h);
+		return;
+	}
+	if (c->cfg.on_lxmf == NULL) {
+		LOG_WRN("refusing resource on an inbound link: no LXMF");
+		send_rcl(c, l, adv.h);
+		return;
+	}
+	if (res->state != RES_IDLE) {
+		/* RESOURCE_RCL makes LXMF reject the message for good; a closed
+		 * link makes it retry later.
+		 */
+		LOG_WRN("resource buffers busy: closing the inbound link so the sender retries");
+		link_close(c, l, RET_LINK_EVT_CLOSED, -EBUSY);
+		return;
+	}
+
+	int err = resource_start(c, l, &adv, RES_DELIVERY, NULL);
+
+	if (err) {
+		/* Too large or compressed: it can never be received. */
+		LOG_WRN("refusing delivery resource (%u bytes, flags 0x%02x): %d", (uint32_t)adv.t,
+			(uint32_t)adv.f, err);
+		send_rcl(c, l, adv.h);
+		return;
+	}
+	LOG_INF("receiving delivery: %u bytes in %u parts", res->rx.t, res->rx.n);
 }
 
 static void resource_complete(struct ret_client *c)
 {
-	struct link *l = &c->link;
 	struct link_resource *res = &c->res;
+	struct link *l = res->link;
 	struct link_request *q;
 	uint8_t proof[RET_RESOURCE_PROOF_LEN];
 	uint8_t id[RET_TRUNC_HASH_LEN];
@@ -401,21 +531,29 @@ static void resource_complete(struct ret_client *c)
 
 	n = ret_resource_rx_assemble(&res->rx, l->key, res->plain, sizeof(res->plain));
 	if (n < 0) {
-		LOG_WRN("response resource corrupt: %d", n);
+		LOG_WRN("resource corrupt: %d", n);
 		resource_fail(c, n, true); /* RCL: the sender stops waiting for a proof */
 		return;
 	}
+	res->state = RES_DELIVERING;
 
 	/* Prove it whatever it holds: the sender is done either way. */
 	err = ret_resource_proof(&res->rx, res->plain, (size_t)n, proof);
 	if (!err) {
-		err = send_built(c,
+		err = send_built(c, l,
 				 ret_link_resource_proof_build(l->id, proof, c->tx_raw,
 							       sizeof(c->tx_raw)),
 				 NULL);
 	}
 	if (err) {
 		LOG_WRN("resource proof not sent: %d", err);
+	}
+
+	if (res->purpose == RES_DELIVERY) {
+		LOG_INF("delivery resource complete: %u bytes", (uint32_t)n);
+		ret_client_on_link_data(c, res->plain, (size_t)n);
+		(void)resource_end(c);
+		return;
 	}
 
 	q = res->req;
@@ -431,11 +569,11 @@ static void resource_complete(struct ret_client *c)
 	(void)resource_end(c);
 }
 
-static void on_resource_part(struct ret_client *c, const uint8_t *data, size_t len)
+static void on_resource_part(struct ret_client *c, struct link *l, const uint8_t *data, size_t len)
 {
 	struct link_resource *res = &c->res;
 
-	if (!res->active) {
+	if (res->state != RES_RECEIVING || res->link != l) {
 		return;
 	}
 	switch (ret_resource_rx_part(&res->rx, data, len)) {
@@ -459,11 +597,11 @@ static void on_resource_part(struct ret_client *c, const uint8_t *data, size_t l
 	}
 }
 
-static void on_resource_hmu(struct ret_client *c, const uint8_t *plain, size_t len)
+static void on_resource_hmu(struct ret_client *c, struct link *l, const uint8_t *plain, size_t len)
 {
 	struct link_resource *res = &c->res;
 
-	if (!res->active || len < RET_SHA256_LEN ||
+	if (res->state != RES_RECEIVING || res->link != l || len < RET_SHA256_LEN ||
 	    memcmp(plain, res->rx.h, RET_SHA256_LEN) != 0) {
 		return;
 	}
@@ -475,26 +613,238 @@ static void on_resource_hmu(struct ret_client *c, const uint8_t *plain, size_t l
 	resource_request(c);
 }
 
-static void on_resource_icl(struct ret_client *c, const uint8_t *plain, size_t len)
+static void on_resource_icl(struct ret_client *c, struct link *l, const uint8_t *plain, size_t len)
 {
 	struct link_resource *res = &c->res;
 
-	if (res->active && len == RET_SHA256_LEN && memcmp(plain, res->rx.h, RET_SHA256_LEN) == 0) {
-		LOG_WRN("sender cancelled the response resource");
+	if (res->state == RES_RECEIVING && res->link == l && len == RET_SHA256_LEN &&
+	    memcmp(plain, res->rx.h, RET_SHA256_LEN) == 0) {
+		LOG_WRN("sender cancelled the resource");
 		resource_fail(c, -ECANCELED, false);
 	}
 }
 
-void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt)
-{
-	struct link *l = &c->link;
-	int n;
+/* --- Packets for a link ----------------------------------------------- */
 
-	if (pkt->packet_type == RET_PKT_PROOF && pkt->context == RET_CTX_LRPROOF) {
-		on_proof(c, pkt);
+struct link *ret_link_drv_find(struct ret_client *c, const uint8_t id[RET_TRUNC_HASH_LEN])
+{
+	if (c->out.l.state != LINK_NONE && memcmp(c->out.l.id, id, RET_TRUNC_HASH_LEN) == 0) {
+		return &c->out.l;
+	}
+#if CONFIG_RET_INBOUND_LINKS > 0
+	for (size_t i = 0; i < ARRAY_SIZE(c->in); i++) {
+		if (c->in[i].state != LINK_NONE &&
+		    memcmp(c->in[i].id, id, RET_TRUNC_HASH_LEN) == 0) {
+			return &c->in[i];
+		}
+	}
+#endif
+	return NULL;
+}
+
+/* --- Inbound links (responder) ---------------------------------------- */
+
+void ret_link_drv_on_request(struct ret_client *c, const struct ret_packet *pkt,
+			     const uint8_t *raw, size_t raw_len)
+{
+#if CONFIG_RET_INBOUND_LINKS == 0
+	ARG_UNUSED(c);
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(raw);
+	ARG_UNUSED(raw_len);
+	LOG_DBG("link request dropped: inbound links disabled");
+#else
+	struct ret_link_peer_request req;
+	uint8_t id[RET_TRUNC_HASH_LEN];
+	uint8_t prv[RET_X25519_LEN];
+	uint8_t pub[RET_X25519_LEN];
+	struct link *l = NULL;
+	struct link *oldest = NULL;
+	int64_t now = k_uptime_get();
+	int err;
+
+	err = ret_link_request_parse(pkt, &req);
+	if (err) {
+		LOG_WRN("link request refused: %s", err == -EPROTO ? "unsupported mode" : "malformed");
 		return;
 	}
-	if (l->state != LINK_ACTIVE && l->state != LINK_STALE) {
+	if (req.mtu == 0) {
+		req.mtu = RET_MTU; /* Link.validate_request: "... or MTU" */
+	}
+	if (req.mtu < RET_MTU) {
+		/* Resource parts are sized for 500 (SDU 464). */
+		LOG_WRN("link request refused: MTU %u below %u", req.mtu, RET_MTU);
+		return;
+	}
+	uint8_t hash[RET_HASH_LEN];
+
+	if (ret_link_id_from_request(raw, raw_len, id) != 0 ||
+	    ret_packet_hash(raw, raw_len, hash) != 0) {
+		return;
+	}
+	/* A replayed request (RNS drops repeats in its packet filter), or one
+	 * for a link already open.
+	 */
+	if (ret_client_seen_packet(c, hash) || ret_link_drv_find(c, id) != NULL) {
+		LOG_DBG("repeated link request ignored");
+		return;
+	}
+	ret_client_remember_packet(c, hash);
+
+	for (size_t i = 0; i < ARRAY_SIZE(c->in); i++) {
+		struct link *x = &c->in[i];
+
+		if (x->state == LINK_NONE) {
+			l = x;
+			break;
+		}
+		if (x->state == LINK_HANDSHAKE && now - x->opened_ms >= IN_EVICT_MIN_AGE_MS &&
+		    (oldest == NULL || x->opened_ms < oldest->opened_ms)) {
+			oldest = x;
+		}
+	}
+	if (l == NULL && oldest != NULL) {
+		/* A replayed or spoofed request must not hold every slot. */
+		LOG_WRN("inbound links full: replacing one still in handshake");
+		link_end(c, oldest, RET_LINK_EVT_CLOSED, -ENOSPC);
+		l = oldest;
+	}
+	if (l == NULL) {
+		LOG_WRN("inbound links full: link request dropped");
+		return;
+	}
+
+	memset(l, 0, sizeof(*l));
+	l->role = LINK_IN;
+	memcpy(l->id, id, sizeof(l->id));
+
+	/* An ephemeral X25519 key: it only serves to derive the link key. */
+	err = ret_random(prv, sizeof(prv));
+	if (!err) {
+		ret_x25519_public_key(pub, prv);
+		err = ret_link_derive_key(prv, req.x25519_pub, id, l->key);
+	}
+	ret_wipe(prv, sizeof(prv));
+	if (!err) {
+		/* Confirm 500 whatever was signalled: the initiator adopts it. */
+		err = send_built(c, l,
+				 ret_link_proof_build(&c->id, id, pub, RET_MTU, c->tx_raw,
+						      sizeof(c->tx_raw)),
+				 NULL);
+	}
+	if (err) {
+		LOG_WRN("link request not answered: %d", err);
+		link_end(c, l, RET_LINK_EVT_FAILED, err);
+		return;
+	}
+
+	/* Timed from the proof leaving, as RNS sets request_time after
+	 * prove(): our own crypto time is not part of the round trip.
+	 */
+	now = k_uptime_get();
+	l->state = LINK_HANDSHAKE;
+	l->opened_ms = now;
+	l->deadline_ms = now + (int64_t)ESTABLISH_PER_HOP_MS * MAX(1, pkt->hops + 1) +
+			 IN_ESTABLISH_EXTRA_MS;
+	LOG_INF("inbound link %02x%02x%02x%02x.. accepted", id[0], id[1], id[2], id[3]);
+#endif
+}
+
+/*
+ * HANDSHAKE: only the initiator's RTT (or a close) is taken. RNS would
+ * process anything once the proof is out, but its initiator always sends
+ * the RTT first and the path keeps order; this keeps resource and
+ * keepalive timing from running without an RTT.
+ */
+static void in_handshake(struct ret_client *c, struct link *l, const struct ret_packet *pkt)
+{
+	int64_t now = k_uptime_get();
+	uint32_t rtt_ms;
+	int n;
+
+	if (pkt->packet_type != RET_PKT_DATA ||
+	    (pkt->context != RET_CTX_LRRTT && pkt->context != RET_CTX_LINKCLOSE)) {
+		LOG_DBG("inbound link in handshake: context 0x%02x dropped", pkt->context);
+		return;
+	}
+	n = ret_token_decrypt(l->key, pkt->data, pkt->data_len, c->rx_plain, sizeof(c->rx_plain));
+	if (pkt->context == RET_CTX_LINKCLOSE) {
+		if (n == RET_TRUNC_HASH_LEN && memcmp(c->rx_plain, l->id, RET_TRUNC_HASH_LEN) == 0) {
+			LOG_INF("inbound link closed by peer");
+			link_end(c, l, RET_LINK_EVT_CLOSED, 0);
+		}
+	} else if (n < 0) {
+		/* Not from the initiator (anyone who saw the request knows the
+		 * link_id): ignored, as Link.rtt_packet ignores what does not
+		 * decrypt.
+		 */
+		LOG_WRN("undecryptable RTT on an inbound link: ignored");
+	} else if (ret_link_rtt_parse(c->rx_plain, (size_t)n, &rtt_ms) != 0) {
+		/* Link.rtt_packet tears the link down when unpacking fails. */
+		LOG_WRN("bad RTT on an inbound link: closed");
+		link_end(c, l, RET_LINK_EVT_FAILED, -EBADMSG);
+	} else {
+		l->rtt_ms = MAX(1U, MAX((uint32_t)(now - l->opened_ms), rtt_ms));
+		l->keepalive_ms = ret_link_keepalive_ms(l->rtt_ms);
+		l->last_rx_ms = now;
+		l->state = LINK_ACTIVE;
+		LOG_INF("inbound link %02x%02x%02x%02x.. active, rtt %u ms", l->id[0], l->id[1],
+			l->id[2], l->id[3], l->rtt_ms);
+	}
+	if (n > 0) {
+		ret_wipe(c->rx_plain, (size_t)n);
+	}
+}
+
+/* DATA on an inbound link: deliver (once), then always prove, as RNS does
+ * for a destination with PROVE_ALL.
+ */
+static void in_data(struct ret_client *c, struct link *l, const struct ret_packet *pkt,
+		    const uint8_t *raw, size_t raw_len)
+{
+	uint8_t hash[RET_HASH_LEN];
+	int n;
+
+	if (ret_packet_hash(raw, raw_len, hash) != 0) {
+		return;
+	}
+	if (ret_client_seen_packet(c, hash)) {
+		LOG_DBG("repeated link packet, proving again");
+	} else {
+		n = ret_token_decrypt(l->key, pkt->data, pkt->data_len, c->rx_plain,
+				      sizeof(c->rx_plain));
+		if (n < 0) {
+			LOG_WRN("undecryptable link packet: %d", n);
+			return; /* only what decrypted earns a proof */
+		}
+		ret_client_remember_packet(c, hash);
+		ret_client_on_link_data(c, c->rx_plain, (size_t)n);
+		ret_wipe(c->rx_plain, (size_t)n);
+		if (l->state == LINK_NONE || c->conn_broken) {
+			return;
+		}
+	}
+	(void)send_built(c, l,
+			 ret_link_packet_proof_build(&c->id, l->id, hash, c->tx_raw,
+						     sizeof(c->tx_raw)),
+			 NULL);
+}
+
+void ret_link_drv_on_packet(struct ret_client *c, struct link *l, const struct ret_packet *pkt,
+			    const uint8_t *raw, size_t raw_len)
+{
+	int n;
+
+	if (l->role == LINK_OUT && pkt->packet_type == RET_PKT_PROOF &&
+	    pkt->context == RET_CTX_LRPROOF) {
+		on_proof(c, link_out_of(l), pkt);
+		return;
+	}
+	if (l->state == LINK_HANDSHAKE) {
+		in_handshake(c, l, pkt);
+		return;
+	}
+	if (!link_up(l)) {
 		return;
 	}
 
@@ -509,10 +859,25 @@ void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt)
 
 	switch (pkt->context) {
 	case RET_CTX_KEEPALIVE:
-		return; /* unencrypted; any inbound already refreshed last_rx */
+		/* Unencrypted. The responder answers 0xFF with 0xFE when it
+		 * sent nothing for a keepalive interval; the initiator ignores
+		 * answers (any inbound already refreshed last_rx).
+		 */
+		if (l->role == LINK_IN && pkt->data_len == 1 && pkt->data[0] == 0xFF &&
+		    k_uptime_get() >= l->last_tx_ms + l->keepalive_ms) {
+			const uint8_t ka = 0xFE;
+
+			(void)send_link(c, l, RET_CTX_KEEPALIVE, &ka, 1, false, NULL);
+		}
+		return;
+	case RET_CONTEXT_NONE:
+		if (l->role == LINK_IN) {
+			in_data(c, l, pkt, raw, raw_len);
+		}
+		return;
 	case RET_CTX_RESOURCE:
 		/* A slice of the already encrypted stream: no link token. */
-		on_resource_part(c, pkt->data, pkt->data_len);
+		on_resource_part(c, l, pkt->data, pkt->data_len);
 		return;
 	case RET_CTX_RESPONSE:
 	case RET_CTX_LINKCLOSE:
@@ -533,45 +898,49 @@ void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt)
 
 	switch (pkt->context) {
 	case RET_CTX_RESPONSE:
-		on_response(c, c->rx_plain, (size_t)n);
+		if (l->role == LINK_OUT) {
+			on_response(link_out_of(l), c->rx_plain, (size_t)n);
+		}
 		break;
 	case RET_CTX_RESOURCE_ADV:
-		on_resource_adv(c, c->rx_plain, (size_t)n);
+		on_resource_adv(c, l, c->rx_plain, (size_t)n);
 		break;
 	case RET_CTX_RESOURCE_HMU:
-		on_resource_hmu(c, c->rx_plain, (size_t)n);
+		on_resource_hmu(c, l, c->rx_plain, (size_t)n);
 		break;
 	case RET_CTX_RESOURCE_ICL:
-		on_resource_icl(c, c->rx_plain, (size_t)n);
+		on_resource_icl(c, l, c->rx_plain, (size_t)n);
 		break;
 	default: /* LINKCLOSE */
 		if (n == RET_TRUNC_HASH_LEN && memcmp(c->rx_plain, l->id, RET_TRUNC_HASH_LEN) == 0) {
-			LOG_INF("link closed by peer");
-			finish(c, RET_LINK_EVT_CLOSED, 0);
+			LOG_INF("%slink closed by peer", l->role == LINK_IN ? "inbound " : "");
+			link_end(c, l, RET_LINK_EVT_CLOSED, 0);
 		}
 		break;
 	}
 	ret_wipe(c->rx_plain, (size_t)n);
 }
 
+/* --- Outbound link API (queued requests) ------------------------------ */
+
 void ret_link_drv_request(struct ret_client *c, const struct send_req *r)
 {
-	struct link *l = &c->link;
+	struct link_out *o = &c->out;
 	struct link_request *slot = NULL;
 	uint8_t plain[RET_LINK_MDU];
 	uint8_t hash[RET_HASH_LEN];
 	int n;
 	int err;
 
-	if (l->state != LINK_ACTIVE && l->state != LINK_STALE) {
+	if (!link_up(&o->l)) {
 		if (r->response_cb != NULL) {
 			r->response_cb(-ENOTCONN, NULL, 0, r->user);
 		}
 		return;
 	}
-	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		if (!l->req[i].used) {
-			slot = &l->req[i];
+	for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
+		if (!o->req[i].used) {
+			slot = &o->req[i];
 			break;
 		}
 	}
@@ -587,90 +956,149 @@ void ret_link_drv_request(struct ret_client *c, const struct send_req *r)
 	 */
 	n = ret_link_request_plain((double)k_uptime_get() / 1000.0, r->path,
 				   r->len > 0 ? r->data : NULL, r->len, plain, sizeof(plain));
-	err = n < 0 ? n : send_link(c, RET_CTX_REQUEST, plain, (size_t)n, true, hash);
+	err = n < 0 ? n : send_link(c, &o->l, RET_CTX_REQUEST, plain, (size_t)n, true, hash);
 	ret_wipe(plain, sizeof(plain));
 	if (err) {
 		if (r->response_cb != NULL) {
-			r->response_cb(err == -ECONNRESET ? -ECONNRESET : err, NULL, 0, r->user);
+			r->response_cb(err, NULL, 0, r->user);
 		}
 		return;
 	}
 
 	slot->used = true;
 	memcpy(slot->id, hash, RET_TRUNC_HASH_LEN);
-	slot->deadline_ms = k_uptime_get() + (int64_t)l->rtt_ms * 6 + REQUEST_TIMEOUT_EXTRA_MS;
+	slot->deadline_ms = k_uptime_get() + (int64_t)o->l.rtt_ms * 6 + REQUEST_TIMEOUT_EXTRA_MS;
 	slot->cb = r->response_cb;
 	slot->user = r->user;
 }
 
 void ret_link_drv_identify(struct ret_client *c)
 {
-	struct link *l = &c->link;
+	struct link_out *o = &c->out;
 	uint8_t plain[RET_LINK_IDENTIFY_LEN];
 
-	if ((l->state != LINK_ACTIVE && l->state != LINK_STALE) || !c->has_local) {
+	if (!link_up(&o->l) || !c->has_local) {
 		return;
 	}
-	ret_link_identify_plain(&c->id, l->id, plain);
-	(void)send_link(c, RET_CTX_LINKIDENTIFY, plain, sizeof(plain), true, NULL);
+	ret_link_identify_plain(&c->id, o->l.id, plain);
+	(void)send_link(c, &o->l, RET_CTX_LINKIDENTIFY, plain, sizeof(plain), true, NULL);
 	LOG_INF("identified on link");
 }
 
 void ret_link_drv_close(struct ret_client *c)
 {
-	struct link *l = &c->link;
+	struct link *l = &c->out.l;
 
-	if (l->state == LINK_ACTIVE || l->state == LINK_STALE) {
-		(void)send_link(c, RET_CTX_LINKCLOSE, l->id, RET_TRUNC_HASH_LEN, true, NULL);
-	}
-	if (l->state != LINK_NONE) {
-		finish(c, RET_LINK_EVT_CLOSED, 0);
+	if (link_up(l)) {
+		link_close(c, l, RET_LINK_EVT_CLOSED, 0);
+	} else if (l->state != LINK_NONE) {
+		link_end(c, l, RET_LINK_EVT_CLOSED, 0);
 	}
 }
+
+/* --- Every link at once ------------------------------------------------ */
 
 void ret_link_drv_teardown(struct ret_client *c)
 {
-	enum link_state st = c->link.state;
+	struct link *l = &c->out.l;
+	enum link_state st = l->state;
 
-	if (st == LINK_NONE) {
-		return;
+	if (st != LINK_NONE) {
+		/* CLOSED only for a link that was ACTIVE; one still being set
+		 * up FAILED, as the API promises.
+		 */
+		link_end(c, l, link_up(l) ? RET_LINK_EVT_CLOSED : RET_LINK_EVT_FAILED, -ECONNRESET);
 	}
-	/* CLOSED only for a link that was ACTIVE; one still being set up
-	 * FAILED, as the API promises.
+#if CONFIG_RET_INBOUND_LINKS > 0
+	for (size_t i = 0; i < ARRAY_SIZE(c->in); i++) {
+		if (c->in[i].state != LINK_NONE) {
+			link_end(c, &c->in[i], RET_LINK_EVT_CLOSED, -ECONNRESET);
+		}
+	}
+#endif
+}
+
+void ret_link_drv_close_all(struct ret_client *c)
+{
+	if (link_up(&c->out.l)) {
+		link_close(c, &c->out.l, RET_LINK_EVT_CLOSED, 0);
+	}
+#if CONFIG_RET_INBOUND_LINKS > 0
+	/* An inbound link has its key from the request on: RNS accepts the
+	 * close even in handshake.
 	 */
-	finish(c, (st == LINK_ACTIVE || st == LINK_STALE) ? RET_LINK_EVT_CLOSED
-							   : RET_LINK_EVT_FAILED,
-	       -ECONNRESET);
+	for (size_t i = 0; i < ARRAY_SIZE(c->in); i++) {
+		if (c->in[i].state == LINK_NONE) {
+			continue;
+		}
+		LOG_INF("closing inbound link %02x%02x%02x%02x..", c->in[i].id[0], c->in[i].id[1],
+			c->in[i].id[2], c->in[i].id[3]);
+		if (c->conn_broken) {
+			link_end(c, &c->in[i], RET_LINK_EVT_CLOSED, 0);
+		} else {
+			link_close(c, &c->in[i], RET_LINK_EVT_CLOSED, 0);
+		}
+	}
+#endif
 }
 
-static int64_t keepalive_due(const struct link *l)
+/* --- Timers ------------------------------------------------------------ */
+
+static int64_t stale_close_at(const struct link *l)
 {
-	return MIN(l->last_tx_ms, MAX(l->last_rx_ms, l->last_keepalive_ms)) + l->keepalive_ms;
+	return l->stale_since_ms + (int64_t)l->rtt_ms * STALE_FACTOR + STALE_GRACE_MS;
 }
 
-void ret_link_drv_service(struct ret_client *c)
+/* Shared by both roles: ACTIVE -> STALE without traffic, then closed. */
+static void service_stale(struct ret_client *c, struct link *l, int64_t now)
 {
-	struct link *l = &c->link;
-	int64_t now = k_uptime_get();
+	if (l->state == LINK_ACTIVE && now - l->last_rx_ms >= 2 * (int64_t)l->keepalive_ms) {
+		l->state = LINK_STALE;
+		l->stale_since_ms = now;
+		LOG_WRN("link stale");
+	} else if (l->state == LINK_STALE && now >= stale_close_at(l)) {
+		LOG_WRN("link timed out");
+		link_close(c, l, RET_LINK_EVT_CLOSED, -ETIMEDOUT);
+	}
+}
+
+static int64_t stale_next(const struct link *l)
+{
+	return l->state == LINK_ACTIVE ? l->last_rx_ms + 2 * (int64_t)l->keepalive_ms
+				       : stale_close_at(l);
+}
+
+static int64_t keepalive_due(const struct link_out *o)
+{
+	const struct link *l = &o->l;
+
+	return MIN(l->last_tx_ms, MAX(l->last_rx_ms, o->last_keepalive_ms)) + l->keepalive_ms;
+}
+
+static void service_out(struct ret_client *c, int64_t now)
+{
+	struct link_out *o = &c->out;
+	struct link *l = &o->l;
 
 	switch (l->state) {
 	case LINK_NONE:
+	case LINK_HANDSHAKE:
 		return;
 	case LINK_WAIT_PATH:
 		if (now >= l->deadline_ms) {
 			LOG_WRN("no path for link");
-			finish(c, RET_LINK_EVT_FAILED, -EHOSTUNREACH);
-		} else if (now >= l->next_path_request_ms) {
-			if (ret_client_send_path_request(c, l->dest) == -ECONNRESET) {
+			link_end(c, l, RET_LINK_EVT_FAILED, -EHOSTUNREACH);
+		} else if (now >= o->next_path_request_ms) {
+			if (ret_client_send_path_request(c, o->dest) == -ECONNRESET) {
 				c->conn_broken = true;
 			}
-			l->next_path_request_ms = now + CONFIG_RET_PATH_REQUEST_INTERVAL_MS;
+			o->next_path_request_ms = now + CONFIG_RET_PATH_REQUEST_INTERVAL_MS;
 		}
 		return;
 	case LINK_PENDING:
 		if (now >= l->deadline_ms) {
 			LOG_WRN("no link proof in time");
-			finish(c, RET_LINK_EVT_FAILED, -ETIMEDOUT);
+			link_end(c, l, RET_LINK_EVT_FAILED, -ETIMEDOUT);
 		}
 		return;
 	case LINK_ACTIVE:
@@ -678,22 +1106,11 @@ void ret_link_drv_service(struct ret_client *c)
 		break;
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		struct link_request *q = &l->req[i];
+	for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
+		struct link_request *q = &o->req[i];
 
 		if (q->used && !q->receiving && now >= q->deadline_ms) {
 			request_done(q, -ETIMEDOUT, NULL, 0);
-		}
-	}
-
-	if (c->res.active && now >= c->res.deadline_ms) {
-		if (c->res.retries == 0) {
-			LOG_WRN("response resource timed out");
-			resource_fail(c, -ETIMEDOUT, true);
-		} else {
-			c->res.retries--;
-			ret_resource_rx_timeout(&c->res.rx);
-			resource_request(c);
 		}
 	}
 
@@ -701,62 +1118,125 @@ void ret_link_drv_service(struct ret_client *c)
 	 * a keepalive when nothing was sent for a keepalive interval, or when
 	 * nothing was received for one (at most one per interval).
 	 */
-	if (now >= keepalive_due(l)) {
+	if (now >= keepalive_due(o)) {
 		const uint8_t ka = 0xFF;
 
-		l->last_keepalive_ms = now;
-		(void)send_link(c, RET_CTX_KEEPALIVE, &ka, 1, false, NULL);
+		o->last_keepalive_ms = now;
+		(void)send_link(c, l, RET_CTX_KEEPALIVE, &ka, 1, false, NULL);
 	}
+	service_stale(c, l, now);
+}
 
-	if (l->state == LINK_ACTIVE && now - l->last_rx_ms >= 2 * (int64_t)l->keepalive_ms) {
-		l->state = LINK_STALE;
-		l->stale_since_ms = now;
-		LOG_WRN("link stale");
-	} else if (l->state == LINK_STALE &&
-		   now - l->stale_since_ms >=
-			   (int64_t)l->rtt_ms * STALE_FACTOR + STALE_GRACE_MS) {
-		LOG_WRN("link timed out");
-		(void)send_link(c, RET_CTX_LINKCLOSE, l->id, RET_TRUNC_HASH_LEN, true, NULL);
-		finish(c, RET_LINK_EVT_CLOSED, -ETIMEDOUT);
+static void service_resource(struct ret_client *c, int64_t now)
+{
+	struct link_resource *res = &c->res;
+
+	if (res->state != RES_RECEIVING) {
+		return;
 	}
+	if (now >= res->give_up_ms) {
+		LOG_WRN("resource took too long: given up");
+		resource_fail(c, -ETIMEDOUT, true);
+		return;
+	}
+	if (now < res->deadline_ms) {
+		return;
+	}
+	if (res->retries == 0) {
+		LOG_WRN("resource timed out");
+		resource_fail(c, -ETIMEDOUT, true);
+	} else {
+		res->retries--;
+		ret_resource_rx_timeout(&res->rx);
+		resource_request(c);
+	}
+}
+
+static void service_in(struct ret_client *c, int64_t now)
+{
+#if CONFIG_RET_INBOUND_LINKS > 0
+	for (size_t i = 0; i < ARRAY_SIZE(c->in); i++) {
+		struct link *l = &c->in[i];
+
+		if (l->state == LINK_HANDSHAKE && now >= l->deadline_ms) {
+			LOG_WRN("inbound link: no RTT from the initiator");
+			link_end(c, l, RET_LINK_EVT_FAILED, -ETIMEDOUT);
+		} else if (link_up(l)) {
+			/* The responder sends no keepalives of its own. */
+			service_stale(c, l, now);
+		}
+	}
+#else
+	ARG_UNUSED(c);
+	ARG_UNUSED(now);
+#endif
+}
+
+void ret_link_drv_service(struct ret_client *c)
+{
+	int64_t now = k_uptime_get();
+
+	service_resource(c, now);
+	service_out(c, now);
+	service_in(c, now);
+}
+
+static int64_t next_in(const struct ret_client *c)
+{
+	int64_t next = INT64_MAX;
+
+#if CONFIG_RET_INBOUND_LINKS > 0
+	for (size_t i = 0; i < ARRAY_SIZE(c->in); i++) {
+		const struct link *l = &c->in[i];
+
+		if (l->state == LINK_HANDSHAKE) {
+			next = MIN(next, l->deadline_ms);
+		} else if (link_up(l)) {
+			next = MIN(next, stale_next(l));
+		}
+	}
+#else
+	ARG_UNUSED(c);
+#endif
+	return next;
 }
 
 int64_t ret_link_drv_next_event(const struct ret_client *c)
 {
-	const struct link *l = &c->link;
-	int64_t next = INT64_MAX;
+	const struct link_out *o = &c->out;
+	const struct link *l = &o->l;
+	int64_t next = next_in(c);
 
+	if (c->res.state == RES_RECEIVING) {
+		next = MIN(next, MIN(c->res.deadline_ms, c->res.give_up_ms));
+	}
 	switch (l->state) {
 	case LINK_NONE:
-		return INT64_MAX;
+	case LINK_HANDSHAKE:
+		return next;
 	case LINK_WAIT_PATH:
-		return MIN(l->deadline_ms, l->next_path_request_ms);
+		return MIN(next, MIN(l->deadline_ms, o->next_path_request_ms));
 	case LINK_PENDING:
-		return l->deadline_ms;
+		return MIN(next, l->deadline_ms);
 	case LINK_ACTIVE:
 	case LINK_STALE:
 		break;
 	}
-	for (size_t i = 0; i < ARRAY_SIZE(l->req); i++) {
-		if (l->req[i].used && !l->req[i].receiving) {
-			next = MIN(next, l->req[i].deadline_ms);
+	for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
+		if (o->req[i].used && !o->req[i].receiving) {
+			next = MIN(next, o->req[i].deadline_ms);
 		}
 	}
-	if (c->res.active) {
-		next = MIN(next, c->res.deadline_ms);
-	}
-	next = MIN(next, keepalive_due(l));
-	if (l->state == LINK_ACTIVE) {
-		next = MIN(next, l->last_rx_ms + 2 * (int64_t)l->keepalive_ms);
-	} else {
-		next = MIN(next, l->stale_since_ms + (int64_t)l->rtt_ms * STALE_FACTOR +
-					 STALE_GRACE_MS);
-	}
-	return next;
+	next = MIN(next, keepalive_due(o));
+	return MIN(next, stale_next(l));
 }
 
 uint8_t *ret_link_drv_scratch(struct ret_client *c, size_t *cap)
 {
+	if (c->res.state == RES_RECEIVING) {
+		*cap = 0;
+		return NULL;
+	}
 	*cap = sizeof(c->res.stream);
 	return c->res.stream;
 }

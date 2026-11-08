@@ -128,9 +128,34 @@ regenerate the test vectors.
 - **Close:** LINKCLOSE carrying the encrypted link_id.
 - **Keepalive:** the initiator sends at `clamp(rtt * 360 / 1.75, 5, 360)` s. The responder only answers, and marks the link stale after 2× that without traffic. rnsd drops idle link-table entries after 900 s.
 
+## Links (responder side; RNS/Link.py validate_request, prove)
+
+Other nodes may open links to the client's own destination: `CONFIG_RET_INBOUND_LINKS` of them at once (default 2). This is how LXMF DIRECT delivery reaches the device.
+
+- **LINKREQUEST:** 64 bytes (`init X25519 pub | init Ed25519 pub`) or 67 (plus signalling). A request without signalling means AES-256-CBC, MTU 500. A request for any other mode is dropped and the initiator times out, as with RNS. A signalled MTU below 500 is refused, because Resource parts are sized for 500 (SDU 464).
+- **link_id:** as on the initiator side, `SHA256(hashable part without signalling)[:16]`. A request whose link_id is already in use is ignored.
+- **Keys:** a fresh ephemeral X25519 key; key = `HKDF(64, X25519(eph, init pub), salt=link_id)`. The private key is wiped once the key is derived.
+- **LRPROOF:** dest type LINK, PROOF, context `0xFF`, unencrypted. Data = `sig | eph X25519 pub | signalling`. The signature, by the **destination identity's** Ed25519 key, covers `link_id | eph pub | identity Ed25519 pub | signalling`.
+  - ret-client always confirms MTU 500 (`20 01 F4`): with no signalling, with 500, or with something larger, such as TCP's 262144. The initiator adopts the confirmed MTU.
+  - rnsd checks this signature (and the hop count) before it validates the link-table entry.
+- **HANDSHAKE:** until the initiator's LRRTT, a msgpack number in seconds. RTT = `max(measured since the request, reported)`. The establishment timeout is `6 s × hops + 360 s`.
+  - ret-client takes only LRRTT and LINKCLOSE in this state. RNS processes anything once the proof is out, but its initiator always sends LRRTT first, and the path keeps order.
+- **Keepalive:** the responder never sends one. It answers the initiator's `0xFF` with `0xFE` when it sent nothing within the keepalive interval. Stale after `2 × keepalive` without traffic, then closed after `rtt × 4 + 5 s`, as on the initiator side.
+- **DATA (context NONE):** decrypted, delivered once (repeats are recognised by packet hash), and always proved.
+  - The proof is a PROOF on the link, context NONE, unencrypted: `packet_hash | Ed25519(identity, packet_hash)`, as `Link.prove_packet()` builds it.
+  - Data goes to `on_lxmf` as a DIRECT LXMF message when the client is an LXMF node, else to `on_data`.
+- **Not supported:** LINKIDENTIFY, REQUEST and RESPONSE from the initiator are ignored, so there are no request handlers. Inbound links have no application callbacks.
+- **Table full:** a link that has waited more than 10 s in handshake is replaced, so spoofed requests can't hold every slot, yet can't evict a real handshake still waiting for its RTT. Otherwise the request is dropped. Repeats of a link request (by packet hash) are ignored, as RNS's packet filter drops them.
+- **Undecryptable RTT:** ignored, since anyone who saw the request knows the link_id. An RTT that decrypts but isn't a number closes the link, as `Link.rtt_packet` does.
+- **Suspend and disconnect:** suspend closes every link (LINKCLOSE); a lost connection ends them.
+
 ## Resources (receiving side; RNS/Resource.py)
 
-ret-client receives Resources only as responses to its own requests (advertisement flag `p`, with `q` = request_id). Any other advertisement is refused.
+ret-client receives Resources in two cases:
+- as responses to its own requests on the outbound link (advertisement flag `p`, with `q` = request_id)
+- as deliveries on inbound links: no request id, neither the `u` nor the `p` flag, as LXMF DIRECT sends a packed message too large for one packet. Only LXMF nodes accept these.
+
+Any other advertisement is refused.
 
 - **Stream:** `Token(random4 | data)` under the link key. It is cut into parts of SDU 464 (MTU 500 − 35 header − 1 IFAC). Parts are sent as link DATA, context RESOURCE `0x01`, without another link token.
 - **Hashes:**
@@ -160,7 +185,11 @@ ret-client receives Resources only as responses to its own requests (advertiseme
   - split (`l` > 1), metadata, or unencrypted
   - larger than `CONFIG_RET_RESOURCE_MAX_SIZE` (stream bytes)
 
-  The request then fails with `-ENOTSUP` or `-EFBIG`, never silently. RNS compresses only when that makes the data smaller, and encrypted payloads such as LXMF messages don't compress, so the propagation sync flow should not meet compressed resources.
+  The request then fails with `-ENOTSUP` or `-EFBIG`, never silently. RNS compresses only when that makes the data smaller, and encrypted payloads such as LXMF messages don't compress, so the propagation sync flow should not meet compressed resources. On an inbound link the sender sees the refusal; LXMF marks the message REJECTED for good, which is right for something that can never fit.
+- **One at a time:** only one Resource is received at once, on any link, and none for more than 3 minutes, however its parts trickle in.
+  - **A delivery that fails in transit** (timed out, or corrupt): its inbound link is closed rather than refused, so the LXMF sender retries.
+  - **A delivery advertised while another resource is arriving:** the inbound link is **closed** rather than refused. RCL would make LXMF reject the message permanently; a closed link makes it retry 10 s or more later.
+  - **A sync response advertised while a delivery holds the buffers:** the sync sends the same `/get` again once they're free, up to 3 times. `/get` is idempotent: nothing is deleted until acknowledged.
 
 ## LXMF (LXMF/LXMessage.py, LXMRouter.py; lxmf 1.2.1)
 
@@ -175,6 +204,12 @@ ret-client receives Resources only as responses to its own requests (advertiseme
   - The signature covers `dest | src | payload without the stamp | message hash`.
   - With a stamp, LXMF re-packs the first four elements. For umsgpack's canonical encoding that is `0x94` followed by their original bytes, which is what ret-client hashes. LXMF itself is the only producer of stamped messages.
 - **Opportunistic delivery:** one SINGLE DATA packet to the destination, carrying `packed[16:]`. The receiver rebuilds `dest | plaintext` and proves the packet.
+- **DIRECT delivery:** the sender opens a link to the destination and sends the **whole** packed message, `dest` included.
+  - It goes as one link DATA packet when it fits the link MDU (431), otherwise as a Resource.
+  - The resource is uncompressed, because our announce lists no functionality.
+  - ret-client checks `packed[:16]` is its own address, then handles `packed[16:]` like an opportunistic body.
+  - LXMF uses DIRECT by default (NomadNet unless the contact is set to opportunistic or announces a ratchet), and always for content over 287 bytes.
+  - The sender keeps the link for up to 10 minutes of inactivity and reuses it.
   - At most 287 bytes of title plus content (`ENCRYPTED_PACKET_MAX_CONTENT`): `packed[16:]` then fills the 383-byte SINGLE plaintext exactly.
 - **Timestamps** are wall-clock seconds. They are hashed, so two identical messages with the same timestamp are the same message: receivers drop the repeat.
 - **Receiving:**

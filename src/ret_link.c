@@ -13,11 +13,19 @@
 #include "ret_link.h"
 #include "ret_mp.h"
 
-/* Signalling: MTU (21 bits) and mode (3 bits << 21), 3 bytes big-endian.
- * MODE_AES256_CBC = 1: (1 << 5) << 16 | 500 = 0x2001F4.
+/* Signalling: MTU (21 bits) and mode (3 bits << 21), 3 bytes big-endian
+ * (Link.signalling_bytes). AES-256-CBC with MTU 500 is 20 01 F4.
  */
-static const uint8_t signalling_500[3] = { 0x20, 0x01, 0xF4 };
-#define MODE_AES256_CBC 1
+#define MODE_AES256_CBC RET_LINK_MODE_AES256_CBC
+
+static void signalling(uint32_t mtu, uint8_t mode, uint8_t out[3])
+{
+	uint32_t v = (mtu & 0x1FFFFF) | ((uint32_t)(mode & 0x07) << 21);
+
+	out[0] = (uint8_t)(v >> 16);
+	out[1] = (uint8_t)(v >> 8);
+	out[2] = (uint8_t)v;
+}
 
 int ret_link_keys_generate(struct ret_link_keys *k)
 {
@@ -46,7 +54,7 @@ void ret_link_request_data(const struct ret_link_keys *k, uint8_t out[RET_LINK_R
 {
 	memcpy(&out[0], k->x25519_pub, RET_X25519_LEN);
 	memcpy(&out[RET_X25519_LEN], k->ed25519_pub, RET_ED25519_PUB_LEN);
-	memcpy(&out[RET_X25519_LEN + RET_ED25519_PUB_LEN], signalling_500, 3);
+	signalling(RET_MTU, MODE_AES256_CBC, &out[RET_X25519_LEN + RET_ED25519_PUB_LEN]);
 }
 
 int ret_link_id_from_request(const uint8_t *raw, size_t len, uint8_t link_id[RET_TRUNC_HASH_LEN])
@@ -88,7 +96,6 @@ int ret_link_proof_validate(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 {
 	const uint8_t *d = proof->data;
 	uint8_t signed_data[RET_TRUNC_HASH_LEN + RET_X25519_LEN + RET_ED25519_PUB_LEN + 3];
-	uint8_t shared[RET_X25519_LEN];
 	size_t n = 0;
 	bool has_signalling;
 	int err;
@@ -127,15 +134,8 @@ int ret_link_proof_validate(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 		return -EBADMSG;
 	}
 
-	err = ret_x25519(shared, k->x25519_prv, peer_pub);
+	err = ret_link_derive_key(k->x25519_prv, peer_pub, link_id, key);
 	if (err) {
-		return -EBADMSG;
-	}
-	err = ret_hkdf_sha256(shared, sizeof(shared), link_id, RET_TRUNC_HASH_LEN, NULL, 0, key,
-			      RET_TOKEN_KEY_LEN);
-	ret_wipe(shared, sizeof(shared));
-	if (err) {
-		ret_wipe(key, RET_TOKEN_KEY_LEN);
 		return err;
 	}
 
@@ -144,6 +144,51 @@ int ret_link_proof_validate(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 				     sigbytes[2]) &
 				    0x1FFFFF)
 		       : RET_MTU;
+	return 0;
+}
+
+int ret_link_derive_key(const uint8_t prv[RET_X25519_LEN], const uint8_t peer_pub[RET_X25519_LEN],
+			const uint8_t link_id[RET_TRUNC_HASH_LEN], uint8_t key[RET_TOKEN_KEY_LEN])
+{
+	uint8_t shared[RET_X25519_LEN];
+	int err = ret_x25519(shared, prv, peer_pub);
+
+	if (err) {
+		return -EBADMSG; /* low-order point */
+	}
+	err = ret_hkdf_sha256(shared, sizeof(shared), link_id, RET_TRUNC_HASH_LEN, NULL, 0, key,
+			      RET_TOKEN_KEY_LEN);
+	ret_wipe(shared, sizeof(shared));
+	if (err) {
+		ret_wipe(key, RET_TOKEN_KEY_LEN);
+	}
+	return err;
+}
+
+int ret_link_request_parse(const struct ret_packet *pkt, struct ret_link_peer_request *req)
+{
+	const uint8_t *d = pkt->data;
+
+	memset(req, 0, sizeof(*req));
+	if (pkt->packet_type != RET_PKT_LINKREQUEST ||
+	    (pkt->data_len != 64 && pkt->data_len != RET_LINK_REQUEST_LEN)) {
+		return -EBADMSG;
+	}
+	req->x25519_pub = &d[0];
+	req->ed25519_pub = &d[RET_X25519_LEN];
+	req->mtu = RET_MTU;
+	if (pkt->data_len == RET_LINK_REQUEST_LEN) {
+		/* Link.mode_from_lr_packet / mtu_from_lr_packet. Without
+		 * signalling the mode is MODE_DEFAULT, AES-256-CBC.
+		 */
+		const uint8_t *s = &d[64];
+
+		if ((s[0] >> 5) != MODE_AES256_CBC) {
+			return -EPROTO;
+		}
+		req->signalled = true;
+		req->mtu = (((uint32_t)s[0] << 16) | ((uint32_t)s[1] << 8) | s[2]) & 0x1FFFFF;
+	}
 	return 0;
 }
 
@@ -206,6 +251,73 @@ int ret_link_resource_proof_build(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 	/* Resource proofs travel unencrypted (Packet.pack, RESOURCE_PRF). */
 	return build(link_id, RET_PKT_PROOF, NULL, RET_CTX_RESOURCE_PRF, proof,
 		     RET_LINK_RESOURCE_PROOF_LEN, NULL, out, cap);
+}
+
+int ret_link_proof_build(const struct ret_local_identity *id,
+			 const uint8_t link_id[RET_TRUNC_HASH_LEN],
+			 const uint8_t resp_x25519_pub[RET_X25519_LEN], uint32_t mtu, uint8_t *out,
+			 size_t cap)
+{
+	/* Link.prove(): sig(link_id | resp pub | identity Ed25519 pub |
+	 * signalling) | resp pub | signalling, signalling always appended.
+	 */
+	uint8_t signed_data[RET_TRUNC_HASH_LEN + RET_X25519_LEN + RET_ED25519_PUB_LEN + 3];
+	uint8_t data[RET_LINK_LRPROOF_LEN];
+	uint8_t sig[3];
+	size_t n = 0;
+
+	signalling(mtu, MODE_AES256_CBC, sig);
+	memcpy(&signed_data[n], link_id, RET_TRUNC_HASH_LEN);
+	n += RET_TRUNC_HASH_LEN;
+	memcpy(&signed_data[n], resp_x25519_pub, RET_X25519_LEN);
+	n += RET_X25519_LEN;
+	memcpy(&signed_data[n], &id->pub[RET_X25519_LEN], RET_ED25519_PUB_LEN);
+	n += RET_ED25519_PUB_LEN;
+	memcpy(&signed_data[n], sig, 3);
+	n += 3;
+
+	ret_local_identity_sign(id, signed_data, n, data);
+	memcpy(&data[RET_SIG_LEN], resp_x25519_pub, RET_X25519_LEN);
+	memcpy(&data[RET_SIG_LEN + RET_X25519_LEN], sig, 3);
+	return build(link_id, RET_PKT_PROOF, NULL, RET_CTX_LRPROOF, data, sizeof(data), NULL, out,
+		     cap);
+}
+
+int ret_link_packet_proof_build(const struct ret_local_identity *id,
+				const uint8_t link_id[RET_TRUNC_HASH_LEN],
+				const uint8_t packet_hash[RET_HASH_LEN], uint8_t *out, size_t cap)
+{
+	/* Link.prove_packet(): explicit proof, packet_hash | signature. */
+	uint8_t data[RET_LINK_PACKET_PROOF_LEN];
+
+	memcpy(data, packet_hash, RET_HASH_LEN);
+	ret_local_identity_sign(id, packet_hash, RET_HASH_LEN, &data[RET_HASH_LEN]);
+	return build(link_id, RET_PKT_PROOF, NULL, RET_CONTEXT_NONE, data, sizeof(data), NULL, out,
+		     cap);
+}
+
+int ret_link_rtt_parse(const uint8_t *plain, size_t len, uint32_t *rtt_ms)
+{
+	mpack_reader_t r;
+	double rtt;
+
+	mpack_reader_init_data(&r, (const char *)plain, len);
+	rtt = mpack_expect_double(&r);
+	if (mpack_reader_error(&r) != mpack_ok || mpack_reader_remaining(&r, NULL) != 0) {
+		mpack_reader_destroy(&r);
+		return -EBADMSG;
+	}
+	mpack_reader_destroy(&r);
+	/* Link.rtt_packet takes max(measured, reported) of any number: a
+	 * negative or NaN report counts as 0, one past the cap as the cap.
+	 */
+	if (!(rtt > 0.0)) {
+		rtt = 0.0;
+	} else if (rtt > RET_LINK_RTT_MAX_S) {
+		rtt = RET_LINK_RTT_MAX_S;
+	}
+	*rtt_ms = (uint32_t)(rtt * 1000.0);
+	return 0;
 }
 
 int ret_link_rtt_plain(double rtt_s, uint8_t *out, size_t cap)

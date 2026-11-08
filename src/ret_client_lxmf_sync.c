@@ -42,6 +42,8 @@ LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 /* LXMPeer error codes answered instead of a list. */
 #define ERROR_NO_IDENTITY 0xf0
 #define ERROR_NO_ACCESS   0xf1
+/* Times one request is sent again after a delivery held the resource. */
+#define SYNC_BUSY_RETRIES 3
 
 /* Each request must fit one link packet (no outgoing resources). */
 BUILD_ASSERT(1 + 1 + RET_LXMF_SYNC_BATCH * (2 + RET_SHA256_LEN) + 1 + 9 <= RET_LINK_MDU - 32);
@@ -55,7 +57,7 @@ static void sync_link(enum ret_link_event ev, int reason, void *user);
 /* The link is the sync's while its callback is ours. */
 static bool owns_link(const struct ret_client *c)
 {
-	return c->link.state != LINK_NONE && c->link.cb == sync_link;
+	return c->out.l.state != LINK_NONE && c->out.cb == sync_link;
 }
 
 /* End with @p err: close the link if it is still up; the link callback
@@ -237,6 +239,14 @@ static void on_item(struct ret_client *c, const uint8_t *item, size_t len)
 	uint8_t *plain = ret_link_drv_scratch(c, &cap);
 	int n;
 
+	if (plain == NULL) {
+		/* A resource is arriving on another link, so this response came
+		 * in one packet: its items fit a link MDU.
+		 */
+		plain = s->item_plain;
+		cap = sizeof(s->item_plain);
+	}
+
 	if (ret_sha256(&iov, 1, id) != 0) {
 		return;
 	}
@@ -260,7 +270,11 @@ static void on_item(struct ret_client *c, const uint8_t *item, size_t len)
 	n = ret_local_identity_decrypt(&c->id, &item[RET_LXMF_ADDR_LEN], len - RET_LXMF_ADDR_LEN,
 				       plain, cap);
 	if (n < 0) {
-		LOG_WRN("propagated message undecryptable (%d): dropped", n);
+		if (n == -ENOBUFS) {
+			LOG_ERR("propagated message larger than its buffer: dropped");
+		} else {
+			LOG_WRN("propagated message undecryptable (%d): dropped", n);
+		}
 		return;
 	}
 	if (ret_lxmf_drv_deliver(c, plain, (size_t)n) == LXMF_DELIVERED) {
@@ -349,11 +363,22 @@ static void sync_response(int status, const uint8_t *resp, size_t len, void *use
 	if (!s->active) {
 		return;
 	}
+	if (status == -EBUSY && s->busy_retries < SYNC_BUSY_RETRIES) {
+		/* A delivery resource on an inbound link held the buffers. /get
+		 * is idempotent (nothing is deleted until acknowledged): send
+		 * the same request again once the resource is done.
+		 */
+		s->busy_retries++;
+		LOG_INF("sync: resource buffers busy, request again when free");
+		s->pending = SYNC_PEND_REQUEST;
+		return;
+	}
 	if (status != 0) {
 		LOG_WRN("sync request failed: %d", status);
 		fail(c, status);
 		return;
 	}
+	s->busy_retries = 0;
 
 	switch (s->phase) {
 	case SYNC_LISTING:
@@ -427,7 +452,7 @@ void ret_lxmf_sync_drv_start(struct ret_client *c, const struct send_req *r)
 		err = -EALREADY;
 	} else if (c->state != RET_STATE_CONNECTED || c->connecting) {
 		err = -ENOTCONN;
-	} else if (c->link.state != LINK_NONE) {
+	} else if (c->out.l.state != LINK_NONE) {
 		err = -EBUSY;
 	}
 	if (err) {
@@ -466,6 +491,10 @@ void ret_lxmf_sync_drv_service(struct ret_client *c)
 	if (!owns_link(c)) {
 		return; /* gone: its callback ends (or ended) the sync */
 	}
+	if (p == SYNC_PEND_REQUEST && c->res.state != RES_IDLE) {
+		s->pending = p; /* its response could not be received yet */
+		return;
+	}
 	switch (p) {
 	case SYNC_PEND_IDENTIFY:
 		ret_link_drv_identify(c);
@@ -487,7 +516,15 @@ void ret_lxmf_sync_drv_service(struct ret_client *c)
 
 int64_t ret_lxmf_sync_drv_next_event(const struct ret_client *c)
 {
-	return (c->sync.active && c->sync.pending != SYNC_PEND_NONE) ? 0 : INT64_MAX;
+	const struct lxmf_sync *s = &c->sync;
+
+	if (!s->active || s->pending == SYNC_PEND_NONE) {
+		return INT64_MAX;
+	}
+	/* A request waits for the resource buffers: the resource's own
+	 * deadlines and packets wake the loop.
+	 */
+	return (s->pending == SYNC_PEND_REQUEST && c->res.state != RES_IDLE) ? INT64_MAX : 0;
 }
 
 bool ret_lxmf_sync_drv_owns_link(const struct ret_client *c)

@@ -9,7 +9,9 @@
 #             a destination that never proved does not trip the watchdog
 #   echo      a link first (open, identify, "/echo" request, close), then the
 #             peer answers each message to the client's own destination
-#             (retclient.node), which decrypts and proves the reply
+#             (retclient.node), which decrypts and proves the reply; the
+#             peer also opens its own link to the device (responder side):
+#             4 packets proved, one after 15 s on answered keepalives
 #             -> link response, 3/3 delivered both ways, both proved, exit 0
 #
 # Every device run shares one simulated flash file, so the client keeps its
@@ -23,6 +25,10 @@
 #             LXMF messages; the peer validates each signature and answers
 #             "echo: ...", which the device verifies, delivers and answers
 #             in turn -> 3/3 delivered, 3/3 echoes, replies validated, exit 0
+#   lxmf-direct  the same, the peer answering DIRECT (over a link it opens
+#             to the device, which is the responder), plus a 3000-byte
+#             message (a Resource: delivered) and a 12000-byte one (over
+#             RET_RESOURCE_MAX_SIZE: refused, LXMF marks it rejected)
 #   store-forward  a local lxmd propagation node: the device boots and syncs
 #             (nothing waiting), stops; tools/rns_peer/lxmf_send.py
 #             deposits 12 PROPAGATED messages of 600 bytes and one of
@@ -80,7 +86,7 @@ COUNT_LXMF=3
 COUNT_SF=12
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf store-forward sleep late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf lxmf-direct store-forward sleep late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -162,7 +168,7 @@ FLASH="$LOGS/flash.bin"
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
 needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
 	-DCONFIG_RET_SAMPLE_LINK_TEST=y
-if needs lxmf; then
+if needs lxmf lxmf-direct; then
 	LXMF_PEER=$("$PY" "$PEER_PROJECT/lxmf_peer.py" --print-hash)
 	echo "== build $(basename "$BUILD_LXMF") ($COUNT_LXMF messages)"
 	west build -b native_sim "$RET/samples/ret_lxmf" -d "$BUILD_LXMF" -p --no-sysbuild -- \
@@ -297,7 +303,7 @@ scenario_announced() { # plain | ratchets | no-prove
 scenario_echo() {
 	local peer_log="$LOGS/peer-echo.log" dev_log="$LOGS/device-echo.log" n
 
-	start_peer "$peer_log" --announce-interval 3 --reply
+	start_peer "$peer_log" --announce-interval 3 --reply --link-client 3
 	run_device "$BUILD_ECHO/zephyr/zephyr.exe" "$dev_log"
 	# Give the peer a moment to log the client's last proof.
 	sleep 1
@@ -340,16 +346,33 @@ scenario_echo() {
 	grep -q "LINK CLOSED" "$dev_log" || fail "echo: device did not close the link"
 	grep -q "^LINK CLOSED$" "$peer_log" || fail "echo: peer did not see the link close"
 
+	# The peer's link to the device (responder side), while the device's
+	# own link and sends run: data proved, kept up by answered keepalives.
+	grep -q "^CLIENT LINK ACTIVE mtu 500$" "$peer_log" ||
+		fail "echo: the peer's link to the device never came up, see $peer_log"
+	for n in 1 2 3 4; do
+		grep -q "^CLIENT LINK DATA PROVED $n$" "$peer_log" ||
+			fail "echo: link packet $n not proved by the device, see $peer_log"
+		grep -q "RECEIVED link #$n" "$dev_log" ||
+			fail "echo: device did not deliver link packet $n, see $dev_log"
+	done
+	grep -q "inbound link closed by peer" "$dev_log" ||
+		fail "echo: device did not see the peer close its link, see $dev_log"
 	grep -q "DONE $COUNT_NAME/$COUNT_NAME delivered, $COUNT_NAME/$COUNT_NAME replies" "$dev_log" ||
 		fail "echo: want DONE $COUNT_NAME/$COUNT_NAME, $COUNT_NAME/$COUNT_NAME replies"
 	echo "   $COUNT_NAME/$COUNT_NAME each way, proved both ways (client $own)"
 }
 
-scenario_lxmf() {
-	local peer_log="$LOGS/peer-lxmf.log" dev_log="$LOGS/device-lxmf.log" n
+scenario_lxmf() { # [direct]
+	local mode=${1:-opportunistic} name=lxmf peer_args=()
+	if [ "$mode" = direct ]; then
+		name=lxmf-direct
+		peer_args=(--reply-method direct --big-reply 3000 --huge-reply 12000)
+	fi
+	local peer_log="$LOGS/peer-$name.log" dev_log="$LOGS/device-$name.log" n
 
 	"$PY" "$PEER_PROJECT/lxmf_peer.py" --config "$RNSD_CONFIG" --announce-interval 3 \
-		>"$peer_log" 2>&1 &
+		"${peer_args[@]}" >"$peer_log" 2>&1 &
 	PEER_PID=$!
 	pids+=("$PEER_PID")
 	wait_for 30 "LXMF peer ready" grep -q "^PEER READY" "$peer_log"
@@ -359,29 +382,46 @@ scenario_lxmf() {
 	sleep 2
 	stop_peer
 
-	[ $RC -eq 0 ] || fail "lxmf: device exit $RC, want 0, see $dev_log"
+	[ $RC -eq 0 ] || fail "$name: device exit $RC, want 0, see $dev_log"
 	local own
 	own=$(awk '/LXMF ADDRESS/ {print $(NF-1); exit}' "$dev_log" | tr -d '\r' |
 		sed 's/\x1b\[[0-9;]*m//g')
-	[ -n "$own" ] || fail "lxmf: device reported no address"
+	[ -n "$own" ] || fail "$name: device reported no address"
 	# The announce carries LXMF app_data: display name, no stamp cost.
 	grep -q "^LXMF DEVICE ANNOUNCE $own ret-lxmf stamp_cost=None$" "$peer_log" ||
-		fail "lxmf: peer did not parse the device's LXMF announce, see $peer_log"
+		fail "$name: peer did not parse the device's LXMF announce, see $peer_log"
 	for n in $(seq 1 $COUNT_LXMF); do
 		grep -q "^LXMF RECEIVED validated $own |hello #$n$" "$peer_log" ||
-			fail "lxmf: peer did not validate hello #$n, see $peer_log"
+			fail "$name: peer did not validate hello #$n, see $peer_log"
 		grep -q "LXMF DELIVERED #$n " "$dev_log" ||
-			fail "lxmf: no delivery proof for #$n, see $dev_log"
+			fail "$name: no delivery proof for #$n, see $dev_log"
 		grep -q "LXMF RECEIVED verified from $LXMF_PEER: |echo: hello #$n" "$dev_log" ||
-			fail "lxmf: device did not verify echo #$n, see $dev_log"
+			fail "$name: device did not verify echo #$n, see $dev_log"
 		grep -q "^REPLY DELIVERED echo: hello #$n$" "$peer_log" ||
-			fail "lxmf: device did not prove echo #$n, see $peer_log"
+			fail "$name: device did not prove echo #$n, see $peer_log"
 		grep -q "^LXMF RECEIVED validated $own |re: echo: hello #$n$" "$peer_log" ||
-			fail "lxmf: peer did not validate the device's reply to #$n, see $peer_log"
+			fail "$name: peer did not validate the device's reply to #$n, see $peer_log"
 	done
 	grep -q "DONE $COUNT_LXMF/$COUNT_LXMF delivered, $COUNT_LXMF/$COUNT_LXMF echoes" "$dev_log" ||
-		fail "lxmf: want DONE $COUNT_LXMF/$COUNT_LXMF, see $dev_log"
-	echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
+		fail "$name: want DONE $COUNT_LXMF/$COUNT_LXMF, see $dev_log"
+	if [ "$mode" = direct ]; then
+		# Echoes came over the peer's link to the device; a large message
+		# as a Resource, one over RET_RESOURCE_MAX_SIZE refused.
+		grep -q "inbound link .* active" "$dev_log" ||
+			fail "lxmf-direct: no inbound link on the device, see $dev_log"
+		grep -q "LXMF RECEIVED verified from $LXMF_PEER: |big .*(3000 bytes)" "$dev_log" ||
+			fail "lxmf-direct: big message not delivered as a resource, see $dev_log"
+		grep -q "^REPLY DELIVERED big$" "$peer_log" ||
+			fail "lxmf-direct: big message not proved, see $peer_log"
+		# -27 is -EFBIG: refused for its size, not anything else.
+		grep -q "refusing delivery resource .*: -27" "$dev_log" ||
+			fail "lxmf-direct: oversized message not refused for its size, see $dev_log"
+		grep -q "^REPLY REJECTED huge$" "$peer_log" ||
+			fail "lxmf-direct: sender did not see the refusal, see $peer_log"
+		echo "   DIRECT: $COUNT_LXMF echoes, a 3000-byte resource delivered, 12000 bytes refused"
+	else
+		echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
+	fi
 }
 
 LXMD_PID=
@@ -635,6 +675,7 @@ for s in "${scenarios[@]}"; do
 	plain | ratchets | no-prove) scenario_announced "$s" ;;
 	echo) scenario_echo ;;
 	lxmf) scenario_lxmf ;;
+	lxmf-direct) scenario_lxmf direct ;;
 	store-forward) scenario_store_forward ;;
 	sleep) scenario_sleep ;;
 	late) scenario_late ;;

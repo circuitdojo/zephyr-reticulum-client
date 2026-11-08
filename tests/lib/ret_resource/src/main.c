@@ -204,6 +204,36 @@ ZTEST(resource, test_timeout_shrinks_window)
 	zassert_equal(ret_resource_rx_request(&rx, req, sizeof(req)), 1 + 32 + 2 * 4);
 }
 
+ZTEST(resource, test_delivery_resource)
+{
+	/* LXMF DIRECT: an advertisement that is neither request nor response
+	 * (no request id), carrying the raw data.
+	 */
+	struct ret_resource_adv adv;
+	uint8_t proof[RET_RESOURCE_PROOF_LEN];
+	int n;
+
+	parse_adv(v_resdel_adv_plain, sizeof(v_resdel_adv_plain), &adv);
+	zassert_is_null(adv.q);
+	zassert_equal(adv.f, RET_RESOURCE_F_ENCRYPTED);
+	zassert_ok(ret_resource_rx_init(&rx, &adv, stream, sizeof(stream)));
+	(void)ret_resource_rx_request(&rx, req, sizeof(req));
+	for (uint32_t i = 0; i < rx.n; i++) {
+		enum ret_resource_part st = ret_resource_rx_part(
+			&rx, &v_resdel_stream[i * RET_RESOURCE_SDU],
+			part_len(v_resdel_stream, sizeof(v_resdel_stream), i));
+
+		if (st == RET_RESOURCE_PART_WINDOW) {
+			(void)ret_resource_rx_request(&rx, req, sizeof(req));
+		}
+	}
+	n = ret_resource_rx_assemble(&rx, v_link_key, plain, sizeof(plain));
+	zassert_equal(n, sizeof(v_resdel_data));
+	zassert_mem_equal(plain, v_resdel_data, n);
+	zassert_ok(ret_resource_proof(&rx, plain, n, proof));
+	zassert_mem_equal(proof, v_resdel_proof, sizeof(proof));
+}
+
 ZTEST(resource, test_rejects)
 {
 	struct ret_resource_adv adv, bad;

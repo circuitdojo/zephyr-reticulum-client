@@ -294,6 +294,16 @@ enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body
 	return LXMF_DELIVERED;
 }
 
+void ret_lxmf_drv_on_direct(struct ret_client *c, const uint8_t *packed, size_t len)
+{
+	/* DIRECT carries the whole packed message, destination included. */
+	if (len <= RET_LXMF_ADDR_LEN || memcmp(packed, c->local_dest, RET_LXMF_ADDR_LEN) != 0) {
+		LOG_WRN("DIRECT LXMF message for another destination: dropped");
+		return;
+	}
+	(void)ret_lxmf_drv_deliver(c, &packed[RET_LXMF_ADDR_LEN], len - RET_LXMF_ADDR_LEN);
+}
+
 void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len)
 {
 	(void)ret_lxmf_drv_deliver(c, plain, len);

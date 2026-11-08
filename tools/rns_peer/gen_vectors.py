@@ -213,6 +213,11 @@ def link_vectors(identity, dest_hash):
     res = resource_vectors(key, link_id, request_id, "res", 1200)
     res.update(resource_vectors(key, link_id, request_id, "resbig", 36000))
     assert len(res["v_resbig_stream"]) > 74 * 464
+    # A delivery (LXMF DIRECT): neither request nor response, raw data.
+    res.update(resource_vectors(key, link_id, None, "resdel", 3000))
+    res.update(responder_vectors(identity, linkrequest, rx_prv, key, link_packet))
+    # RNS's own LRPROOF is the hand-built one the initiator tests use.
+    assert res["v_link_lrproof_rns"] == lrproof
 
     return res | {
         "v_link_x25519_prv": lx_prv,
@@ -242,14 +247,89 @@ def link_vectors(identity, dest_hash):
     }
 
 
+def responder_vectors(identity, linkrequest, rx_prv, key, link_packet):
+    """The responder side, from RNS's own code: Link.validate_request() and
+    Link.prove() with the ephemeral X25519 key pinned, and
+    Link.prove_packet() for a received link DATA packet."""
+    dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, *NAME.split("."))
+    sent = []
+
+    def capture(self):
+        self.pack()
+        sent.append(self.raw)
+        return True
+
+    fixed_key = X25519PrivateKey.from_private_bytes(rx_prv)
+    quiet = mock.Mock(
+        get_packet_rssi=lambda h: None, get_packet_snr=lambda h: None, get_packet_q=lambda h: None
+    )
+
+    def respond(lr_raw, force_mtu=None):
+        sent.clear()
+        pkt = unpack(lr_raw)
+        pkt.destination = dest
+        pkt.receiving_interface = None
+        with (
+            mock.patch("RNS.Link.X25519PrivateKey.generate", return_value=fixed_key),
+            mock.patch.object(RNS.Packet, "send", capture),
+            mock.patch.object(RNS.Transport, "register_link"),
+            mock.patch.object(RNS.Link, "start_watchdog"),
+            mock.patch.object(RNS.Reticulum, "get_instance", return_value=quiet),
+        ):
+            link = RNS.Link.validate_request(dest, pkt.data, pkt)
+            assert link is not None and len(sent) == 1
+            if force_mtu is not None:
+                # What ret-client confirms whatever is asked: 500.
+                sent.clear()
+                link.mtu = force_mtu
+                link.prove()
+        assert link.derived_key == key
+        return link, sent[-1]
+
+    signalling = linkrequest[-3:]
+    lr_nosig = linkrequest[:-3]
+    lr_big = linkrequest[:-3] + RNS.Link.signalling_bytes(262144, RNS.Link.MODE_AES256_CBC)
+    lr_mode0 = linkrequest[:-3] + bytes([signalling[0] & 0x1F]) + signalling[1:]
+
+    link, lrproof = respond(linkrequest)
+    _, lrproof_nosig = respond(lr_nosig)
+    _, lrproof_big500 = respond(lr_big, force_mtu=500)
+    assert lrproof_big500 == lrproof  # same link_id, key and confirmed MTU
+
+    # A link DATA packet (context NONE) and RNS's proof of it.
+    data_plain = b"link data for the responder"
+    data_pkt = link_packet(RNS.Packet.NONE, data_plain, "iv_data")
+    rx = unpack(data_pkt)
+    rx.link = link
+    sent.clear()
+    with mock.patch.object(RNS.Packet, "send", capture):
+        link.prove_packet(rx)
+    data_proof = sent[-1]
+    RNS.Transport.deregister_destination(dest)
+
+    return {
+        "v_link_request_nosig": lr_nosig,
+        "v_link_request_mtu_big": lr_big,
+        "v_link_request_mode0": lr_mode0,
+        "v_link_lrproof_rns": lrproof,
+        "v_link_lrproof_rns_nosig": lrproof_nosig,
+        "v_link_data": data_pkt,
+        "v_link_data_plain": data_plain,
+        "v_link_data_hash": rx.packet_hash,
+        "v_link_data_proof": data_proof,
+    }
+
+
 def resource_vectors(key, link_id, request_id, tag, payload_len):
-    """A response Resource for `request_id` on the link with `key`, laid out
-    as RNS/Resource.py builds it: stream = Token(random4 | data), parts of
-    SDU 464, h = SHA256(data | r), map hash = SHA256(part | r)[:4]."""
+    """A Resource on the link with `key`, laid out as RNS/Resource.py builds
+    it: stream = Token(random4 | data), parts of SDU 464, h = SHA256(data |
+    r), map hash = SHA256(part | r)[:4]. With a `request_id` it is the
+    response [request_id, payload]; without, a delivery of the raw payload
+    (as LXMF DIRECT sends a packed message)."""
     mp = RNS.vendor.umsgpack
     sdu = 464
     payload = bytes((i * 7 + 3) & 0xFF for i in range(payload_len))
-    data = mp.packb([request_id, payload])
+    data = mp.packb([request_id, payload]) if request_id is not None else payload
     r = fixed(tag + "_r", 4)
     with mock.patch("RNS.Cryptography.Token.os.urandom", return_value=fixed(tag + "_iv", 16)):
         stream = Token(key).encrypt(fixed(tag + "_prefix", 4) + data)
@@ -266,7 +346,7 @@ def resource_vectors(key, link_id, request_id, tag, payload_len):
         "i": 1,
         "l": 1,
         "q": request_id,
-        "f": 0x01 | 0x10,  # encrypted, response
+        "f": 0x01 | 0x10 if request_id is not None else 0x01,  # encrypted (, response)
         "m": hashmap[: 74 * 4],
     }
     adv_plain = mp.packb(adv)

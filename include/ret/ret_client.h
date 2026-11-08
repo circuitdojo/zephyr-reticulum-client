@@ -74,9 +74,10 @@ typedef void (*ret_state_cb_t)(enum ret_client_state state, void *user);
 
 /**
  * Called on the client thread with the decrypted payload of a packet sent
- * to the client's own destination. @p data is wiped after the callback
- * returns; copy what you need. The packet is proved to its sender right
- * after the callback.
+ * to the client's own destination, or of a DATA packet on a link another
+ * node opened to it (CONFIG_RET_INBOUND_LINKS; at most 431 bytes). @p data
+ * is wiped after the callback returns; copy what you need. The packet is
+ * proved to its sender right after the callback.
  */
 typedef void (*ret_data_cb_t)(const uint8_t *data, size_t len, void *user);
 
@@ -105,7 +106,10 @@ struct ret_lxmf_message {
 };
 
 /**
- * Called on the client thread once per LXMF message. Received messages
+ * Called on the client thread once per LXMF message, however it arrived:
+ * opportunistic (one packet), DIRECT over a link the sender opened (one
+ * packet, or a Resource up to about CONFIG_RET_RESOURCE_MAX_SIZE), or from
+ * a propagation node (ret_lxmf_sync()). Received messages
  * are remembered in settings (CONFIG_RET_LXMF_SEEN_ENTRIES), so repeats
  * and replays are not delivered again, across reboots too; messages older
  * than CONFIG_RET_LXMF_MAX_AGE_DAYS, or than one the table had to forget,

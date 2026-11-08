@@ -14,7 +14,9 @@ Lines meant for scripts start with a fixed tag:
   ANNOUNCED
   LXMF RECEIVED <validated|unverified:<reason>> <source> <title>|<content>
   LXMF DEVICE ANNOUNCE <address> <display name>
-  REPLY SENT <content>, REPLY DELIVERED <content>, REPLY FAILED <content>
+  REPLY SENT <content>, REPLY DELIVERED <content>, REPLY FAILED <content>,
+  REPLY REJECTED <content> (the recipient refused it); long contents are
+  labelled by their first word
 """
 
 import argparse
@@ -44,6 +46,26 @@ def main() -> None:
         help="identity file, created on first run",
     )
     ap.add_argument("--announce-interval", type=float, default=10.0)
+    ap.add_argument(
+        "--reply-method",
+        choices=["opportunistic", "direct"],
+        default="opportunistic",
+        help="how echoes are sent (direct: over a link to the device)",
+    )
+    ap.add_argument(
+        "--big-reply",
+        type=int,
+        default=0,
+        metavar="BYTES",
+        help="after the first echo, also send a message of this size ('big ...')",
+    )
+    ap.add_argument(
+        "--huge-reply",
+        type=int,
+        default=0,
+        metavar="BYTES",
+        help="and one of this size ('huge ...'), expected to be refused",
+    )
     ap.add_argument(
         "--print-hash",
         action="store_true",
@@ -97,11 +119,18 @@ def main() -> None:
             "lxmf",
             "delivery",
         )
-        msg = LXMessage(target, dest, text, "", desired_method=LXMessage.OPPORTUNISTIC)
-        msg.register_delivery_callback(lambda m: out(f"REPLY DELIVERED {text}"))
-        msg.register_failed_callback(lambda m: out(f"REPLY FAILED {text}"))
+        method = LXMessage.DIRECT if args.reply_method == "direct" else LXMessage.OPPORTUNISTIC
+        label = text if len(text) <= 64 else text.split(" ")[0]
+
+        def failed(m):
+            state = "REJECTED" if m.state == LXMessage.REJECTED else "FAILED"
+            out(f"REPLY {state} {label}")
+
+        msg = LXMessage(target, dest, text, "", desired_method=method)
+        msg.register_delivery_callback(lambda m: out(f"REPLY DELIVERED {label}"))
+        msg.register_failed_callback(failed)
         router.handle_outbound(msg)
-        out(f"REPLY SENT {text}")
+        out(f"REPLY SENT {label}")
 
     def delivered(message: LXMessage) -> None:
         if message.signature_validated:
@@ -114,9 +143,17 @@ def main() -> None:
             f"{message.title_as_string()}|{content}"
         )
         if content.startswith("hello"):
-            threading.Thread(
-                target=reply, args=(message.source_hash, f"echo: {content}"), daemon=True
-            ).start()
+            src = message.source_hash
+            first = content == "hello #1"
+
+            def replies():
+                reply(src, f"echo: {content}")
+                if first and args.big_reply:
+                    reply(src, "big ".ljust(args.big_reply, "."))
+                if first and args.huge_reply:
+                    reply(src, "huge ".ljust(args.huge_reply, "."))
+
+            threading.Thread(target=replies, daemon=True).start()
 
     router.register_delivery_callback(delivered)
     out(f"PEER READY {dest.hash.hex()}")

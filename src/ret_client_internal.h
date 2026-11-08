@@ -62,10 +62,16 @@ struct held_send {
 
 enum link_state {
 	LINK_NONE,
-	LINK_WAIT_PATH,
-	LINK_PENDING,
+	LINK_WAIT_PATH, /* out: requesting a path to the destination */
+	LINK_PENDING,   /* out: LINKREQUEST sent, waiting for the proof */
+	LINK_HANDSHAKE, /* in: proof sent, waiting for the initiator's RTT */
 	LINK_ACTIVE,
 	LINK_STALE,
+};
+
+enum link_role {
+	LINK_OUT, /* opened by this client */
+	LINK_IN,  /* opened by another node to the client's destination */
 };
 
 struct link_request {
@@ -78,36 +84,61 @@ struct link_request {
 	void *user;
 };
 
-/** The one link this client may have open (initiator side). */
+/** What every link has, whichever side opened it. */
 struct link {
 	enum link_state state;
-	uint8_t dest[RET_TRUNC_HASH_LEN];
+	enum link_role role;
 	uint8_t id[RET_TRUNC_HASH_LEN];
+	uint8_t key[RET_TOKEN_KEY_LEN];
+	/* out: LINKREQUEST sent; in: LINKREQUEST received (proof sent). */
+	int64_t opened_ms;
+	/* Path wait or establishment deadline. */
+	int64_t deadline_ms;
+	int64_t last_rx_ms;
+	int64_t last_tx_ms;
+	int64_t stale_since_ms;
+	uint32_t rtt_ms;
+	uint32_t keepalive_ms;
+};
+
+/** The one link this client may open (initiator side). */
+struct link_out {
+	struct link l;
+	uint8_t dest[RET_TRUNC_HASH_LEN];
 	/* The destination's Ed25519 key, pinned when the request goes out:
 	 * the destinations table may evict the entry mid-handshake.
 	 */
 	uint8_t dest_sig_pub[RET_ED25519_PUB_LEN];
 	struct ret_link_keys keys;
-	uint8_t key[RET_TOKEN_KEY_LEN];
-	int64_t opened_ms;
-	int64_t deadline_ms;
 	int64_t next_path_request_ms;
-	int64_t last_rx_ms;
-	int64_t last_tx_ms;
 	int64_t last_keepalive_ms;
-	int64_t stale_since_ms;
-	uint32_t rtt_ms;
-	uint32_t keepalive_ms;
 	ret_link_cb_t cb;
 	void *user;
 	struct link_request req[CONFIG_RET_LINK_MAX_REQUESTS];
 };
 
-/** The one incoming resource: a response too large for a packet. */
+enum res_state {
+	RES_IDLE,
+	RES_RECEIVING,
+	/* Assembled: its data in plain[] is being handed over; stream[] is spent. */
+	RES_DELIVERING,
+};
+
+enum res_purpose {
+	RES_RESPONSE, /* to a request on the outbound link */
+	RES_DELIVERY, /* data sent to us over an inbound link (LXMF DIRECT) */
+};
+
+/** The one incoming resource, on any link. */
 struct link_resource {
-	bool active;
+	enum res_state state;
+	enum res_purpose purpose;
+	struct link *link;
+	/* RES_RESPONSE: the request it answers. */
 	struct link_request *req;
 	int64_t deadline_ms;
+	/* No resource may hold the buffers longer than this. */
+	int64_t give_up_ms;
 	uint8_t retries;
 	struct ret_resource_rx rx;
 	uint8_t stream[CONFIG_RET_RESOURCE_MAX_SIZE];
@@ -173,6 +204,10 @@ struct lxmf_sync {
 	size_t n_acks;
 	uint8_t skipped[RET_LXMF_SYNC_SKIPPED][RET_SHA256_LEN];
 	size_t n_skipped;
+	/* Decrypting an item while the resource buffers are taken. */
+	uint8_t item_plain[RET_LINK_MDU];
+	/* Requests refused because a delivery resource held the buffers. */
+	uint8_t busy_retries;
 };
 
 struct ret_client {
@@ -195,7 +230,11 @@ struct ret_client {
 	/** ret_client_suspend() asked for (any thread); resume clears it. */
 	atomic_t want_suspended;
 	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
-	struct link link;
+	struct link_out out;
+#if CONFIG_RET_INBOUND_LINKS > 0
+	/* Links other nodes opened to the client's destination. */
+	struct link in[CONFIG_RET_INBOUND_LINKS];
+#endif
 	struct link_resource res;
 
 	/* LXMF (cfg.on_lxmf): announce app_data, recent message hashes, and
@@ -241,6 +280,16 @@ struct ret_client {
 
 /* --- Provided by ret_client.c -------------------------------------- */
 
+/** Recently delivered packet hashes: a repeat is proved, not redelivered. */
+bool ret_client_seen_packet(const struct ret_client *c, const uint8_t hash[RET_HASH_LEN]);
+void ret_client_remember_packet(struct ret_client *c, const uint8_t hash[RET_HASH_LEN]);
+
+/**
+ * Data that arrived over an inbound link (one packet, or a Resource):
+ * LXMF DIRECT delivery with on_lxmf, else on_data.
+ */
+void ret_client_on_link_data(struct ret_client *c, const uint8_t *data, size_t len);
+
 /** HDLC-frame c->tx_raw[0..raw_len) and send it. -ECONNRESET: link dropped. */
 int ret_client_send_frame(struct ret_client *c, size_t raw_len);
 
@@ -269,6 +318,9 @@ void ret_lxmf_drv_on_announce(struct ret_client *c, const struct ret_destination
 /** Check, remember and deliver a message body (packed[16:]) for us. */
 enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body, size_t len);
 
+/** An LXMF message delivered DIRECT over a link: the full packed message. */
+void ret_lxmf_drv_on_direct(struct ret_client *c, const uint8_t *packed, size_t len);
+
 /** The decrypted payload of a packet for our lxmf.delivery address. */
 void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len);
 
@@ -289,9 +341,13 @@ bool ret_lxmf_sync_drv_owns_link(const struct ret_client *c);
  * A buffer of CONFIG_RET_RESOURCE_MAX_SIZE bytes, free for use inside a
  * link response callback: the resource stream buffer, whose content is
  * spent once a response is delivered (responses themselves live in other
- * buffers). Wipe what you put there.
+ * buffers). NULL while a resource is arriving (on any link): the response
+ * being handled then came in one packet. Wipe what you put there.
  */
 uint8_t *ret_link_drv_scratch(struct ret_client *c, size_t *cap);
+
+/** The link with this id, of either role, or NULL. */
+struct link *ret_link_drv_find(struct ret_client *c, const uint8_t id[RET_TRUNC_HASH_LEN]);
 
 
 void ret_link_drv_open(struct ret_client *c, const struct send_req *r);
@@ -299,8 +355,13 @@ void ret_link_drv_request(struct ret_client *c, const struct send_req *r);
 void ret_link_drv_identify(struct ret_client *c);
 void ret_link_drv_close(struct ret_client *c);
 
-/** A packet addressed to the open link's id. */
-void ret_link_drv_on_packet(struct ret_client *c, const struct ret_packet *pkt);
+/** A LINKREQUEST for the client's destination: accept it (responder). */
+void ret_link_drv_on_request(struct ret_client *c, const struct ret_packet *pkt,
+			     const uint8_t *raw, size_t raw_len);
+
+/** A packet addressed to link @p l; @p raw is the frame (proofs hash it). */
+void ret_link_drv_on_packet(struct ret_client *c, struct link *l, const struct ret_packet *pkt,
+			    const uint8_t *raw, size_t raw_len);
 
 /** A validated announce refreshed @p d's path. */
 void ret_link_drv_on_path(struct ret_client *c, const struct ret_destination *d);
@@ -309,7 +370,10 @@ void ret_link_drv_on_path(struct ret_client *c, const struct ret_destination *d)
 void ret_link_drv_service(struct ret_client *c);
 int64_t ret_link_drv_next_event(const struct ret_client *c);
 
-/** The connection is gone: tear the link down without a LINKCLOSE. */
+/** The connection is gone: tear every link down without a LINKCLOSE. */
 void ret_link_drv_teardown(struct ret_client *c);
+
+/** Suspending: LINKCLOSE every link that has a key, then end it. */
+void ret_link_drv_close_all(struct ret_client *c);
 
 #endif /* RET_CLIENT_INTERNAL_H_ */
