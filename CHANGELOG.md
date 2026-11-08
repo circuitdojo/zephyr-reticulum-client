@@ -4,6 +4,16 @@
 
 ### Added
 
+- Ratchets for the client's own destination (`CONFIG_RET_RATCHETS`, default on): every announce
+  carries the newest ratchet, senders encrypt to it, and the client decrypts inbound packets and
+  synced LXMF messages with any of the last `CONFIG_RET_RATCHET_COUNT` (8), rotated once per
+  `CONFIG_RET_RATCHET_INTERVAL_S` (a day) while the wall clock is set. Stored as `ret/rt/<n>`,
+  written before the announce that carries a new one. Announces grow by 32 bytes, which the
+  `announce_app_data` limit accounts for. e2e: `lxmf` and `store-forward` check the peers
+  encrypt to the device's ratchet; `sleep` rotates at a wake and still decrypts with the older one.
+  A new ratchet that can't be stored delays the rotation, not the announce.
+- `tests/lib/ret_storage`: the settings records (identity, ratchets, known senders, remembered
+  messages) tested against real NVS settings on native_sim.
 - LXMF DIRECT sending: `ret_lxmf_send()` sends a message too long for one packet over a link to
   the recipient, as one link packet or as a Resource (up to `RET_LXMF_DIRECT_MAX_CONTENT`, about
   8 KB), so long messages are no longer refused. `ret_lxmf_send_method()` forces opportunistic
@@ -16,6 +26,12 @@
 - The samples' replies quote up to 1 KB of the message (`ret_lxmf`, `ret_lxmf_sleep`), so they go
   DIRECT when long. e2e: `lxmf-direct` checks the device's DIRECT packet and Resource arrive
   intact; `sleep` checks a 604-byte reply is delivered DIRECT before the device suspends.
+
+### Fixed
+
+- Resetting an unreadable LXMF replay table (`ret/lx`) or sender key table (`ret/lk`) deleted only
+  the records loaded before the bad one: a settings callback error stops the load, so the older
+  records were never seen. They stayed in flash and came back on the next boot.
 
 ### Changed
 

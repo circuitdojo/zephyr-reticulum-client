@@ -75,11 +75,13 @@ int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *a)
 int ret_announce_build(const struct ret_local_identity *id,
 		       const uint8_t name_hash[RET_NAME_HASH_LEN],
 		       const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
-		       const uint8_t random_hash[RET_RANDOM_HASH_LEN], const uint8_t *app_data,
+		       const uint8_t random_hash[RET_RANDOM_HASH_LEN],
+		       const uint8_t ratchet[RET_RATCHET_LEN], const uint8_t *app_data,
 		       size_t app_data_len, uint8_t context, uint8_t *out, size_t cap)
 {
 	uint8_t signed_data[RET_TRUNC_HASH_LEN + RET_MTU];
-	size_t head = RET_PUBKEY_LEN + RET_NAME_HASH_LEN + RET_RANDOM_HASH_LEN;
+	size_t ratchet_len = ratchet != NULL ? RET_RATCHET_LEN : 0;
+	size_t head = RET_PUBKEY_LEN + RET_NAME_HASH_LEN + RET_RANDOM_HASH_LEN + ratchet_len;
 	size_t n = 0;
 	struct ret_packet pkt = {
 		.header_type = RET_HEADER_1,
@@ -87,10 +89,12 @@ int ret_announce_build(const struct ret_local_identity *id,
 		.dest_type = RET_DEST_SINGLE,
 		.packet_type = RET_PKT_ANNOUNCE,
 		.context = context,
+		.context_flag = ratchet != NULL,
 	};
 	uint8_t *data;
 
-	if (RET_H1_HEADER_LEN + ANNOUNCE_FIXED_LEN + app_data_len > MIN(cap, RET_MTU)) {
+	if (RET_H1_HEADER_LEN + ANNOUNCE_FIXED_LEN + ratchet_len + app_data_len >
+	    MIN(cap, RET_MTU)) {
 		return -EMSGSIZE;
 	}
 	/* Assemble the payload where it ends up in @p out (packing then
@@ -102,6 +106,10 @@ int ret_announce_build(const struct ret_local_identity *id,
 	memcpy(&data[0], id->pub, RET_PUBKEY_LEN);
 	memcpy(&data[RET_PUBKEY_LEN], name_hash, RET_NAME_HASH_LEN);
 	memcpy(&data[RET_PUBKEY_LEN + RET_NAME_HASH_LEN], random_hash, RET_RANDOM_HASH_LEN);
+	if (ratchet != NULL) {
+		memcpy(&data[RET_PUBKEY_LEN + RET_NAME_HASH_LEN + RET_RANDOM_HASH_LEN], ratchet,
+		       RET_RATCHET_LEN);
+	}
 
 	memcpy(&signed_data[n], dest_hash, RET_TRUNC_HASH_LEN);
 	n += RET_TRUNC_HASH_LEN;

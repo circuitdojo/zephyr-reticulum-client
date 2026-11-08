@@ -16,7 +16,8 @@ Lines meant for scripts start with a fixed tag:
     (content over 64 characters: its words without the trailing '.' padding
     and its length, "re: big (2048 bytes)", so an intact padded message
     reads cleanly)
-  LXMF DEVICE ANNOUNCE <address> <display name>
+  LXMF DEVICE ANNOUNCE <address> <display name> stamp_cost=<cost>
+    ratchet=<ratchet id hex, or None>
   REPLY SENT <content>, REPLY DELIVERED <content>, REPLY FAILED <content>,
   REPLY REJECTED <content> (the recipient refused it); long contents are
   labelled by their first word
@@ -109,7 +110,14 @@ def main() -> None:
                 return
             name = LXMF.display_name_from_app_data(app_data)
             cost = LXMF.stamp_cost_from_app_data(app_data)
-            out(f"LXMF DEVICE ANNOUNCE {destination_hash.hex()} {name} stamp_cost={cost}")
+            # Validated (and its ratchet remembered) before handlers run;
+            # messages to it are encrypted to that ratchet from now on.
+            ratchet = RNS.Identity.current_ratchet_id(destination_hash)
+            ratchet = ratchet.hex() if ratchet else None
+            out(
+                f"LXMF DEVICE ANNOUNCE {destination_hash.hex()} {name} stamp_cost={cost}"
+                f" ratchet={ratchet}"
+            )
 
     RNS.Transport.register_announce_handler(DeviceAnnounces())
 

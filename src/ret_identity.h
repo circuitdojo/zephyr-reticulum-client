@@ -18,7 +18,8 @@
 #define RET_NAME_HASH_LEN   10
 #define RET_RANDOM_HASH_LEN 10
 #define RET_PUBKEY_LEN      64 /* X25519 pub[32] || Ed25519 pub[32] */
-#define RET_RATCHET_LEN     32
+#define RET_RATCHET_LEN     32 /* X25519 key */
+#define RET_RATCHET_ID_LEN  10
 #define RET_SIG_LEN         64
 
 /** Token key: HMAC signing key (32) || AES-256 key (32). */
@@ -67,6 +68,25 @@ void ret_local_identity_sign(const struct ret_local_identity *id, const uint8_t 
  */
 int ret_local_identity_decrypt(const struct ret_local_identity *id, const uint8_t *token,
 			       size_t len, uint8_t *out, size_t out_cap);
+
+/**
+ * As ret_local_identity_decrypt(), trying each of @p ratchets (X25519
+ * private keys, newest first) before the identity key, as
+ * Identity.decrypt() does. A sender that has our announced ratchet
+ * encrypts to it; one that has not, to the identity key.
+ *
+ * @param used set to the index of the ratchet that decrypted the token,
+ *             or -1 for the identity key; unchanged on failure
+ * @return plaintext length
+ * @retval -EBADMSG no key decrypts it
+ */
+int ret_local_identity_decrypt_ratchets(const struct ret_local_identity *id,
+					const uint8_t *const *ratchets,
+					size_t n_ratchets, const uint8_t *token, size_t len,
+					uint8_t *out, size_t out_cap, int *used);
+
+/** Ratchet id, as RNS logs it: SHA256(ratchet public key)[:10]. */
+int ret_ratchet_id(const uint8_t pub[RET_RATCHET_LEN], uint8_t out[RET_RATCHET_ID_LEN]);
 
 int ret_name_hash(const char *full_name, uint8_t out[RET_NAME_HASH_LEN]);
 int ret_identity_hash(const uint8_t pub[RET_PUBKEY_LEN], uint8_t out[RET_TRUNC_HASH_LEN]);

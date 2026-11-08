@@ -138,7 +138,11 @@ struct ret_client_config {
 	 * settings. NULL for a send-only client.
 	 */
 	const char *dest_name;
-	/** Optional app_data carried in the destination's announces. */
+	/**
+	 * Optional app_data carried in the destination's announces: at most
+	 * 333 bytes, 301 with CONFIG_RET_RATCHETS (ret_client_start() fails
+	 * with -EMSGSIZE otherwise).
+	 */
 	const uint8_t *announce_app_data;
 	size_t announce_app_data_len;
 	ret_data_cb_t on_data;

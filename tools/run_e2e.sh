@@ -24,7 +24,9 @@
 #   lxmf      the device announces lxmf.delivery and sends 3 opportunistic
 #             LXMF messages; the peer validates each signature and answers
 #             "echo: ...", which the device verifies, delivers and answers
-#             in turn -> 3/3 delivered, 3/3 echoes, replies validated, exit 0
+#             in turn -> 3/3 delivered, 3/3 echoes, replies validated, exit 0;
+#             the peer saw the device's ratchet in its announce, so the
+#             echoes it encrypts to the device use that ratchet
 #   lxmf-direct  the same, the peer answering DIRECT (over a link it opens
 #             to the device, which is the responder), plus a 3000-byte
 #             message (a Resource: delivered) and a 12000-byte one (over
@@ -35,7 +37,8 @@
 #             5000 for it; the device boots again and its sync collects
 #             the 12 in batches the 4 KB transfer limit cuts short, and
 #             acknowledges them -> 12 delivered, only the 5000-byte one
-#             (over the limit) left at the node, exit 0. Those arrive
+#             (over the limit) left at the node, exit 0. They are
+#             encrypted to the device's announced ratchet. Those arrive
 #             unverified (sender unseen); the device asks for the
 #             sender's path and keeps its key, so on a third boot a new
 #             message verifies with nothing but the kept key.
@@ -44,7 +47,9 @@
 #   sleep     3 wakes, 30 s apart: each resumes, reconnects, announces,
 #             syncs and suspends (socket closed). Messages deposited while
 #             it sleeps arrive at the next wake -> syncs of 0, 2, 1, the
-#             last one verified, exit 0
+#             last one verified, exit 0. Built with a 20 s ratchet
+#             interval, every wake rotates: the last message, encrypted
+#             to wake 2's ratchet, still decrypts at wake 3
 #
 # Known-hash build (sends to the peer's destination hash at once):
 #   late      peer announced once before the device started: the only way
@@ -202,6 +207,7 @@ if needs store-forward sleep; then
 		-DCONFIG_RET_SLEEP_INTERVAL_S=30 \
 		-DCONFIG_RET_SLEEP_WAKE_TIMEOUT_S=30 \
 		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
+		-DCONFIG_RET_RATCHET_INTERVAL_S=20 \
 		>"$LOGS/build-$(basename "$BUILD_SLEEP").log" 2>&1 ||
 		fail "build failed, see $LOGS/build-$(basename "$BUILD_SLEEP").log"
 fi
@@ -242,6 +248,12 @@ run_device() { # <exe> <log>  (sets RC)
 	RC=0
 	timeout 120 "$1" --seed-random --flash="$FLASH" >"$2" 2>&1 || RC=$?
 	[ $RC -ne 124 ] || fail "device timed out, see $2"
+}
+
+# The device's newest ratchet id: the last one it logged (loaded at boot,
+# or rotated to).
+device_ratchet() { # <dev_log>
+	grep -o "\(new\|current\) ratchet [0-9a-f]*" "$1" | tail -1 | awk '{print $3}'
 }
 
 check_messages() { # <name> <dev_log> <peer_log> <count> <proof|timeout> [first]
@@ -387,9 +399,14 @@ scenario_lxmf() { # [direct]
 	own=$(awk '/LXMF ADDRESS/ {print $(NF-1); exit}' "$dev_log" | tr -d '\r' |
 		sed 's/\x1b\[[0-9;]*m//g')
 	[ -n "$own" ] || fail "$name: device reported no address"
-	# The announce carries LXMF app_data: display name, no stamp cost.
-	grep -q "^LXMF DEVICE ANNOUNCE $own ret-lxmf stamp_cost=None$" "$peer_log" ||
-		fail "$name: peer did not parse the device's LXMF announce, see $peer_log"
+	# The announce carries LXMF app_data (display name, no stamp cost)
+	# and the device's ratchet. From then on the peer encrypts to that
+	# ratchet, so the echoes below decrypt with it, not the identity key.
+	local ratchet
+	ratchet=$(device_ratchet "$dev_log")
+	[ -n "$ratchet" ] || fail "$name: device logged no ratchet, see $dev_log"
+	grep -q "^LXMF DEVICE ANNOUNCE $own ret-lxmf stamp_cost=None ratchet=$ratchet$" "$peer_log" ||
+		fail "$name: peer did not parse the device's LXMF announce and ratchet, see $peer_log"
 	for n in $(seq 1 $COUNT_LXMF); do
 		grep -q "^LXMF RECEIVED validated $own |hello #$n$" "$peer_log" ||
 			fail "$name: peer did not validate hello #$n, see $peer_log"
@@ -480,6 +497,9 @@ scenario_store_forward() {
 	run_device "$BUILD_SF/zephyr/zephyr.exe" "$dev1"
 	[ $RC -eq 0 ] || fail "store-forward: first sync failed (exit $RC), see $dev1"
 	grep -q "SYNC DONE 0 0" "$dev1" || fail "store-forward: first sync not empty, see $dev1"
+	local ratchet
+	ratchet=$(device_ratchet "$dev1")
+	[ -n "$ratchet" ] || fail "store-forward: device logged no ratchet, see $dev1"
 
 	# Offline: deposit at the node.
 	wait_for 30 "sender to see the device" grep -q "^TARGET" "$send_log"
@@ -490,6 +510,14 @@ scenario_store_forward() {
 			fail "store-forward: stored #$n not deposited, see $send_log"
 	done
 	grep -q "^DEPOSITED big$" "$send_log" || fail "store-forward: big not deposited"
+	# Encrypted to the ratchet the device announced: its sync must decrypt
+	# with the ratchet.
+	grep -q "^TARGET .* ratchet=$ratchet$" "$send_log" ||
+		fail "store-forward: sender did not learn the device's ratchet, see $send_log"
+	for n in $(seq 1 $COUNT_SF); do
+		grep -q "^ENCRYPTED stored #$n ratchet=$ratchet$" "$send_log" ||
+			fail "store-forward: stored #$n not encrypted to the ratchet, see $send_log"
+	done
 	local store="$LXMD_DIR/storage/lxmf/messagestore" held
 	[ -d "$store" ] || fail "store-forward: no lxmd message store at $store"
 	held=$(find "$store" -type f | wc -l)
@@ -532,7 +560,8 @@ scenario_store_forward() {
 	[ "$left" -eq 1 ] || fail "store-forward: $left message(s) at the node, want 1"
 	local unverified
 	unverified=$(grep -c "LXMF RECEIVED UNVERIFIED" "$dev2" || true)
-	echo "   $COUNT_SF/$COUNT_SF collected and acknowledged, oversized one left ($unverified unverified: sender unseen);"
+	echo "   $COUNT_SF/$COUNT_SF collected (encrypted to the device's ratchet) and acknowledged,"
+	echo "   oversized one left ($unverified unverified: sender unseen);"
 	echo "   after a reboot the kept key verifies the sender"
 }
 
@@ -578,6 +607,19 @@ scenario_sleep() {
 	grep -q "LXMF RECEIVED .* from $sender: |night #2" "$dev" || fail "sleep: night #2 missing"
 	grep -q "LXMF RECEIVED verified from $sender: |later #1" "$dev" ||
 		fail "sleep: later #1 not verified, see $dev"
+	# Built with a 20 s ratchet interval, under the 30 s sleep: every
+	# wake rotates before it syncs. "later #1", deposited before wake 3
+	# to the ratchet wake 2 announced, then decrypts with a ratchet that
+	# is no longer the newest.
+	local enc newest
+	enc=$(awk '/^ENCRYPTED later #1 / {sub("ratchet=", "", $4); print $4; exit}' "$send_log")
+	newest=$(device_ratchet "$dev")
+	[ -n "$enc" ] && [ "$enc" != None ] ||
+		fail "sleep: later #1 not encrypted to a ratchet, see $send_log"
+	grep -q "ratchet $enc" "$dev" || fail "sleep: later #1's ratchet was never the device's"
+	[ "$enc" != "$newest" ] || fail "sleep: no ratchet rotation before wake 3, see $dev"
+	awk '/SLEEPING/ {s++} /new ratchet/ && s == 2 {ok = 1} END {exit !ok}' "$dev" ||
+		fail "sleep: the ratchet did not rotate at wake 3, see $dev"
 	# Its reply quotes 600 bytes: DIRECT, as a resource, proved before
 	# the device suspended.
 	local own
@@ -596,7 +638,8 @@ scenario_sleep() {
 	[ "$announces" -eq 3 ] || fail "sleep: $announces announces, want 3"
 	grep -q "DONE 3/3 wakes synced" "$dev" || fail "sleep: want DONE 3/3, see $dev"
 	echo "   3 wakes: mail deposited while asleep collected at the next wake;"
-	echo "   a 604-byte reply delivered DIRECT before suspending"
+	echo "   a 604-byte reply delivered DIRECT before suspending;"
+	echo "   the ratchet rotated at wake 3, the older one still decrypting"
 }
 
 fresh_rnsd() {

@@ -43,11 +43,13 @@ int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *out
 
 /**
  * Build an announce for a destination owned by @p id, as
- * Destination.announce() does (no ratchet): HEADER_1 BROADCAST SINGLE
- * ANNOUNCE, data = pub | name_hash | random_hash | sig | app_data.
+ * Destination.announce() does: HEADER_1 BROADCAST SINGLE ANNOUNCE, data =
+ * pub | name_hash | random_hash | ratchet | sig | app_data.
  *
  * @param random_hash 5 random bytes then the big-endian emission time;
  *                    receivers ignore announces not newer than the last
+ * @param ratchet     the newest ratchet's X25519 public key (sets the
+ *                    context flag), or NULL for none
  * @param context     RET_CONTEXT_NONE, or RET_CONTEXT_PATH_RESPONSE when
  *                    answering a path request
  * @return packet length, or a negative errno
@@ -55,7 +57,8 @@ int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *out
 int ret_announce_build(const struct ret_local_identity *id,
 		       const uint8_t name_hash[RET_NAME_HASH_LEN],
 		       const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
-		       const uint8_t random_hash[RET_RANDOM_HASH_LEN], const uint8_t *app_data,
+		       const uint8_t random_hash[RET_RANDOM_HASH_LEN],
+		       const uint8_t ratchet[RET_RATCHET_LEN], const uint8_t *app_data,
 		       size_t app_data_len, uint8_t context, uint8_t *out, size_t cap);
 
 /**

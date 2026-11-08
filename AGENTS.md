@@ -241,6 +241,17 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
     created on first start and persisted in settings (`src/ret_storage.c`, keys `ret/id` and
     `ret/aclk`). It announces on every connect, answers path requests for itself, and
     decrypts, delivers (`on_data`) and proves packets sent to it.
+  - Ratchets (`CONFIG_RET_RATCHETS`): the announce carries the newest of
+    `CONFIG_RET_RATCHET_COUNT` X25519 keys kept as `ret/rt/<n>`, rotated in `send_announce()` once
+    the newest is `CONFIG_RET_RATCHET_INTERVAL_S` old and the wall clock is set. The new key is
+    stored before any announce carries it. Inbound packets and synced messages
+    (`ret_client_decrypt()`) try every ratchet, newest first, then the identity key. Unreadable
+    ratchet records fail `ret_client_start()`, like the identity; a newly generated identity
+    deletes old ones. If a new ratchet can't be stored, the announce carries the current one and
+    the next announce retries: rotation waits, reachability doesn't.
+  - `src/ret_storage.c` is tested in `tests/lib/ret_storage` against real settings (NVS on
+    native_sim's simulated flash). A settings callback that returns an error stops the load
+    there, so the loaders note errors and return 0 to see every record.
   - The announce clock (emission time in each announce) must never go backwards across a
     reboot: receivers ignore announces that are not newer than the last one they saw. `ret/aclk`
     stores a reservation. Values are used from RAM, flash is written once per

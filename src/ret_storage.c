@@ -22,7 +22,9 @@ struct load_ctx {
 	uint8_t *prv;
 	bool have_id;
 	uint64_t aclk;
-	/* settings_load_subtree_direct() discards callback errors. */
+	/* settings_load_subtree_direct() does not return a callback's
+	 * error: it stops loading there (the NVS backend breaks its loop).
+	 */
 	int err;
 };
 
@@ -172,7 +174,10 @@ static int seen_cb(const char *key, size_t len, settings_read_cb read_cb, void *
 			ctx->err = err;
 		}
 	}
-	return err;
+	/* Go on: an error would stop the load, and the reset must see every
+	 * key to delete it.
+	 */
+	return 0;
 }
 
 int ret_storage_load_lxmf_seen(struct ret_lxmf_seen *s)
@@ -282,7 +287,8 @@ static int known_cb(const char *key, size_t len, settings_read_cb read_cb, void 
 		LOG_ERR("stored LXMF sender %s unreadable: %d", key, err);
 		ctx->err = err;
 	}
-	return err;
+	/* Go on, so the reset sees every key (see seen_cb()). */
+	return 0;
 }
 
 int ret_storage_load_known(struct ret_storage_known *out, size_t count)
@@ -329,6 +335,187 @@ int ret_storage_save_known(size_t slot, const struct ret_storage_known *k)
 	err = settings_save_one(key, rec, sizeof(rec));
 	if (err) {
 		LOG_ERR("saving an LXMF sender key failed: %d", err);
+	}
+	return err;
+}
+
+/* --- Ratchets ------------------------------------------------------------ */
+
+#if defined(CONFIG_RET_RATCHETS)
+
+#define RATCHET_RECORD_LEN (sizeof(uint32_t) + sizeof(uint64_t) + RET_RATCHET_LEN)
+#define RATCHET_KEYS_MAX   (CONFIG_RET_RATCHET_COUNT + 8)
+
+struct ratchet_ctx {
+	struct ret_storage_ratchet *out;
+	size_t count;
+	size_t n;
+	int err;
+	/* Every record seen, to delete the ones not kept. */
+	uint16_t keys[RATCHET_KEYS_MAX];
+	size_t n_keys;
+	bool keys_overflow;
+};
+
+static int ratchet_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		      void *param)
+{
+	struct ratchet_ctx *ctx = param;
+	uint8_t rec[RATCHET_RECORD_LEN];
+	struct ret_storage_ratchet r;
+	char *end;
+	unsigned long slot = strtoul(key, &end, 10);
+	bool digits = key[0] >= '0' && key[0] <= '9' && strlen(key) <= 5 && *end == '\0' &&
+		      slot <= UINT16_MAX;
+	size_t at;
+	ssize_t n;
+	int err = 0;
+
+	n = (digits && len == sizeof(rec)) ? read_cb(cb_arg, rec, sizeof(rec)) : -EINVAL;
+	if (n != sizeof(rec)) {
+		err = n < 0 ? (int)n : -EIO;
+		ret_wipe(rec, sizeof(rec));
+		LOG_ERR("stored ratchet %s unreadable: %d", key, err);
+		if (!ctx->err) {
+			ctx->err = err;
+		}
+		/* Go on, to report every unreadable record; the load fails. */
+		return 0;
+	}
+	if (ctx->n_keys < ARRAY_SIZE(ctx->keys)) {
+		ctx->keys[ctx->n_keys++] = (uint16_t)slot;
+	} else {
+		ctx->keys_overflow = true;
+	}
+
+	memcpy(&r.seq, rec, sizeof(r.seq));
+	memcpy(&r.created, &rec[sizeof(r.seq)], sizeof(r.created));
+	memcpy(r.prv, &rec[sizeof(r.seq) + sizeof(r.created)], RET_RATCHET_LEN);
+	r.key = (uint16_t)slot;
+	ret_wipe(rec, sizeof(rec));
+
+	/* Insert by seq, newest first, keeping the newest @count. */
+	for (at = 0; at < ctx->n && ctx->out[at].seq > r.seq; at++) {
+	}
+	if (at < ctx->count) {
+		size_t move = MIN(ctx->n, ctx->count - 1) - at;
+
+		memmove(&ctx->out[at + 1], &ctx->out[at], move * sizeof(r));
+		ctx->out[at] = r;
+		ctx->n = MIN(ctx->n + 1, ctx->count);
+	}
+	ret_wipe(&r, sizeof(r));
+	return 0;
+}
+
+int ret_storage_load_ratchets(struct ret_storage_ratchet *out, size_t count, size_t *n)
+{
+	static struct ratchet_ctx ctx;
+	char name[24];
+	int err;
+
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.out = out;
+	ctx.count = count;
+	err = settings_load_subtree_direct("ret/rt", ratchet_cb, &ctx);
+	if (!err) {
+		err = ctx.err;
+	}
+	if (err) {
+		ret_wipe(out, count * sizeof(out[0]));
+		return err;
+	}
+	*n = ctx.n;
+
+	/* Records not kept: older than the newest @count. */
+	for (size_t i = 0; i < ctx.n_keys; i++) {
+		bool kept = false;
+
+		for (size_t j = 0; j < ctx.n && !kept; j++) {
+			kept = out[j].key == ctx.keys[i];
+		}
+		if (!kept) {
+			snprintf(name, sizeof(name), "ret/rt/%u", ctx.keys[i]);
+			err = settings_delete(name);
+			if (err) {
+				LOG_ERR("deleting old ratchet %s failed: %d", name, err);
+				return err;
+			}
+		}
+	}
+	if (ctx.keys_overflow) {
+		LOG_WRN("more ret/rt records than expected; some old ones remain");
+	}
+	return 0;
+}
+
+int ret_storage_save_ratchet(const struct ret_storage_ratchet *r)
+{
+	uint8_t rec[RATCHET_RECORD_LEN];
+	char key[24];
+	int err;
+
+	memcpy(rec, &r->seq, sizeof(r->seq));
+	memcpy(&rec[sizeof(r->seq)], &r->created, sizeof(r->created));
+	memcpy(&rec[sizeof(r->seq) + sizeof(r->created)], r->prv, RET_RATCHET_LEN);
+	snprintf(key, sizeof(key), "ret/rt/%u", r->key);
+	err = settings_save_one(key, rec, sizeof(rec));
+	ret_wipe(rec, sizeof(rec));
+	if (err) {
+		LOG_ERR("saving a ratchet failed: %d", err);
+	}
+	return err;
+}
+
+#endif /* CONFIG_RET_RATCHETS */
+
+/* Also built without RET_RATCHETS: a new identity must not inherit the
+ * old one's ratchets if they are turned on later. Deletes in passes of
+ * ARRAY_SIZE(keys).
+ */
+struct clear_ctx {
+	uint16_t keys[16];
+	size_t n_keys;
+	bool keys_overflow;
+};
+
+static int clear_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		    void *param)
+{
+	struct clear_ctx *ctx = param;
+	char *end;
+	unsigned long slot = strtoul(key, &end, 10);
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+	if (*end != '\0' || slot > UINT16_MAX || key[0] < '0' || key[0] > '9') {
+		LOG_WRN("unexpected record ret/rt/%s left in place", key);
+	} else if (ctx->n_keys < ARRAY_SIZE(ctx->keys)) {
+		ctx->keys[ctx->n_keys++] = (uint16_t)slot;
+	} else {
+		ctx->keys_overflow = true;
+	}
+	return 0;
+}
+
+int ret_storage_clear_ratchets(void)
+{
+	static struct clear_ctx ctx;
+	char name[24];
+	int err;
+
+	do {
+		memset(&ctx, 0, sizeof(ctx));
+		err = settings_load_subtree_direct("ret/rt", clear_cb, &ctx);
+		/* Deleted after the load, not while the backend iterates. */
+		for (size_t i = 0; i < ctx.n_keys && !err; i++) {
+			snprintf(name, sizeof(name), "ret/rt/%u", ctx.keys[i]);
+			err = settings_delete(name);
+		}
+	} while (!err && ctx.keys_overflow);
+	if (err) {
+		LOG_ERR("deleting ratchets failed: %d", err);
 	}
 	return err;
 }

@@ -29,9 +29,6 @@ BUILD_ASSERT(CONFIG_RET_LXMF_DIRECT_POOL == 0 ||
 		     RET_LXMF_DIRECT_MAX_CONTENT > RET_LXMF_OPPORTUNISTIC_MAX_CONTENT,
 	     "RET_LXMF_DIRECT_POOL / RET_RESOURCE_MAX_SIZE too small for DIRECT");
 
-/* 2020-01-01: anything earlier means the wall clock was never set. */
-#define WALL_CLOCK_VALID_S 1577836800LL
-
 int ret_lxmf_drv_setup(struct ret_client *c)
 {
 	int n;
@@ -49,17 +46,6 @@ int ret_lxmf_drv_setup(struct ret_client *c)
 	c->app_data = c->lxmf_app_data;
 	c->app_data_len = (size_t)n;
 	return 0;
-}
-
-/* Wall-clock seconds, or 0 when the clock was never set. */
-static int64_t wall_now(void)
-{
-	struct timespec now;
-
-	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &now) != 0 || now.tv_sec < WALL_CLOCK_VALID_S) {
-		return 0;
-	}
-	return (int64_t)now.tv_sec;
 }
 
 /* The lxmf.delivery address a public key gives. */
@@ -193,7 +179,7 @@ enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body
 	const uint8_t *sig_pub;
 	bool verified = false;
 	bool floor_raised;
-	int64_t now_s = wall_now();
+	int64_t now_s = ret_client_wall_now();
 	size_t slot;
 
 	/* body = packed[16:]: the destination is our own address. */
@@ -354,7 +340,7 @@ int ret_lxmf_send_method(struct ret_client *c, const uint8_t dest_hash[RET_DEST_
 							  : RET_LXMF_DIRECT_MAX_CONTENT)) {
 		return -EMSGSIZE;
 	}
-	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &now) != 0 || now.tv_sec < WALL_CLOCK_VALID_S) {
+	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &now) != 0 || now.tv_sec < RET_WALL_CLOCK_VALID_S) {
 		LOG_WRN("LXMF send refused: wall clock not set (SYS_CLOCK_REALTIME)");
 		return -ENODATA;
 	}

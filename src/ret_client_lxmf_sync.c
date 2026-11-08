@@ -267,8 +267,7 @@ static void on_item(struct ret_client *c, const uint8_t *item, size_t len)
 		LOG_WRN("propagated item not addressed to us: dropped");
 		return;
 	}
-	n = ret_local_identity_decrypt(&c->id, &item[RET_LXMF_ADDR_LEN], len - RET_LXMF_ADDR_LEN,
-				       plain, cap);
+	n = ret_client_decrypt(c, &item[RET_LXMF_ADDR_LEN], len - RET_LXMF_ADDR_LEN, plain, cap);
 	if (n < 0) {
 		if (n == -ENOBUFS) {
 			LOG_ERR("propagated message larger than its buffer: dropped");

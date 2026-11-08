@@ -10,9 +10,12 @@
 
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/clock.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/zvfs/eventfd.h>
 
@@ -135,6 +138,172 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 }
 
 
+int64_t ret_client_wall_now(void)
+{
+	struct timespec now;
+
+	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &now) != 0 ||
+	    now.tv_sec < RET_WALL_CLOCK_VALID_S) {
+		return 0;
+	}
+	return (int64_t)now.tv_sec;
+}
+
+#if defined(CONFIG_RET_RATCHETS)
+static void log_ratchet(const char *what, const uint8_t id[RET_RATCHET_ID_LEN])
+{
+	char hex[2 * RET_RATCHET_ID_LEN + 1];
+
+	bin2hex(id, RET_RATCHET_ID_LEN, hex, sizeof(hex));
+	LOG_INF("%s ratchet %s", what, hex);
+}
+
+static bool ratchet_key_used(const struct ret_client *c, uint16_t key)
+{
+	for (size_t i = 0; i < c->n_ratchets; i++) {
+		if (c->ratchets[i].key == key) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Make a new newest ratchet, created at @p now (0: clock not set). It is
+ * stored before anything uses it, so no announce ever carries a ratchet
+ * a reboot could lose: senders keep encrypting to the last one they
+ * heard. When the set is full it replaces the oldest, in place.
+ */
+static int ratchet_add(struct ret_client *c, int64_t now)
+{
+	struct ret_storage_ratchet r = {
+		.created = (uint64_t)now,
+		.seq = c->n_ratchets > 0 ? c->ratchets[0].seq + 1 : 1,
+	};
+	uint8_t pub[RET_RATCHET_LEN];
+	uint8_t id[RET_RATCHET_ID_LEN];
+	size_t keep = MIN(c->n_ratchets, (size_t)CONFIG_RET_RATCHET_COUNT - 1);
+	int err = ret_random(r.prv, sizeof(r.prv));
+
+	if (!err) {
+		ret_x25519_public_key(pub, r.prv);
+		err = ret_ratchet_id(pub, id);
+	}
+	if (!err) {
+		if (keep < c->n_ratchets) {
+			r.key = c->ratchets[keep].key;
+		} else {
+			/* The smallest record number not in use. */
+			while (ratchet_key_used(c, r.key)) {
+				r.key++;
+			}
+		}
+		err = ret_storage_save_ratchet(&r);
+	}
+	if (err) {
+		ret_wipe(&r, sizeof(r));
+		return err;
+	}
+
+	if (keep < c->n_ratchets) {
+		ret_wipe(&c->ratchets[keep], sizeof(c->ratchets[keep]));
+	}
+	memmove(&c->ratchets[1], &c->ratchets[0], keep * sizeof(c->ratchets[0]));
+	memmove(&c->ratchet_ids[1], &c->ratchet_ids[0], keep * sizeof(c->ratchet_ids[0]));
+	c->ratchets[0] = r;
+	memcpy(c->ratchet_ids[0], id, sizeof(id));
+	memcpy(c->ratchet_pub, pub, sizeof(pub));
+	c->n_ratchets = keep + 1;
+	ret_wipe(&r, sizeof(r));
+	log_ratchet("new", id);
+	return 0;
+}
+
+/**
+ * Rotate when the newest ratchet is older than RET_RATCHET_INTERVAL_S.
+ * Only with the wall clock set: a ratchet made before it was (created 0)
+ * is rotated once it is. A clock a little behind the newest ratchet's
+ * time rotates nothing until it passes it; one more than an interval
+ * behind means that time was bogus (a wrong clock reading), which would
+ * otherwise stop rotation for good, so it rotates.
+ */
+static int ratchet_rotate(struct ret_client *c)
+{
+	uint64_t now = (uint64_t)ret_client_wall_now();
+	uint64_t newest = c->ratchets[0].created;
+	uint64_t interval = CONFIG_RET_RATCHET_INTERVAL_S;
+
+	if (now == 0) {
+		return 0;
+	}
+	if (newest != 0 && now < newest) {
+		if (newest - now <= interval) {
+			return 0;
+		}
+		LOG_WRN("newest ratchet dated %llu s ahead of the clock: rotating",
+			(unsigned long long)(newest - now));
+	} else if (newest != 0 && now - newest < interval) {
+		return 0;
+	}
+	return ratchet_add(c, (int64_t)now);
+}
+
+/** Load the stored ratchets, or make the first one. */
+static int ratchets_setup(struct ret_client *c)
+{
+	uint8_t pub[RET_RATCHET_LEN];
+	int err = ret_storage_load_ratchets(c->ratchets, CONFIG_RET_RATCHET_COUNT,
+					    &c->n_ratchets);
+
+	if (err) {
+		LOG_ERR("stored ratchets unreadable: %d", err);
+		return err;
+	}
+	if (c->n_ratchets == 0) {
+		return ratchet_add(c, ret_client_wall_now());
+	}
+	for (size_t i = 0; i < c->n_ratchets && !err; i++) {
+		ret_x25519_public_key(pub, c->ratchets[i].prv);
+		err = ret_ratchet_id(pub, c->ratchet_ids[i]);
+		if (i == 0) {
+			memcpy(c->ratchet_pub, pub, sizeof(pub));
+		}
+	}
+	if (!err) {
+		log_ratchet("current", c->ratchet_ids[0]);
+	}
+	return err;
+}
+#endif /* CONFIG_RET_RATCHETS */
+
+int ret_client_decrypt(struct ret_client *c, const uint8_t *token, size_t len, uint8_t *out,
+		       size_t cap)
+{
+#if defined(CONFIG_RET_RATCHETS)
+	/* At most 32 (Kconfig range): 128 bytes of stack on nRF. */
+	const uint8_t *keys[CONFIG_RET_RATCHET_COUNT];
+	int used = -1;
+	int n;
+
+	for (size_t i = 0; i < c->n_ratchets; i++) {
+		keys[i] = c->ratchets[i].prv;
+	}
+	n = ret_local_identity_decrypt_ratchets(&c->id, keys, c->n_ratchets, token, len, out, cap,
+						&used);
+	if (n >= 0 && used >= 0) {
+		char hex[2 * RET_RATCHET_ID_LEN + 1];
+
+		bin2hex(c->ratchet_ids[used], RET_RATCHET_ID_LEN, hex, sizeof(hex));
+		LOG_DBG("decrypted with ratchet %s", hex);
+	} else if (n >= 0) {
+		LOG_DBG("decrypted with the identity key");
+	}
+	return n;
+#else
+	return ret_local_identity_decrypt(&c->id, token, len, out, cap);
+#endif
+}
+
 /**
  * Announce the client's destination. The announce clock is persisted
  * before use: an announce that is not newer than the last one a node has
@@ -144,6 +313,7 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 static int send_announce(struct ret_client *c, uint8_t context)
 {
 	uint8_t random_hash[RET_RANDOM_HASH_LEN];
+	const uint8_t *ratchet = NULL;
 	uint64_t emitted = c->aclk + 1;
 	int len;
 	int err;
@@ -153,6 +323,18 @@ static int send_announce(struct ret_client *c, uint8_t context)
 		c->next_announce_ms =
 			k_uptime_get() + (int64_t)CONFIG_RET_ANNOUNCE_INTERVAL_S * MSEC_PER_SEC;
 	}
+
+#if defined(CONFIG_RET_RATCHETS)
+	/* A rotation that failed (the new ratchet could not be stored)
+	 * changed nothing: announce the current one, which is stored, and
+	 * try again next time. Only the rotation waits.
+	 */
+	err = ratchet_rotate(c);
+	if (err) {
+		LOG_ERR("ratchet rotation failed (%d): announcing the current one", err);
+	}
+	ratchet = c->ratchet_pub;
+#endif
 
 	if (emitted > c->aclk_reserved) {
 		uint64_t reserve = emitted + CONFIG_RET_ANNOUNCE_CLOCK_BLOCK - 1;
@@ -175,7 +357,7 @@ static int send_announce(struct ret_client *c, uint8_t context)
 	}
 
 	len = ret_announce_build(&c->id, c->local_name_hash, c->local_dest, random_hash,
-				 c->app_data, c->app_data_len, context,
+				 ratchet, c->app_data, c->app_data_len, context,
 				 c->tx_raw, sizeof(c->tx_raw));
 	if (len < 0) {
 		return len;
@@ -224,8 +406,8 @@ static void handle_inbound(struct ret_client *c, const struct ret_packet *pkt,
 		/* Delivered already; prove again in case our proof was lost. */
 		LOG_DBG("duplicate packet, proving again");
 	} else {
-		n = ret_local_identity_decrypt(&c->id, pkt->data, pkt->data_len, c->rx_plain,
-					       sizeof(c->rx_plain));
+		n = ret_client_decrypt(c, pkt->data, pkt->data_len, c->rx_plain,
+				       sizeof(c->rx_plain));
 		if (n < 0) {
 			LOG_WRN("undecryptable packet for own destination: %d", n);
 			return;
@@ -1074,7 +1256,8 @@ static int setup_local(struct ret_client *c)
 	bool have_id;
 	int err;
 
-	if (c->app_data_len > RET_MTU - RET_H1_HEADER_LEN - 148) {
+	if (c->app_data_len >
+	    RET_MTU - RET_H1_HEADER_LEN - 148 - (IS_ENABLED(CONFIG_RET_RATCHETS) ? RET_RATCHET_LEN : 0)) {
 		LOG_ERR("announce_app_data of %zu bytes does not fit an announce",
 			c->app_data_len);
 		return -EMSGSIZE;
@@ -1090,6 +1273,10 @@ static int setup_local(struct ret_client *c)
 		err = ret_local_identity_load(&c->id, prv);
 	} else {
 		err = ret_local_identity_generate(&c->id, prv);
+		if (!err) {
+			/* Ratchets left from an identity that is gone. */
+			err = ret_storage_clear_ratchets();
+		}
 		if (!err) {
 			err = ret_storage_save_identity(prv);
 		}
@@ -1107,8 +1294,17 @@ static int setup_local(struct ret_client *c)
 	if (!err) {
 		err = ret_plain_dest_hash("rnstransport.path.request", c->path_request_dest);
 	}
+#if defined(CONFIG_RET_RATCHETS)
+	if (!err) {
+		err = ratchets_setup(c);
+	}
+#endif
 	if (err) {
 		ret_wipe(&c->id, sizeof(c->id));
+#if defined(CONFIG_RET_RATCHETS)
+		ret_wipe(c->ratchets, sizeof(c->ratchets));
+		c->n_ratchets = 0;
+#endif
 		return err;
 	}
 
