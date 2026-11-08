@@ -20,9 +20,12 @@
  * What every link shares (sending, closing, stale timers, receiving a
  * Resource) works on struct link, whichever side opened it.
  *
- * A Resource (ret_resource.c) arrives at most one at a time, on any link,
- * into the client's buffers: a response too large for one packet, or data
- * (LXMF DIRECT) too large for one packet on an inbound link.
+ * One Resource (ret_resource.c) at a time uses the client's buffers: one
+ * arriving on any link (a response too large for one packet, or data,
+ * LXMF DIRECT, too large for one packet on an inbound link), or one we
+ * send on the outbound link (LXMF DIRECT). The outbound link also carries
+ * single packets whose proof is awaited; one such send is in flight at a
+ * time.
  */
 
 #include <errno.h>
@@ -65,6 +68,27 @@ LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
  * link requests must not evict a real handshake still waiting for its RTT.
  */
 #define IN_EVICT_MIN_AGE_MS 10000
+/* PacketReceipt on a link: rtt * TRAFFIC_TIMEOUT_FACTOR. The grace covers
+ * the receiver's own work (RNS's floor is 5 ms).
+ */
+#define TRAFFIC_TIMEOUT_FACTOR 6
+#define PACKET_PROOF_GRACE_MS  1000
+/* Resource.py, sending: advertisement retries (each waits rtt *
+ * TRAFFIC_TIMEOUT_FACTOR + PROCESSING_GRACE), the wait for part requests
+ * (rtt * factor * MAX_RETRIES + SENDER_GRACE_TIME + the receiver's retry
+ * delays, sum((r + 1) * 0.5 s) over 16 retries = 68 s), and the proof wait
+ * (rtt * PROOF_TIMEOUT_FACTOR + SENDER_GRACE_TIME), 3 times.
+ */
+#define TX_MAX_ADV_RETRIES   4
+#define TX_PROCESSING_GRACE_MS 1000
+#define TX_SENDER_GRACE_MS   10000
+#define TX_RETRY_DELAYS_MS   68000
+#define TX_PROOF_TIMEOUT_FACTOR 3
+#define TX_PROOF_RETRIES     3
+/* Fresh random hashes tried when map hashes collide (Resource remaps
+ * until they do not; a collision among 18 parts is already ~1e-8).
+ */
+#define TX_REMAP_TRIES 8
 
 static struct link_out *link_out_of(struct link *l)
 {
@@ -102,6 +126,25 @@ static struct link_request *resource_end(struct ret_client *c)
 	return q;
 }
 
+/* The outbound link's send is over: report @p status once. */
+static void send_done(struct ret_client *c, struct link_out *o, int status)
+{
+	link_sent_cb_t cb = o->sent_cb;
+	uint32_t rtt = (uint32_t)MAX(0, k_uptime_get() - o->send_ms);
+
+	if (o->send == OUT_SEND_NONE) {
+		return;
+	}
+	if (o->send == OUT_SEND_RESOURCE && c->res.state == RES_SENDING) {
+		(void)resource_end(c);
+	}
+	o->send = OUT_SEND_NONE;
+	o->sent_cb = NULL;
+	if (cb != NULL) {
+		cb(c, status, rtt);
+	}
+}
+
 /* End link @p l: its resource, its requests (outbound), its key. */
 static void link_end(struct ret_client *c, struct link *l, enum ret_link_event ev, int reason)
 {
@@ -113,6 +156,11 @@ static void link_end(struct ret_client *c, struct link *l, enum ret_link_event e
 	}
 	if (l->role == LINK_OUT) {
 		struct link_out *o = link_out_of(l);
+
+		/* A send in flight fails first: its owner learns the link went
+		 * before the link callback says so.
+		 */
+		send_done(c, o, -ECONNRESET);
 
 		for (size_t i = 0; i < ARRAY_SIZE(o->req); i++) {
 			if (o->req[i].used) {
@@ -624,6 +672,199 @@ static void on_resource_icl(struct ret_client *c, struct link *l, const uint8_t 
 	}
 }
 
+/* --- Sending on the outbound link ------------------------------------- */
+
+int ret_link_drv_send_packet(struct ret_client *c, const uint8_t *data, size_t len,
+			     link_sent_cb_t cb)
+{
+	struct link_out *o = &c->out;
+	int err;
+
+	if (!link_up(&o->l)) {
+		return -ENOTCONN;
+	}
+	if (o->send != OUT_SEND_NONE) {
+		return -EBUSY;
+	}
+	err = send_link(c, &o->l, RET_CONTEXT_NONE, data, len, true, o->send_hash);
+	if (err) {
+		return err;
+	}
+	o->send = OUT_SEND_PACKET;
+	o->sent_cb = cb;
+	o->send_ms = k_uptime_get();
+	o->send_deadline_ms = o->send_ms + (int64_t)o->l.rtt_ms * TRAFFIC_TIMEOUT_FACTOR +
+			      PACKET_PROOF_GRACE_MS;
+	return 0;
+}
+
+static int send_adv(struct ret_client *c)
+{
+	struct link_resource *res = &c->res;
+	uint8_t adv[RET_LINK_MDU];
+	int n = ret_resource_tx_adv(&res->tx, adv, sizeof(adv));
+
+	if (n < 0) {
+		return n;
+	}
+	res->tx_adv_ms = k_uptime_get();
+	res->tx_activity_ms = res->tx_adv_ms;
+	return send_link(c, res->link, RET_CTX_RESOURCE_ADV, adv, (size_t)n, true, NULL);
+}
+
+int ret_link_drv_send_resource(struct ret_client *c, const uint8_t *data, size_t len,
+			       link_sent_cb_t cb)
+{
+	struct link_out *o = &c->out;
+	struct link_resource *res = &c->res;
+	uint8_t iv[RET_AES_BLOCK_LEN];
+	uint8_t prefix[RET_RESOURCE_RANDOM_LEN];
+	uint8_t r[RET_RESOURCE_RANDOM_LEN];
+	int err;
+
+	if (!link_up(&o->l)) {
+		return -ENOTCONN;
+	}
+	if (o->send != OUT_SEND_NONE || res->state != RES_IDLE) {
+		return -EBUSY;
+	}
+	err = ret_random(iv, sizeof(iv));
+	if (!err) {
+		err = ret_random(prefix, sizeof(prefix));
+	}
+	if (!err) {
+		err = ret_resource_tx_init(&res->tx, o->l.key, iv, prefix, data, len, res->stream,
+					   sizeof(res->stream));
+	}
+	for (int i = 0; !err; i++) {
+		err = ret_random(r, sizeof(r));
+		if (!err) {
+			err = ret_resource_tx_map(&res->tx, data, len, r);
+		}
+		if (err != -EAGAIN) {
+			break;
+		}
+		if (i + 1 == TX_REMAP_TRIES) {
+			err = -EIO;
+		} else {
+			err = 0;
+		}
+	}
+	if (err) {
+		return err;
+	}
+
+	res->state = RES_SENDING;
+	res->link = &o->l;
+	res->req = NULL;
+	res->tx_phase = RES_TX_ADVERTISED;
+	res->retries = TX_MAX_ADV_RETRIES;
+	res->tx_rtt_ms = 0;
+	res->give_up_ms = INT64_MAX;
+	o->send = OUT_SEND_RESOURCE;
+	o->sent_cb = cb;
+	o->send_ms = k_uptime_get();
+	err = send_adv(c);
+	if (err) {
+		o->send = OUT_SEND_NONE;
+		o->sent_cb = NULL;
+		(void)resource_end(c);
+		return err;
+	}
+	LOG_INF("sending resource: %u bytes in %u parts", res->tx.d, res->tx.n);
+	return 0;
+}
+
+/* Resource.cancel() on the sender: RESOURCE_ICL carries its hash. */
+static void tx_cancel(struct ret_client *c, int status)
+{
+	(void)send_link(c, c->res.link, RET_CTX_RESOURCE_ICL, c->res.tx.h, RET_SHA256_LEN, true,
+			NULL);
+	send_done(c, &c->out, status);
+}
+
+static void tx_on_request(struct ret_client *c, const uint8_t *plain, size_t len)
+{
+	/* static: client thread only, and kept off its stack. */
+	static struct ret_resource_tx_req req;
+	struct link_resource *res = &c->res;
+	int64_t now = k_uptime_get();
+	int err;
+
+	err = ret_resource_tx_request(&res->tx, plain, len, &req);
+	if (err == -EBADMSG) {
+		return; /* another resource's */
+	}
+	if (err) {
+		LOG_WRN("resource request out of sequence: cancelled");
+		tx_cancel(c, err);
+		return;
+	}
+	if (res->tx_phase == RES_TX_ADVERTISED) {
+		res->tx_rtt_ms = (uint32_t)MAX(1, now - res->tx_adv_ms);
+	}
+	res->tx_phase = RES_TX_TRANSFERRING;
+	res->tx_activity_ms = now;
+
+	for (size_t i = 0; i < req.n_parts; i++) {
+		size_t plen;
+		const uint8_t *part = ret_resource_tx_part(&res->tx, req.parts[i], &plen);
+
+		/* A slice of the encrypted stream: no link token. */
+		err = send_link(c, res->link, RET_CTX_RESOURCE, part, plen, false, NULL);
+		if (err) {
+			return; /* the connection is gone: teardown follows */
+		}
+		res->tx_last_part_ms = k_uptime_get();
+	}
+	if (req.hmu) {
+		uint8_t hmu[RET_LINK_MDU];
+		int n = ret_resource_tx_hmu(&res->tx, req.hmu_segment, hmu, sizeof(hmu));
+
+		if (n < 0) {
+			tx_cancel(c, -EPROTO);
+			return;
+		}
+		if (send_link(c, res->link, RET_CTX_RESOURCE_HMU, hmu, (size_t)n, true, NULL)) {
+			return;
+		}
+	}
+	if (ret_resource_tx_all_sent(&res->tx)) {
+		res->tx_phase = RES_TX_AWAITING_PROOF;
+		res->retries = TX_PROOF_RETRIES;
+		res->tx_last_part_ms = k_uptime_get();
+	}
+}
+
+/* A PROOF on the outbound link: of our packet, or of our resource. */
+static void out_on_proof(struct ret_client *c, struct link_out *o, const struct ret_packet *pkt)
+{
+	struct link_resource *res = &c->res;
+
+	if (pkt->context == RET_CTX_RESOURCE_PRF) {
+		if (o->send == OUT_SEND_RESOURCE && res->state == RES_SENDING &&
+		    ret_resource_tx_proof_valid(&res->tx, pkt->data, pkt->data_len)) {
+			LOG_INF("resource proved: %u bytes delivered", res->tx.d);
+			send_done(c, o, 0);
+		}
+		return;
+	}
+	if (o->send != OUT_SEND_PACKET) {
+		return;
+	}
+	switch (ret_link_packet_proof_validate(o->dest_sig_pub, o->l.id, o->send_hash, pkt)) {
+	case 0:
+		send_done(c, o, 0);
+		break;
+	case -EBADMSG:
+		/* Anyone on the path can see the link_id: keep waiting. */
+		LOG_WRN("invalid link packet proof: ignored");
+		break;
+	default:
+		break;
+	}
+}
+
 /* --- Packets for a link ----------------------------------------------- */
 
 struct link *ret_link_drv_find(struct ret_client *c, const uint8_t id[RET_TRUNC_HASH_LEN])
@@ -853,8 +1094,15 @@ void ret_link_drv_on_packet(struct ret_client *c, struct link *l, const struct r
 		l->state = LINK_ACTIVE;
 	}
 
+	if (pkt->packet_type == RET_PKT_PROOF) {
+		/* Proofs of what we send: only the outbound link sends any. */
+		if (l->role == LINK_OUT) {
+			out_on_proof(c, link_out_of(l), pkt);
+		}
+		return;
+	}
 	if (pkt->packet_type != RET_PKT_DATA) {
-		return; /* packet proofs: nothing sent by us asks for them */
+		return;
 	}
 
 	switch (pkt->context) {
@@ -884,6 +1132,8 @@ void ret_link_drv_on_packet(struct ret_client *c, struct link *l, const struct r
 	case RET_CTX_RESOURCE_ADV:
 	case RET_CTX_RESOURCE_HMU:
 	case RET_CTX_RESOURCE_ICL:
+	case RET_CTX_RESOURCE_REQ:
+	case RET_CTX_RESOURCE_RCL:
 		break;
 	default:
 		LOG_DBG("unhandled link context 0x%02x", pkt->context);
@@ -910,6 +1160,27 @@ void ret_link_drv_on_packet(struct ret_client *c, struct link *l, const struct r
 		break;
 	case RET_CTX_RESOURCE_ICL:
 		on_resource_icl(c, l, c->rx_plain, (size_t)n);
+		break;
+	case RET_CTX_RESOURCE_REQ:
+		if (c->res.state == RES_SENDING && c->res.link == l) {
+			uint8_t hash[RET_HASH_LEN];
+
+			/* Link.receive drops a request it saw before
+			 * (req_hashlist): a repeat would resend its parts.
+			 */
+			if (ret_packet_hash(raw, raw_len, hash) == 0 &&
+			    !ret_client_seen_packet(c, hash)) {
+				ret_client_remember_packet(c, hash);
+				tx_on_request(c, c->rx_plain, (size_t)n);
+			}
+		}
+		break;
+	case RET_CTX_RESOURCE_RCL:
+		if (c->res.state == RES_SENDING && c->res.link == l && n == RET_SHA256_LEN &&
+		    memcmp(c->rx_plain, c->res.tx.h, RET_SHA256_LEN) == 0) {
+			LOG_WRN("receiver refused our resource");
+			send_done(c, link_out_of(l), -EPERM);
+		}
 		break;
 	default: /* LINKCLOSE */
 		if (n == RET_TRUNC_HASH_LEN && memcmp(c->rx_plain, l->id, RET_TRUNC_HASH_LEN) == 0) {
@@ -1113,6 +1384,10 @@ static void service_out(struct ret_client *c, int64_t now)
 			request_done(q, -ETIMEDOUT, NULL, 0);
 		}
 	}
+	if (o->send == OUT_SEND_PACKET && now >= o->send_deadline_ms) {
+		LOG_WRN("no proof for link packet");
+		send_done(c, o, -ETIMEDOUT);
+	}
 
 	/* The initiator keeps the link alive (the responder only answers):
 	 * a keepalive when nothing was sent for a keepalive interval, or when
@@ -1127,10 +1402,69 @@ static void service_out(struct ret_client *c, int64_t now)
 	service_stale(c, l, now);
 }
 
+/* When the sending resource's watchdog fires next (Resource.py). */
+static int64_t tx_deadline(const struct link_resource *res)
+{
+	uint32_t rtt = res->tx_rtt_ms != 0 ? res->tx_rtt_ms : res->link->rtt_ms;
+
+	switch (res->tx_phase) {
+	case RES_TX_ADVERTISED:
+		return res->tx_adv_ms + (int64_t)res->link->rtt_ms * TRAFFIC_TIMEOUT_FACTOR +
+		       TX_PROCESSING_GRACE_MS;
+	case RES_TX_TRANSFERRING:
+		return res->tx_activity_ms +
+		       (int64_t)rtt * TRAFFIC_TIMEOUT_FACTOR * RESOURCE_MAX_RETRIES +
+		       TX_SENDER_GRACE_MS + TX_RETRY_DELAYS_MS;
+	default:
+		return res->tx_last_part_ms + (int64_t)rtt * TX_PROOF_TIMEOUT_FACTOR +
+		       TX_SENDER_GRACE_MS;
+	}
+}
+
+static void service_tx(struct ret_client *c, int64_t now)
+{
+	struct link_resource *res = &c->res;
+
+	if (now < tx_deadline(res)) {
+		return;
+	}
+	switch (res->tx_phase) {
+	case RES_TX_ADVERTISED:
+		if (res->retries == 0) {
+			LOG_WRN("resource advertisement unanswered");
+			tx_cancel(c, -ETIMEDOUT);
+		} else {
+			res->retries--;
+			(void)send_adv(c);
+		}
+		break;
+	case RES_TX_TRANSFERRING:
+		LOG_WRN("no part requests for our resource");
+		tx_cancel(c, -ETIMEDOUT);
+		break;
+	default:
+		/* RNS queries the network cache for the proof here; there is
+		 * none to ask: wait again.
+		 */
+		if (res->retries == 0) {
+			LOG_WRN("no proof for our resource");
+			tx_cancel(c, -ETIMEDOUT);
+		} else {
+			res->retries--;
+			res->tx_last_part_ms = now;
+		}
+		break;
+	}
+}
+
 static void service_resource(struct ret_client *c, int64_t now)
 {
 	struct link_resource *res = &c->res;
 
+	if (res->state == RES_SENDING) {
+		service_tx(c, now);
+		return;
+	}
 	if (res->state != RES_RECEIVING) {
 		return;
 	}
@@ -1209,6 +1543,8 @@ int64_t ret_link_drv_next_event(const struct ret_client *c)
 
 	if (c->res.state == RES_RECEIVING) {
 		next = MIN(next, MIN(c->res.deadline_ms, c->res.give_up_ms));
+	} else if (c->res.state == RES_SENDING) {
+		next = MIN(next, tx_deadline(&c->res));
 	}
 	switch (l->state) {
 	case LINK_NONE:
@@ -1227,13 +1563,16 @@ int64_t ret_link_drv_next_event(const struct ret_client *c)
 			next = MIN(next, o->req[i].deadline_ms);
 		}
 	}
+	if (o->send == OUT_SEND_PACKET) {
+		next = MIN(next, o->send_deadline_ms);
+	}
 	next = MIN(next, keepalive_due(o));
 	return MIN(next, stale_next(l));
 }
 
 uint8_t *ret_link_drv_scratch(struct ret_client *c, size_t *cap)
 {
-	if (c->res.state == RES_RECEIVING) {
+	if (c->res.state == RES_RECEIVING || c->res.state == RES_SENDING) {
 		*cap = 0;
 		return NULL;
 	}

@@ -48,13 +48,16 @@ static K_SEM_DEFINE(receipt_sem, 0, K_SEM_MAX_LIMIT);
 static int sync_status;
 static unsigned int sync_received;
 
-/* Replies are sent from the main thread, after the sync. */
+/* Replies are sent from the main thread, after the sync. One quoting a
+ * message longer than one packet goes DIRECT.
+ */
+#define REPLY_MAX MIN(1024, RET_LXMF_DIRECT_MAX_CONTENT)
 struct reply {
 	uint8_t to[RET_DEST_HASH_LEN];
 	uint16_t len;
-	char text[RET_LXMF_MAX_CONTENT];
+	char text[REPLY_MAX];
 };
-K_MSGQ_DEFINE(reply_q, sizeof(struct reply), 8, 4);
+K_MSGQ_DEFINE(reply_q, sizeof(struct reply), 4, 4);
 
 static void hex(const uint8_t *b, size_t n, char *out)
 {
@@ -100,7 +103,8 @@ static void on_lxmf(const struct ret_lxmf_message *m, void *user)
 		return;
 	}
 
-	struct reply r;
+	/* static: the client thread's only, and kept off its stack. */
+	static struct reply r;
 	size_t room = sizeof(r.text) - strlen(REPLY_PREFIX);
 
 	memcpy(r.to, m->source, sizeof(r.to));
@@ -143,7 +147,7 @@ static bool parse_hash(const char *s, uint8_t out[RET_DEST_HASH_LEN])
  */
 static void send_and_confirm(const uint8_t *contact, int wake)
 {
-	struct reply r;
+	static struct reply r; /* main thread only */
 	int pending = 0;
 	char msg[32];
 
@@ -153,7 +157,7 @@ static void send_and_confirm(const uint8_t *contact, int wake)
 			char text[65];
 
 			snprintf(text, sizeof(text), "%.*s", (int)MIN(r.len, 64), r.text);
-			LOG_INF("REPLY SENT %s", text);
+			LOG_INF("REPLY SENT %s (%u bytes)", text, r.len);
 			pending++;
 		}
 	}

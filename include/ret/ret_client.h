@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <zephyr/sys/util.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +46,8 @@ enum ret_receipt_status {
 	RET_RECEIPT_FAILED,
 	/** Sent, but the connection dropped before a proof arrived. */
 	RET_RECEIPT_DISCONNECTED,
+	/** The recipient refused it (an LXMF DIRECT message too large for it). */
+	RET_RECEIPT_REJECTED,
 };
 
 struct ret_announce_info {
@@ -65,7 +69,8 @@ typedef void (*ret_announce_cb_t)(const struct ret_announce_info *info, void *us
 
 /**
  * Called on the client thread when a send resolves. @p packet_hash is
- * all zero for RET_RECEIPT_FAILED before the packet was built.
+ * all zero for RET_RECEIPT_FAILED before the packet was built. For an
+ * LXMF message sent DIRECT it is the LXMF message hash instead.
  */
 typedef void (*ret_receipt_cb_t)(const uint8_t packet_hash[RET_PACKET_HASH_LEN],
 				 enum ret_receipt_status status, uint32_t rtt_ms, void *user);
@@ -221,23 +226,69 @@ int ret_client_resume(struct ret_client *client);
 /* --- LXMF ----------------------------------------------------------- */
 
 /** Largest title + content of one opportunistic LXMF message. */
-#define RET_LXMF_MAX_CONTENT 287
+#define RET_LXMF_OPPORTUNISTIC_MAX_CONTENT 287
 
 /**
- * Send an LXMF message (opportunistic: one encrypted packet) to the
- * lxmf.delivery address @p dest_hash, signed by the client's identity,
- * with empty fields. Needs a client configured with on_lxmf, and a wall
- * clock: LXMF timestamps are real time, taken from SYS_CLOCK_REALTIME.
- * Delivery is reported through @p cb as for ret_client_send(), which it
- * uses (including holding the send while a path is requested). Packs and
- * signs on the calling thread: about 1.5 KB of stack.
+ * Largest title + content of an LXMF message sent DIRECT: the packed
+ * message (about 117 bytes of overhead at most) must fit the DIRECT pool
+ * and, encrypted as a Resource stream, CONFIG_RET_RESOURCE_MAX_SIZE. 0 when
+ * CONFIG_RET_LXMF_DIRECT_POOL turns DIRECT sending off.
+ */
+#define RET_LXMF_DIRECT_MAX_CONTENT                                                               \
+	(CONFIG_RET_LXMF_DIRECT_POOL == 0                                                         \
+		 ? 0                                                                              \
+		 : MIN(CONFIG_RET_LXMF_DIRECT_POOL,                                               \
+		       ((CONFIG_RET_RESOURCE_MAX_SIZE - 48) / 16) * 16 - 5) -                     \
+			   117)
+
+enum ret_lxmf_method {
+	/** Opportunistic when it fits one packet, otherwise DIRECT (as LXMF). */
+	RET_LXMF_METHOD_AUTO,
+	/** One encrypted packet: title + content up to
+	 *  RET_LXMF_OPPORTUNISTIC_MAX_CONTENT.
+	 */
+	RET_LXMF_METHOD_OPPORTUNISTIC,
+	/** Over a link to the recipient: one link packet, or a Resource for
+	 *  a message larger than one (up to RET_LXMF_DIRECT_MAX_CONTENT).
+	 */
+	RET_LXMF_METHOD_DIRECT,
+};
+
+/**
+ * Send an LXMF message to the lxmf.delivery address @p dest_hash, signed
+ * by the client's identity, with empty fields. Needs a client configured
+ * with on_lxmf, and a wall clock: LXMF timestamps are real time, taken
+ * from SYS_CLOCK_REALTIME. Packs and signs on the calling thread: about
+ * 1.5 KB of stack.
  *
- * @retval -EMSGSIZE title + content over RET_LXMF_MAX_CONTENT
- * @retval -EINVAL client not configured for LXMF
+ * Opportunistic: delivery is reported through @p cb as for
+ * ret_client_send(), which it uses (including holding the send while a
+ * path is requested).
+ *
+ * DIRECT: the message waits in the DIRECT queue
+ * (CONFIG_RET_LXMF_DIRECT_QUEUE, CONFIG_RET_LXMF_DIRECT_POOL) until the
+ * client's link is free (no application link, no sync), then goes over a
+ * link to the recipient, retried on a new link up to
+ * CONFIG_RET_LXMF_DIRECT_ATTEMPTS times. @p cb reports RET_RECEIPT_DELIVERED
+ * once the recipient proved it, RET_RECEIPT_REJECTED if it refused it,
+ * RET_RECEIPT_TIMEOUT or RET_RECEIPT_FAILED after the last attempt, or
+ * RET_RECEIPT_DISCONNECTED when the client is suspended first. While a
+ * DIRECT delivery holds the link, the application's link calls fail with
+ * -EBUSY and a sync waits for it.
+ *
+ * @retval -EMSGSIZE title + content too large for the method
+ * @retval -ENOTSUP RET_LXMF_METHOD_DIRECT with DIRECT sending off
+ * @retval -EINVAL client not configured for LXMF, or an unknown method
  * @retval -ENODATA the wall clock is not set (before 2020)
  * @retval -ENOTCONN client not started
- * @retval -EAGAIN send queue full
+ * @retval -EAGAIN send queue, or DIRECT queue, full
  */
+int ret_lxmf_send_method(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HASH_LEN],
+			 enum ret_lxmf_method method, const uint8_t *title, size_t title_len,
+			 const uint8_t *content, size_t content_len, ret_receipt_cb_t cb,
+			 void *user);
+
+/** ret_lxmf_send_method() with RET_LXMF_METHOD_AUTO. */
 int ret_lxmf_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HASH_LEN],
 		  const uint8_t *title, size_t title_len, const uint8_t *content,
 		  size_t content_len, ret_receipt_cb_t cb, void *user);
@@ -246,7 +297,7 @@ int ret_lxmf_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HA
  * Called on the client thread when a sync ends: @p status 0 and the
  * number of messages delivered (through on_lxmf, as they arrived), or a
  * negative errno: -EACCES (the node refused us), -ETIMEDOUT, -ECONNRESET,
- * -ENOTCONN, -EBUSY (a link is already open), -EHOSTUNREACH (no path to
+ * -ENOTCONN, -EBUSY (the application's link is open), -EHOSTUNREACH (no path to
  * the node), -EFBIG (a response too large for CONFIG_RET_RESOURCE_MAX_SIZE:
  * the node's list of ids holds about 240 at the default 8 KB),
  * -EPROTO/-EBADMSG (an unexpected answer), -EALREADY.
@@ -261,7 +312,11 @@ typedef void (*ret_lxmf_sync_cb_t)(int status, unsigned int received, void *user
  * Messages over the transfer limit are left at the node and logged.
  * Items that are not ours, undecryptable, refused (replay, age) or badly
  * signed are acknowledged anyway, so they are deleted at the node. While
- * a sync runs, the application's link calls fail with -EBUSY.
+ * a sync runs, the application's link calls fail with -EBUSY, and DIRECT
+ * LXMF messages wait. A sync asked for while a DIRECT delivery holds the
+ * link starts once the message in flight is done; one still waiting
+ * when the connection drops starts after the reconnect, and one waiting
+ * when the client is suspended ends with -ECONNRESET.
  *
  * @retval -EINVAL client not configured for LXMF
  * @retval -ENOTCONN client not started

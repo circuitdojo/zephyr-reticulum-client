@@ -452,8 +452,8 @@ void ret_lxmf_sync_drv_start(struct ret_client *c, const struct send_req *r)
 		err = -EALREADY;
 	} else if (c->state != RET_STATE_CONNECTED || c->connecting) {
 		err = -ENOTCONN;
-	} else if (c->out.l.state != LINK_NONE) {
-		err = -EBUSY;
+	} else if (c->out.l.state != LINK_NONE && !ret_lxmf_direct_drv_owns_link(c)) {
+		err = -EBUSY; /* the application's link */
 	}
 	if (err) {
 		if (r->sync_cb != NULL) {
@@ -466,10 +466,40 @@ void ret_lxmf_sync_drv_start(struct ret_client *c, const struct send_req *r)
 	s->active = true;
 	s->cb = r->sync_cb;
 	s->user = r->user;
+	if (c->out.l.state != LINK_NONE) {
+		/* A DIRECT delivery holds the link: it gives it up after the
+		 * message in flight, then service() opens ours.
+		 */
+		LOG_INF("sync: waiting for a DIRECT delivery to finish");
+		s->phase = SYNC_WAITING;
+		memcpy(s->node, r->dest_hash, RET_TRUNC_HASH_LEN);
+		return;
+	}
 	s->phase = SYNC_LINKING;
 	memcpy(open.dest_hash, r->dest_hash, RET_DEST_HASH_LEN);
 	/* Not inside a link callback: the driver can be called directly. */
 	ret_link_drv_open(c, &open);
+}
+
+bool ret_lxmf_sync_drv_waiting(const struct ret_client *c)
+{
+	return c->sync.active && c->sync.phase == SYNC_WAITING;
+}
+
+void ret_lxmf_sync_drv_abort_waiting(struct ret_client *c, int err)
+{
+	struct lxmf_sync *s = &c->sync;
+	ret_lxmf_sync_cb_t cb = s->cb;
+	void *user = s->user;
+
+	if (!ret_lxmf_sync_drv_waiting(c)) {
+		return;
+	}
+	memset(s, 0, sizeof(*s));
+	LOG_INF("sync done: %d, 0 message(s)", err);
+	if (cb != NULL) {
+		cb(err, 0, user);
+	}
 }
 
 void ret_lxmf_sync_drv_service(struct ret_client *c)
@@ -483,6 +513,14 @@ void ret_lxmf_sync_drv_service(struct ret_client *c)
 	};
 	enum sync_pending p = s->pending;
 
+	if (s->active && s->phase == SYNC_WAITING && c->out.l.state == LINK_NONE) {
+		struct send_req open = { .kind = REQ_LINK_OPEN, .link_cb = sync_link, .user = c };
+
+		s->phase = SYNC_LINKING;
+		memcpy(open.dest_hash, s->node, RET_TRUNC_HASH_LEN);
+		ret_link_drv_open(c, &open);
+		return;
+	}
 	if (!s->active || p == SYNC_PEND_NONE) {
 		return;
 	}
@@ -518,6 +556,10 @@ int64_t ret_lxmf_sync_drv_next_event(const struct ret_client *c)
 {
 	const struct lxmf_sync *s = &c->sync;
 
+	if (s->active && s->phase == SYNC_WAITING) {
+		/* The DIRECT delivery's own events wake the loop meanwhile. */
+		return c->out.l.state == LINK_NONE ? 0 : INT64_MAX;
+	}
 	if (!s->active || s->pending == SYNC_PEND_NONE) {
 		return INT64_MAX;
 	}

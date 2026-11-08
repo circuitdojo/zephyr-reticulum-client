@@ -618,8 +618,10 @@ static void process_link_req(struct ret_client *c, const struct send_req *r)
 
 	if (c->state != RET_STATE_CONNECTED || c->connecting) {
 		err = -ENOTCONN;
-	} else if (ret_lxmf_sync_drv_owns_link(c)) {
-		/* A sync drives the link itself; nothing queued is its. */
+	} else if (ret_lxmf_sync_drv_owns_link(c) || ret_lxmf_direct_drv_owns_link(c)) {
+		/* A sync or a DIRECT delivery drives the link itself; nothing
+		 * queued is theirs.
+		 */
 		err = -EBUSY;
 	}
 	if (err) {
@@ -803,6 +805,7 @@ static void run_connected(struct ret_client *c)
 
 		next = MIN(next, ret_link_drv_next_event(c));
 		next = MIN(next, ret_lxmf_sync_drv_next_event(c));
+		next = MIN(next, ret_lxmf_direct_drv_next_event(c));
 		int n = zsock_poll(fds, ARRAY_SIZE(fds), poll_timeout_ms(next));
 
 		if (n < 0) {
@@ -851,6 +854,7 @@ static void run_connected(struct ret_client *c)
 		}
 		ret_link_drv_service(c);
 		ret_lxmf_sync_drv_service(c);
+		ret_lxmf_direct_drv_service(c);
 		if (c->conn_broken) {
 			return;
 		}
@@ -974,11 +978,14 @@ static void suspended(struct ret_client *c)
 			free_held(&c->held[i], RET_RECEIPT_DISCONNECTED, true);
 		}
 	}
+	ret_lxmf_sync_drv_abort_waiting(c, -ECONNRESET);
+	ret_lxmf_direct_drv_fail_all(c, RET_RECEIPT_DISCONNECTED);
 	set_state(c, RET_STATE_SUSPENDED);
 	while (atomic_get(&c->want_suspended)) {
 		if (zsock_poll(&pfd, 1, -1) > 0) {
 			drain_eventfd(c);
 			(void)process_queue(c);
+			ret_lxmf_direct_drv_fail_all(c, RET_RECEIPT_FAILED);
 		}
 	}
 }
@@ -1165,11 +1172,17 @@ int ret_client_start(struct ret_client *c)
 		}
 	}
 
+	ret_lxmf_direct_drv_init(c);
 	k_thread_create(&ret_thread, ret_stack, K_THREAD_STACK_SIZEOF(ret_stack), client_thread,
 			c, NULL, NULL, CONFIG_RET_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&ret_thread, "ret_client");
 	c->started = true;
 	return 0;
+}
+
+void ret_client_wake(struct ret_client *c)
+{
+	(void)zvfs_eventfd_write(c->efd, 1);
 }
 
 int ret_client_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LEN],

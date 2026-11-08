@@ -11,7 +11,9 @@ node has accepted each. Python computes the propagation stamps.
 
 Lines meant for scripts start with a fixed tag:
   NODE READY, SENDER READY <lxmf address>, TARGET <address>, DEPOSITED <content>,
-  DEPOSIT FAILED <content>
+  DEPOSIT FAILED <content>, RECEIVED <validated|unverified> <source> <content>
+  (what the device sends back; content over 64 characters as its words
+  without the '.' padding and its length)
 --make-node-identity <path> creates an identity file for lxmd and prints
 the lxmf.propagation hash it will serve.
 """
@@ -70,6 +72,12 @@ def main() -> None:
         help="a second round: wait for <go-file>.2, then deposit N 'later #n' messages",
     )
     ap.add_argument(
+        "--later-size",
+        type=int,
+        default=0,
+        help="pad the 'later #n' messages' content with '.' to this many bytes",
+    )
+    ap.add_argument(
         "--linger",
         action="store_true",
         help="stay attached after depositing (answering path requests) until killed",
@@ -97,6 +105,15 @@ def main() -> None:
         identity=RNS.Identity(), storagepath=tempfile.mkdtemp(prefix="ret-lxmf-send-")
     )
     source = router.register_delivery_identity(identity, display_name="ret-sender")
+
+    def received(message: LXMessage) -> None:
+        content = message.content_as_string()
+        if len(content) > 64:
+            content = f"{content.rstrip('.').strip()} ({len(content)} bytes)"
+        state = "validated" if message.signature_validated else "unverified"
+        out(f"RECEIVED {state} {message.source_hash.hex()} {content}")
+
+    router.register_delivery_callback(received)
     node = bytes.fromhex(args.node)
     router.set_outbound_propagation_node(node)
     # A freshly started lxmd can take many seconds to answer its first
@@ -153,7 +170,11 @@ def main() -> None:
         wait_go(f"{args.go_file}.2" if args.go_file else None)
         ok = (
             deposit(
-                router, dest, source, [f"later #{n}" for n in range(1, args.then + 1)], args.timeout
+                router,
+                dest,
+                source,
+                [later_text(n, args.later_size) for n in range(1, args.then + 1)],
+                args.timeout,
             )
             and ok
         )
@@ -161,6 +182,10 @@ def main() -> None:
     while args.linger:
         time.sleep(1)
     sys.exit(0 if ok else 1)
+
+
+def later_text(n: int, size: int) -> str:
+    return f"later #{n} ".ljust(size, ".") if size else f"later #{n}"
 
 
 def deposit(router, dest, source, texts, timeout) -> bool:
