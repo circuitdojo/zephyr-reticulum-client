@@ -10,7 +10,7 @@ node has accepted each. Python computes the propagation stamps.
         --to-name ret-lxmf --count 3
 
 Lines meant for scripts start with a fixed tag:
-  SENDER READY <lxmf address>, TARGET <address>, DEPOSITED <content>,
+  NODE READY, SENDER READY <lxmf address>, TARGET <address>, DEPOSITED <content>,
   DEPOSIT FAILED <content>
 --make-node-identity <path> creates an identity file for lxmd and prints
 the lxmf.propagation hash it will serve.
@@ -97,7 +97,18 @@ def main() -> None:
         identity=RNS.Identity(), storagepath=tempfile.mkdtemp(prefix="ret-lxmf-send-")
     )
     source = router.register_delivery_identity(identity, display_name="ret-sender")
-    router.set_outbound_propagation_node(bytes.fromhex(args.node))
+    node = bytes.fromhex(args.node)
+    router.set_outbound_propagation_node(node)
+    # A freshly started lxmd can take many seconds to answer its first
+    # path request: have the path before anyone starts timing deposits.
+    deadline = time.time() + args.timeout
+    while not RNS.Transport.has_path(node):
+        if time.time() > deadline:
+            out("DEPOSIT FAILED no path to the node")
+            sys.exit(1)
+        RNS.Transport.request_path(node)
+        time.sleep(1)
+    out("NODE READY")
     out(f"SENDER READY {source.hash.hex()}")
 
     target = {}

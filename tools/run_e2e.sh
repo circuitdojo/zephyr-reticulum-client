@@ -35,7 +35,7 @@
 #             message verifies with nothing but the kept key.
 #
 # ret_lxmf_sleep build (the sleepy node):
-#   sleep     3 wakes, 25 s apart: each resumes, reconnects, announces,
+#   sleep     3 wakes, 30 s apart: each resumes, reconnects, announces,
 #             syncs and suspends (socket closed). Messages deposited while
 #             it sleeps arrive at the next wake -> syncs of 0, 2, 1, the
 #             last one verified, exit 0
@@ -193,7 +193,7 @@ if needs store-forward sleep; then
 		-DCONFIG_RET_SERVER_PORT=$PORT \
 		-DCONFIG_RET_SLEEP_PROPAGATION_NODE=\""$NODE"\" \
 		-DCONFIG_RET_SLEEP_CYCLES=3 \
-		-DCONFIG_RET_SLEEP_INTERVAL_S=25 \
+		-DCONFIG_RET_SLEEP_INTERVAL_S=30 \
 		-DCONFIG_RET_SLEEP_WAKE_TIMEOUT_S=30 \
 		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
 		>"$LOGS/build-$(basename "$BUILD_SLEEP").log" 2>&1 ||
@@ -415,7 +415,7 @@ scenario_store_forward() {
 		--go-file "$go" --linger >"$send_log" 2>&1 &
 	local send_pid=$!
 	pids+=("$send_pid")
-	wait_for 30 "sender ready" grep -q "^SENDER READY" "$send_log"
+	wait_for 120 "sender ready (path to the node)" grep -q "^SENDER READY" "$send_log"
 	local sender
 	sender=$(awk '/^SENDER READY/ {print $3; exit}' "$send_log")
 
@@ -492,12 +492,12 @@ scenario_sleep() {
 		>"$send_log" 2>&1 &
 	local send_pid=$!
 	pids+=("$send_pid")
-	wait_for 30 "sender ready" grep -q "^SENDER READY" "$send_log"
+	wait_for 120 "sender ready (path to the node)" grep -q "^SENDER READY" "$send_log"
 	local sender
 	sender=$(awk '/^SENDER READY/ {print $3; exit}' "$send_log")
 
 	RC=0
-	timeout 240 "$BUILD_SLEEP/zephyr/zephyr.exe" --seed-random --flash="$FLASH" >"$dev" 2>&1 &
+	timeout 300 "$BUILD_SLEEP/zephyr/zephyr.exe" --seed-random --flash="$FLASH" >"$dev" 2>&1 &
 	local dev_pid=$!
 	pids+=("$dev_pid")
 	# Deposit only while it sleeps: after wake 1, then after wake 2.
