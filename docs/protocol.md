@@ -9,14 +9,14 @@ regenerate the test vectors.
 - HDLC framing, no CRC: `0x7E | escape(pkt) | 0x7E`.
 - Escaping: `0x7D → 7D 5D` first, then `0x7E → 7D 5E`.
 - KISS is off by default.
-- The receiver must tolerate back-to-back flags (empty frames) and drop frames larger than the 500-byte MTU.
+- The receiver must tolerate back-to-back flags (empty frames) and drop frames larger than the 500-byte MTU (plus the access code on a protected interface).
 
 **Packet header (`Packet.py`)**
 - Byte 0 is the flags byte:
 
   | Bit(s) | Field |
   |---|---|
-  | 7 | IFAC (must be 0) |
+  | 7 | IFAC (set only on the wire of a protected interface; see "Interface access codes") |
   | 6 | header_type (0 = H1, 1 = H2) |
   | 5 | context_flag |
   | 4 | transport_type (0 = BROADCAST, 1 = TRANSPORT) |
@@ -64,6 +64,17 @@ regenerate the test vectors.
   - It rebroadcasts announces from local clients out to TCP clients (Transport.py:2351).
 
 **Gotcha:** Monocypher's default `crypto_eddsa_*` uses BLAKE2b. Use `crypto_ed25519_check` from `src/optional/monocypher-ed25519.c`, which uses SHA-512 per RFC 8032.
+
+## Interface access codes (Reticulum.py interface setup; Transport.handle_outgoing_ifac, handle_ifac)
+
+An interface with `network_name` and/or `passphrase` (a "protected" interface) signs every packet and drops packets without a valid code, both ways. ret-client does the same with `CONFIG_RET_IFAC` (`src/ret_ifac.c`), matching RNS byte for byte (vectors from RNS's own functions).
+
+- **Key:** `origin = SHA256(network_name)` if set, then `SHA256(passphrase)` if set. `ifac_key = HKDF-SHA256(64, ikm = SHA256(origin), salt = IFAC_SALT adf54d88…cff8, info = "")`. `Identity.from_bytes(ifac_key)` signs: X25519 key then Ed25519 seed.
+- **Size:** `ifac_size` in bytes: config `ifac_size` bits / 8, 16 for TCP interfaces by default. The packet MTU stays 500 (RNS reserves `IFAC_MIN_SIZE` 1); the frame grows by the size.
+- **Sending:** `ifac = Ed25519_sign(raw)[-size:]`. `mask = HKDF(len(raw) + size, ikm = ifac, salt = ifac_key)`. Frame = `[raw0 | 0x80, raw1] | ifac | raw[2:]`, XORed with the mask except the code bytes, then byte 0 `| 0x80` again.
+- **Receiving:** take the code at `[2, 2 + size)`, unmask the rest with `HKDF(len(frame), ikm = code, salt = ifac_key)`, clear the flag, drop the code, and sign the result again: its last `size` bytes must equal the code. Only the signature's tail travels, so checking costs a full signature.
+- **Mismatch:** a protected interface drops packets without the flag or with a wrong code; an open one drops flagged packets. RNS logs "Invalid IFAC" on the server side; ret-client logs the first drop per connection.
+- **Cost:** one Ed25519 signature per packet sent and per packet received, every announce the hub forwards included.
 
 ## Path requests (Transport.request_path, path_request_handler)
 

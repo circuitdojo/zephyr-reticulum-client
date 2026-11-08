@@ -64,6 +64,7 @@ zephyr_library_sources(
     ../../src/ret_link.c
     ../../src/ret_mp.c
     ../../src/ret_resource.c
+    ../../src/ret_ifac.c
     ../../src/ret_lxmf.c
     ../../src/ret_lxmf_seen.c
     ${RET_MONOCYPHER_DIR}/src/monocypher.c

@@ -14,6 +14,7 @@
 #include "ret_announce.h"
 #include "ret_crypto.h"
 #include "ret_destinations.h"
+#include "ret_ifac.h"
 #include "ret_receipt.h"
 #include "vectors_rns.h"
 
@@ -596,3 +597,110 @@ ZTEST(receipt, test_fail_all_and_capacity)
 }
 
 ZTEST_SUITE(receipt, NULL, setup, receipt_before, NULL, NULL);
+
+/* --- Interface access codes ------------------------------------------- */
+
+ZTEST(ifac, test_key_matches_rns)
+{
+	struct ret_ifac f;
+
+	zassert_ok(ret_ifac_init(&f, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 16));
+	zassert_mem_equal(f.key, v_ifac_key, sizeof(v_ifac_key));
+	zassert_ok(ret_ifac_init(&f, V_IFAC_NETNAME, NULL, 16));
+	zassert_mem_equal(f.key, v_ifac_key_name, sizeof(v_ifac_key_name));
+	/* Empty is the same as unset. */
+	zassert_ok(ret_ifac_init(&f, "", V_IFAC_PASSPHRASE, 16));
+	zassert_mem_equal(f.key, v_ifac_key_pass, sizeof(v_ifac_key_pass));
+
+	zassert_equal(ret_ifac_init(&f, NULL, "", 16), -EINVAL);
+	zassert_equal(ret_ifac_init(&f, V_IFAC_NETNAME, NULL, 0), -EINVAL);
+	zassert_equal(ret_ifac_init(&f, V_IFAC_NETNAME, NULL, 65), -EINVAL);
+}
+
+ZTEST(ifac, test_apply_matches_rns)
+{
+	struct ret_ifac f;
+	uint8_t out[RET_MTU + RET_IFAC_MAX_SIZE];
+	int n;
+
+	/* Ed25519 and HKDF are deterministic: the same bytes as RNS. */
+	zassert_ok(ret_ifac_init(&f, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 16));
+	n = ret_ifac_apply(&f, v_announce, sizeof(v_announce), out, sizeof(out));
+	zassert_equal(n, sizeof(v_ifac_announce));
+	zassert_mem_equal(out, v_ifac_announce, n);
+	n = ret_ifac_apply(&f, v_data_h1, sizeof(v_data_h1), out, sizeof(out));
+	zassert_equal(n, sizeof(v_ifac_data));
+	zassert_mem_equal(out, v_ifac_data, n);
+
+	zassert_ok(ret_ifac_init(&f, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 8));
+	n = ret_ifac_apply(&f, v_data_h1, sizeof(v_data_h1), out, sizeof(out));
+	zassert_equal(n, sizeof(v_ifac_data_8));
+	zassert_mem_equal(out, v_ifac_data_8, n);
+
+	zassert_equal(ret_ifac_apply(&f, v_data_h1, sizeof(v_data_h1), out, sizeof(v_data_h1) + 7),
+		      -ENOBUFS);
+	zassert_equal(ret_ifac_apply(&f, v_ifac_data_8, sizeof(v_ifac_data_8), out, sizeof(out)),
+		      -EINVAL, "already flagged");
+}
+
+ZTEST(ifac, test_strip_rns_frames)
+{
+	struct ret_ifac f;
+	uint8_t raw[RET_MTU];
+	int n;
+
+	zassert_ok(ret_ifac_init(&f, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 16));
+	n = ret_ifac_strip(&f, v_ifac_announce, sizeof(v_ifac_announce), raw, sizeof(raw));
+	zassert_equal(n, sizeof(v_announce));
+	zassert_mem_equal(raw, v_announce, n);
+	n = ret_ifac_strip(&f, v_ifac_data, sizeof(v_ifac_data), raw, sizeof(raw));
+	zassert_equal(n, sizeof(v_data_h1));
+	zassert_mem_equal(raw, v_data_h1, n);
+
+	/* In place, as the client strips inside its receive buffer. */
+	uint8_t frame[sizeof(v_ifac_announce)];
+
+	memcpy(frame, v_ifac_announce, sizeof(frame));
+	n = ret_ifac_strip(&f, frame, sizeof(frame), frame, sizeof(frame));
+	zassert_equal(n, sizeof(v_announce));
+	zassert_mem_equal(frame, v_announce, n);
+	/* And a tampered one in place is rejected and wiped. */
+	memcpy(frame, v_ifac_announce, sizeof(frame));
+	frame[40] ^= 0x01;
+	zassert_equal(ret_ifac_strip(&f, frame, sizeof(frame), frame, sizeof(frame)), -EACCES);
+}
+
+ZTEST(ifac, test_strip_rejects)
+{
+	struct ret_ifac f;
+	struct ret_ifac other;
+	uint8_t frame[sizeof(v_ifac_data)];
+	uint8_t raw[RET_MTU];
+	/* A flipped bit in the header, the code, and the payload. */
+	const size_t offsets[] = { 1, 2, 17, 18, sizeof(frame) - 1 };
+
+	zassert_ok(ret_ifac_init(&f, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 16));
+	for (size_t i = 0; i < ARRAY_SIZE(offsets); i++) {
+		memcpy(frame, v_ifac_data, sizeof(frame));
+		frame[offsets[i]] ^= 0x01;
+		zassert_equal(ret_ifac_strip(&f, frame, sizeof(frame), raw, sizeof(raw)), -EACCES,
+			      "offset %zu", offsets[i]);
+	}
+
+	/* Another network, or another code size. */
+	zassert_ok(ret_ifac_init(&other, V_IFAC_NETNAME, "wrong", 16));
+	zassert_equal(ret_ifac_strip(&other, v_ifac_data, sizeof(v_ifac_data), raw, sizeof(raw)),
+		      -EACCES);
+	zassert_ok(ret_ifac_init(&other, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 8));
+	zassert_equal(ret_ifac_strip(&other, v_ifac_data, sizeof(v_ifac_data), raw, sizeof(raw)),
+		      -EACCES);
+
+	/* No flag (a plain packet), too short, no room. */
+	zassert_equal(ret_ifac_strip(&f, v_data_h1, sizeof(v_data_h1), raw, sizeof(raw)), -EBADMSG);
+	zassert_equal(ret_ifac_strip(&f, v_ifac_data, 18, raw, sizeof(raw)), -EBADMSG);
+	zassert_equal(ret_ifac_strip(&f, v_ifac_data, sizeof(v_ifac_data), raw,
+				     sizeof(v_data_h1) - 1),
+		      -ENOBUFS);
+}
+
+ZTEST_SUITE(ifac, NULL, setup, NULL, NULL, NULL);

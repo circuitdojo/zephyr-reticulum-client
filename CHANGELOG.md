@@ -4,6 +4,12 @@
 
 ### Added
 
+- Interface access codes (`CONFIG_RET_IFAC`): the client joins an rnsd interface protected with
+  `network_name` and/or `passphrase`, as RNS does (byte for byte against RNS's own functions).
+  Set them with `ret_client_config.ifac_network_name` / `ifac_passphrase` or
+  `CONFIG_RET_IFAC_NETWORK_NAME` / `CONFIG_RET_IFAC_PASSPHRASE`; `CONFIG_RET_IFAC_SIZE` must match
+  the interface's `ifac_size` (16 bytes for TCP). Costs one Ed25519 signature per packet each
+  way. e2e: `ifac` on a protected test interface, with the right and a wrong passphrase.
 - `samples/ret_chat`: LXMF chat over the console with the Zephyr shell: see who announced
   (`heard`), name addresses (`contact`, kept in settings), send by name (`msg send`: opportunistic
   or DIRECT by length, delivery reported), and read the inbox (`msg inbox`, `msg read`, RAM only).

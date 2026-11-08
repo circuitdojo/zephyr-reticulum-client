@@ -20,6 +20,8 @@ import RNS
 from RNS.Cryptography import Token, X25519PrivateKey, hkdf
 
 NAME = "retclient.echo"
+IFAC_NETNAME = "ret-test"
+IFAC_PASSPHRASE = "correct horse battery staple"
 APP_DATA = b"ret-test"
 PLAINTEXT = b"hello #1"
 
@@ -546,6 +548,60 @@ def lxmf_vectors():
     }
 
 
+class IfacInterface:
+    """Just what Transport's IFAC functions read from an interface,
+    keyed as Reticulum.py (interface setup) derives it."""
+
+    def __init__(self, netname, passphrase, size):
+        origin = b""
+        if netname is not None:
+            origin += RNS.Identity.full_hash(netname.encode("utf-8"))
+        if passphrase is not None:
+            origin += RNS.Identity.full_hash(passphrase.encode("utf-8"))
+        self.ifac_key = RNS.Cryptography.hkdf(
+            length=64,
+            derive_from=RNS.Identity.full_hash(origin),
+            salt=RNS.Reticulum.IFAC_SALT,
+            context=None,
+        )
+        self.ifac_identity = RNS.Identity.from_bytes(self.ifac_key)
+        self.ifac_size = size
+        self.violations = 0
+
+    def ifac_violation(self, _reason):
+        self.violations += 1
+
+
+def ifac_vectors(announce, data):
+    """Interface access codes as Transport applies and checks them."""
+    both = IfacInterface(IFAC_NETNAME, IFAC_PASSPHRASE, 16)
+    name_only = IfacInterface(IFAC_NETNAME, None, 16)
+    pass_only = IfacInterface(None, IFAC_PASSPHRASE, 16)
+    short = IfacInterface(IFAC_NETNAME, IFAC_PASSPHRASE, 8)
+    out = {
+        "v_ifac_key": both.ifac_key,
+        "v_ifac_key_name": name_only.ifac_key,
+        "v_ifac_key_pass": pass_only.ifac_key,
+        "v_ifac_announce": RNS.Transport.handle_outgoing_ifac(both, announce),
+        "v_ifac_data": RNS.Transport.handle_outgoing_ifac(both, data),
+        "v_ifac_data_8": RNS.Transport.handle_outgoing_ifac(short, data),
+    }
+    for iface, key, plain in (
+        (both, "v_ifac_announce", announce),
+        (both, "v_ifac_data", data),
+        (short, "v_ifac_data_8", data),
+    ):
+        ok, raw = RNS.Transport.handle_ifac(out[key], iface)
+        assert ok and raw == plain, key
+        # The legacy byte-by-byte form produces the same bytes.
+        assert RNS.Transport.handle_outgoing_ifac_legacy(iface, plain) == out[key], key
+    bad = bytearray(out["v_ifac_data"])
+    bad[-1] ^= 1
+    assert RNS.Transport.handle_ifac(bytes(bad), both)[0] is False
+    assert RNS.Transport.handle_ifac(out["v_ifac_data"], pass_only)[0] is False
+    return out
+
+
 def c_array(name: str, b: bytes) -> str:
     rows = []
     for i in range(0, len(b), 12):
@@ -713,6 +769,8 @@ def main() -> None:
         f'#define V_NAME "{NAME}"',
         f'#define V_APP_DATA "{APP_DATA.decode()}"',
         f'#define V_PLAINTEXT "{PLAINTEXT.decode()}"',
+        f'#define V_IFAC_NETNAME "{IFAC_NETNAME}"',
+        f'#define V_IFAC_PASSPHRASE "{IFAC_PASSPHRASE}"',
         "",
         c_array("v_identity_prv", prv),
         c_array("v_identity_pub", pub),
@@ -729,6 +787,7 @@ def main() -> None:
         c_array("v_announce_real", announce_real),
         c_array("v_announce_path_response", announce_path_response),
         c_array("v_announce_max", announce_max),
+        *[c_array(k, v) for k, v in ifac_vectors(announce, data_h1).items()],
         c_array("v_path_request_dest", pr_hash),
         c_array("v_path_request_tag", pr_tag),
         c_array("v_path_request", path_request),

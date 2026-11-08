@@ -7,6 +7,10 @@
 #   ratchets  peer announces with enforced ratchets -> 3/3 delivered, exit 0
 #   no-prove  peer never proves                     -> 3 timeouts,    exit 1;
 #             a destination that never proved does not trip the watchdog
+#   ifac      the same as plain, on rnsd's protected interface (port 4244,
+#             network_name + passphrase): 3/3 delivered; then a device with
+#             the wrong passphrase hears nothing (it drops rnsd's packets)
+#             and gets nothing through
 #   echo      a link first (open, identify, "/echo" request, close), then the
 #             peer answers each message to the client's own destination
 #             (retclient.node), which decrypts and proves the reply; the
@@ -87,18 +91,24 @@ BUILD_LXMF="$TOP/build/ret_e2e-lxmf"
 BUILD_SF="$TOP/build/ret_e2e-sf"
 BUILD_SLEEP="$TOP/build/ret_e2e-sleep"
 BUILD_CHAT="$TOP/build/ret_e2e-chat"
+BUILD_IFAC="$TOP/build/ret_e2e-ifac"
+BUILD_IFAC_BAD="$TOP/build/ret_e2e-ifac-bad"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
 RNSD_CONFIG="$HERE/rnsd-test"
 PORT=4243
+# rnsd-test's protected interface, and its network name and passphrase.
+IFAC_PORT=4244
+IFAC_NETNAME="ret-test"
+IFAC_PASSPHRASE="correct horse battery staple"
 COUNT_NAME=3
 COUNT_HASH=6
 COUNT_LXMF=3
 COUNT_SF=12
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf lxmf-direct chat store-forward sleep late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove ifac echo lxmf lxmf-direct chat store-forward sleep late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -150,7 +160,8 @@ RNSD_PID=
 rnsd_log_n=0
 start_rnsd() {
 	rnsd_log_n=$((rnsd_log_n + 1))
-	"$RNSD" --config "$RNSD_CONFIG" -vv >"$LOGS/rnsd-$rnsd_log_n.log" 2>&1 &
+	# Unbuffered: rnsd is killed, not stopped, and its log is checked.
+	PYTHONUNBUFFERED=1 "$RNSD" --config "$RNSD_CONFIG" -vv >"$LOGS/rnsd-$rnsd_log_n.log" 2>&1 &
 	RNSD_PID=$!
 	pids+=("$RNSD_PID")
 	wait_for 30 "rnsd on port $PORT" port_open
@@ -178,6 +189,16 @@ mkdir -p "$LOGS"
 FLASH="$LOGS/flash.bin"
 
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
+if needs ifac; then
+	build "$BUILD_IFAC" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$IFAC_PORT -DCONFIG_RET_IFAC=y \
+		-DCONFIG_RET_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
+		-DCONFIG_RET_IFAC_PASSPHRASE=\""$IFAC_PASSPHRASE"\"
+	# Knows the peer's hash, so it transmits (path requests) at once.
+	build "$BUILD_IFAC_BAD" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$IFAC_PORT -DCONFIG_RET_IFAC=y \
+		-DCONFIG_RET_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
+		-DCONFIG_RET_IFAC_PASSPHRASE=\"wrong\" \
+		-DCONFIG_RET_SAMPLE_DEST_HASH=\""$("$PY" "$PEER_PROJECT/peer.py" --print-hash)"\"
+fi
 needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
 	-DCONFIG_RET_SAMPLE_LINK_TEST=y
 if needs lxmf lxmf-direct chat; then
@@ -330,6 +351,50 @@ scenario_announced() { # plain | ratchets | no-prove
 	seen=$(grep -c "ANNOUNCE VALID retclient.echo" "$dev_log" || true)
 	[ "$seen" -le "$sent" ] || fail "$name: $seen announce callbacks for $sent announces"
 	echo "   DONE $want_done/$COUNT_NAME delivered, $seen/$sent announces seen"
+}
+
+scenario_ifac() {
+	local peer_log="$LOGS/peer-ifac.log" dev_log="$LOGS/device-ifac.log"
+	local bad_log="$LOGS/device-ifac-bad.log" dest
+
+	start_peer "$peer_log" --announce-interval 3
+	dest=$(awk '/^PEER READY/ {print $3; exit}' "$peer_log")
+	run_device "$BUILD_IFAC/zephyr/zephyr.exe" "$dev_log"
+	[ $RC -eq 0 ] || fail "ifac: device exit $RC, want 0, see $dev_log"
+	grep -q 'IFAC on: with network name, with passphrase, 16-byte codes' "$dev_log" ||
+		fail "ifac: IFAC not on, see $dev_log"
+	! grep -q "ret-test\|correct horse" "$dev_log" ||
+		fail "ifac: the network name or passphrase was logged, see $dev_log"
+	grep -q "ANNOUNCE VALID retclient.echo $dest" "$dev_log" ||
+		fail "ifac: no valid announce through the protected interface"
+	check_messages ifac "$dev_log" "$peer_log" $COUNT_NAME proof
+	! grep -q "access code" "$dev_log" || fail "ifac: packets dropped, see $dev_log"
+
+	# The wrong passphrase: the TCP connection opens, but neither side
+	# accepts the other's packets. The build knows the peer's hash, so it
+	# sends (path requests) and rnsd must refuse them; it never gets a
+	# path, so it runs until stopped.
+	local before rnsd_log violations
+	rnsd_log="$LOGS/rnsd-$rnsd_log_n.log"
+	violations=$(grep -c "IFAC violation" "$rnsd_log" || true)
+	before=$(grep -c "^RECEIVED" "$peer_log" || true)
+	RC=0
+	timeout 20 "$BUILD_IFAC_BAD/zephyr/zephyr.exe" --seed-random --flash="$FLASH" \
+		>"$bad_log" 2>&1 || RC=$?
+	stop_peer
+	[ $RC -eq 124 ] || fail "ifac: wrong-passphrase device exit $RC, want a timeout, see $bad_log"
+	grep -q "dropping packets with a wrong access code" "$bad_log" ||
+		fail "ifac: the wrong-passphrase device did not drop rnsd's packets, see $bad_log"
+	! grep -q "ANNOUNCE VALID" "$bad_log" ||
+		fail "ifac: the wrong-passphrase device accepted an announce, see $bad_log"
+	[ "$(grep -c "^RECEIVED" "$peer_log" || true)" -eq "$before" ] ||
+		fail "ifac: something got through with the wrong passphrase, see $peer_log"
+	grep -q "path request for" "$bad_log" ||
+		fail "ifac: the wrong-passphrase device sent nothing, see $bad_log"
+	[ "$(grep -c "IFAC violation" "$rnsd_log" || true)" -gt "$violations" ] ||
+		fail "ifac: rnsd did not refuse the wrong-passphrase device, see $rnsd_log"
+	echo "   $COUNT_NAME/$COUNT_NAME delivered on the protected interface;"
+	echo "   the wrong passphrase heard nothing and got nothing through"
 }
 
 scenario_echo() {
@@ -862,6 +927,7 @@ for s in "${scenarios[@]}"; do
 	echo "== scenario $s"
 	case $s in
 	plain | ratchets | no-prove) scenario_announced "$s" ;;
+	ifac) scenario_ifac ;;
 	echo) scenario_echo ;;
 	lxmf) scenario_lxmf ;;
 	lxmf-direct) scenario_lxmf direct ;;
