@@ -8,6 +8,8 @@
  *             this value has been used, every one at or below it may have
  *   ret/lx/s/<n>  remembered LXMF message n: hash (16) | timestamp (double)
  *   ret/lx/f      the LXMF floor timestamp (double)
+ *   ret/lk/<n>    known LXMF sender n: address (16) | public key (64) |
+ *                 store order (u32)
  */
 
 #ifndef RET_STORAGE_H_
@@ -40,6 +42,21 @@ int ret_storage_save_aclk(uint64_t aclk);
  * unlike the identity.
  */
 int ret_storage_load_lxmf_seen(struct ret_lxmf_seen *s);
+
+/** One stored sender key, as ret/lk/<n> holds it. */
+struct ret_storage_known {
+	uint8_t dest[RET_TRUNC_HASH_LEN];
+	uint8_t pub[RET_PUBKEY_LEN];
+	uint32_t seq;
+};
+
+/**
+ * Load stored sender keys into @p out[0..count) (unused slots have seq 0
+ * and an all-zero address). An unreadable record resets them all.
+ */
+int ret_storage_load_known(struct ret_storage_known *out, size_t count);
+
+int ret_storage_save_known(size_t slot, const struct ret_storage_known *k);
 
 /** Persist slot @p slot, and the floor when @p floor changed. */
 int ret_storage_save_lxmf_seen(const struct ret_lxmf_seen *s, size_t slot, bool floor);

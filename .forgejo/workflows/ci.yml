@@ -71,7 +71,7 @@ jobs:
         # failed build.
         run: |
           set -o pipefail
-          for s in ret_basic ret_lxmf; do
+          for s in ret_basic ret_lxmf ret_lxmf_sleep; do
             west build -b native_sim ret-client/samples/$s -d build/$s -p --no-sysbuild 2>&1 | tee build/$s.log
             ! grep -q "warning:" build/$s.log
           done
@@ -137,7 +137,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build
-          for s in ret_basic ret_lxmf; do
+          for s in ret_basic ret_lxmf ret_lxmf_sleep; do
             west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/$s \
               -d build/${s}_nrf9151 -p 2>&1 | tee build/${s}_nrf9151.log
             ! grep -q ": warning:" build/${s}_nrf9151.log
@@ -149,6 +149,8 @@ jobs:
         # upload-artifact collects from.
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
+          # Not ret_lxmf_sleep: without a propagation node in an env/
+          # overlay its image refuses to run.
           for s in ret_basic ret_lxmf; do
             cp /ncs-workspace/build/${s}_nrf9151/merged.hex \
               "$GITHUB_WORKSPACE/dist/$s-circuitdojo_feather_nrf9151_ns.hex"

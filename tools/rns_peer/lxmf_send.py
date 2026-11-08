@@ -62,6 +62,18 @@ def main() -> None:
         default=os.path.join(here, "lxmf_sender_identity"),
         help="the sender's identity file, created on first run",
     )
+    ap.add_argument(
+        "--then",
+        type=int,
+        default=0,
+        metavar="N",
+        help="a second round: wait for <go-file>.2, then deposit N 'later #n' messages",
+    )
+    ap.add_argument(
+        "--linger",
+        action="store_true",
+        help="stay attached after depositing (answering path requests) until killed",
+    )
     ap.add_argument("--make-node-identity", metavar="PATH")
     ap.add_argument("--timeout", type=float, default=120.0)
     args = ap.parse_args()
@@ -107,25 +119,45 @@ def main() -> None:
         sys.exit(1)
     out(f"TARGET {target['hash'].hex()}")
 
-    if args.go_file:
+    dest = RNS.Destination(
+        target["identity"], RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery"
+    )
+
+    def wait_go(path):
+        if not path:
+            return
         deadline = time.time() + args.timeout
-        while not os.path.exists(args.go_file):
+        while not os.path.exists(path):
             if time.time() > deadline:
                 out("DEPOSIT FAILED no go file")
                 sys.exit(1)
             time.sleep(0.2)
 
-    dest = RNS.Destination(
-        target["identity"], RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery"
-    )
     texts = [f"{args.prefix}{n} ".ljust(args.size, ".") for n in range(1, args.count + 1)]
     if args.big:
         texts.append("big ".ljust(args.big, "."))
+    wait_go(args.go_file)
+    ok = deposit(router, dest, source, texts, args.timeout)
+    if args.then:
+        wait_go(f"{args.go_file}.2" if args.go_file else None)
+        ok = (
+            deposit(
+                router, dest, source, [f"later #{n}" for n in range(1, args.then + 1)], args.timeout
+            )
+            and ok
+        )
+    out("DEPOSITS DONE")
+    while args.linger:
+        time.sleep(1)
+    sys.exit(0 if ok else 1)
+
+
+def deposit(router, dest, source, texts, timeout) -> bool:
     ok = True
     for text in texts:
         msg = LXMessage(dest, source, text, "", desired_method=LXMessage.PROPAGATED)
         router.handle_outbound(msg)
-        deadline = time.time() + args.timeout
+        deadline = time.time() + timeout
         while msg.state not in (LXMessage.SENT, LXMessage.DELIVERED, LXMessage.FAILED):
             if time.time() > deadline:
                 break
@@ -136,7 +168,7 @@ def main() -> None:
         else:
             out(f"DEPOSIT FAILED {label} (state {msg.state})")
             ok = False
-    sys.exit(0 if ok else 1)
+    return ok
 
 
 if __name__ == "__main__":

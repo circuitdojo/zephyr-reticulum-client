@@ -58,21 +58,134 @@ static int64_t wall_now(void)
 	return (int64_t)now.tv_sec;
 }
 
+/* The lxmf.delivery address a public key gives. */
+static bool address_matches(const struct ret_client *c, const uint8_t dest[RET_TRUNC_HASH_LEN],
+			    const uint8_t pub[RET_PUBKEY_LEN])
+{
+	uint8_t id_hash[RET_TRUNC_HASH_LEN];
+	uint8_t want[RET_TRUNC_HASH_LEN];
+
+	return ret_identity_hash(pub, id_hash) == 0 &&
+	       ret_dest_hash(c->local_name_hash, id_hash, want) == 0 &&
+	       memcmp(want, dest, RET_TRUNC_HASH_LEN) == 0;
+}
+
+static int load_known(struct ret_client *c)
+{
+	static struct ret_storage_known stored[CONFIG_RET_LXMF_KNOWN_SENDERS];
+	int err = ret_storage_load_known(stored, ARRAY_SIZE(stored));
+
+	memset(c->lxmf_known, 0, sizeof(c->lxmf_known));
+	c->lxmf_known_seq = 0;
+	for (size_t i = 0; !err && i < ARRAY_SIZE(stored); i++) {
+		struct lxmf_known *k = &c->lxmf_known[i];
+
+		if (stored[i].seq == 0) {
+			continue;
+		}
+		/* The address binds the key: a record that disagrees is junk. */
+		if (!address_matches(c, stored[i].dest, stored[i].pub)) {
+			LOG_WRN("stored LXMF sender %u does not match its key: ignored",
+				(unsigned int)i);
+			continue;
+		}
+		k->used = true;
+		memcpy(k->dest, stored[i].dest, sizeof(k->dest));
+		memcpy(k->pub, stored[i].pub, sizeof(k->pub));
+		k->seq = stored[i].seq;
+		c->lxmf_known_seq = MAX(c->lxmf_known_seq, k->seq);
+	}
+	return err;
+}
+
 int ret_lxmf_drv_load(struct ret_client *c)
 {
+	int err;
+
 	c->lxmf_seen = (struct ret_lxmf_seen){
 		.entries = c->lxmf_seen_entries,
 		.count = ARRAY_SIZE(c->lxmf_seen_entries),
 		.max_age_s = CONFIG_RET_LXMF_MAX_AGE_DAYS * 86400U,
 		.max_future_s = CONFIG_RET_LXMF_MAX_FUTURE_S,
 	};
-	return ret_storage_load_lxmf_seen(&c->lxmf_seen);
+	err = ret_storage_load_lxmf_seen(&c->lxmf_seen);
+	return err ? err : load_known(c);
+}
+
+static struct lxmf_known *known_find(struct ret_client *c, const uint8_t *dest)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(c->lxmf_known); i++) {
+		if (c->lxmf_known[i].used &&
+		    memcmp(c->lxmf_known[i].dest, dest, RET_TRUNC_HASH_LEN) == 0) {
+			return &c->lxmf_known[i];
+		}
+	}
+	return NULL;
+}
+
+/* A verified message from a known sender: it goes to the back of the
+ * eviction order (in RAM only: no flash write per message; the stored
+ * order applies again after a reboot).
+ */
+static void known_touch(struct ret_client *c, const uint8_t *dest)
+{
+	struct lxmf_known *k = known_find(c, dest);
+
+	if (k != NULL) {
+		k->seq = ++c->lxmf_known_seq;
+	}
+}
+
+/* Keep a sender's key across reboots (once: the address binds the key). */
+static void known_store(struct ret_client *c, const uint8_t *dest, const uint8_t *pub)
+{
+	size_t slot = 0;
+
+	if (known_find(c, dest) != NULL) {
+		known_touch(c, dest);
+		return;
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(c->lxmf_known); i++) {
+		if (!c->lxmf_known[i].used) {
+			slot = i;
+			break;
+		}
+		if (c->lxmf_known[i].seq < c->lxmf_known[slot].seq) {
+			slot = i;
+		}
+	}
+
+	struct lxmf_known *k = &c->lxmf_known[slot];
+	struct ret_storage_known rec = { .seq = ++c->lxmf_known_seq };
+
+	k->used = true;
+	memcpy(k->dest, dest, sizeof(k->dest));
+	memcpy(k->pub, pub, sizeof(k->pub));
+	k->seq = rec.seq;
+	memcpy(rec.dest, k->dest, sizeof(rec.dest));
+	memcpy(rec.pub, k->pub, sizeof(rec.pub));
+	(void)ret_storage_save_known(slot, &rec);
+	LOG_INF("keeping the key of LXMF sender %02x%02x%02x%02x..", dest[0], dest[1], dest[2],
+		dest[3]);
+}
+
+void ret_lxmf_drv_on_announce(struct ret_client *c, const struct ret_destination *d)
+{
+	if (memcmp(d->name_hash, c->local_name_hash, RET_NAME_HASH_LEN) != 0) {
+		return;
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(c->lxmf_wanted); i++) {
+		if (memcmp(c->lxmf_wanted[i], d->dest_hash, RET_TRUNC_HASH_LEN) == 0) {
+			memset(c->lxmf_wanted[i], 0, RET_TRUNC_HASH_LEN);
+			known_store(c, d->dest_hash, d->pub);
+		}
+	}
 }
 
 enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body, size_t len)
 {
 	struct ret_lxmf_msg m;
-	const struct ret_destination *d;
+	const struct ret_destination *d = NULL;
 	const uint8_t *sig_pub;
 	bool verified = false;
 	bool floor_raised;
@@ -103,8 +216,16 @@ enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body
 	if (memcmp(m.src, c->local_dest, RET_LXMF_ADDR_LEN) == 0) {
 		sig_pub = &c->id.pub[RET_X25519_LEN];
 	} else {
+		struct lxmf_known *k = NULL;
+
+		/* Announced this session, else kept from an earlier one. */
 		d = ret_destinations_find(m.src);
-		sig_pub = d != NULL ? &d->pub[RET_X25519_LEN] : NULL;
+		if (d == NULL) {
+			k = known_find(c, m.src);
+		}
+		sig_pub = d != NULL ? &d->pub[RET_X25519_LEN]
+			  : k != NULL ? &k->pub[RET_X25519_LEN]
+				      : NULL;
 	}
 	if (sig_pub != NULL) {
 		if (!ret_lxmf_verify(&m, sig_pub)) {
@@ -112,7 +233,23 @@ enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body
 			return LXMF_BAD_SIGNATURE;
 		}
 		verified = true;
+		if (d != NULL) {
+			known_store(c, m.src, d->pub);
+		} else {
+			known_touch(c, m.src);
+		}
 	} else {
+		/* Keep its key when the announce in reply to our request comes. */
+		bool waiting = false;
+
+		for (size_t i = 0; i < ARRAY_SIZE(c->lxmf_wanted); i++) {
+			waiting |= memcmp(c->lxmf_wanted[i], m.src, RET_TRUNC_HASH_LEN) == 0;
+		}
+		if (!waiting) {
+			memcpy(c->lxmf_wanted[c->lxmf_wanted_next], m.src, RET_TRUNC_HASH_LEN);
+			c->lxmf_wanted_next = (c->lxmf_wanted_next + 1) % ARRAY_SIZE(c->lxmf_wanted);
+		}
+
 		/* Its announce brings the key for later messages. At most one
 		 * such path request per interval: source addresses cost a
 		 * sender nothing.

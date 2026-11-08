@@ -1,0 +1,51 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+menu "ret_lxmf_sleep sample"
+
+config RET_SLEEP_DISPLAY_NAME
+	string "Display name announced with the LXMF address"
+	default "ret-sleep"
+
+config RET_SLEEP_PROPAGATION_NODE
+	string "LXMF propagation node holding mail while asleep (32 hex digits)"
+	default ""
+	help
+	  Required. Senders deliver to this node (or one it peers with)
+	  while the device sleeps; each wake collects what it holds.
+
+config RET_SLEEP_CONTACT
+	string "LXMF address to message on each wake (32 hex digits)"
+	default ""
+	help
+	  When set, each wake sends "wake #n" to this address. Empty: only
+	  collect mail.
+
+config RET_SLEEP_REPLY
+	bool "Answer each verified message"
+	default y
+	help
+	  "re: <content>" to the sender, on the same wake, never to replies.
+
+config RET_SLEEP_INTERVAL_S
+	int "Seconds asleep between wakes"
+	default 600
+
+config RET_SLEEP_WAKE_TIMEOUT_S
+	int "Longest a wake may wait for each step (s)"
+	default 120
+	help
+	  Connecting, the sync, and the delivery proofs each get this long;
+	  past it the device goes back to sleep anyway.
+
+config RET_SLEEP_CYCLES
+	int "Wakes before stopping (0 = forever)"
+	default 0
+	help
+	  With a count, after the last wake the sample logs a summary and,
+	  on native_sim, exits with status 0 if every wake connected and
+	  synced. For tools/run_e2e.sh.
+
+endmenu
+
+source "Kconfig.zephyr"

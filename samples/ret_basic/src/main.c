@@ -70,7 +70,13 @@ static void on_data(const uint8_t *data, size_t len, void *user)
 	static const char prefix[] = "echo: ";
 
 	ARG_UNUSED(user);
-	LOG_INF("RECEIVED %.*s", (int)len, (const char *)data);
+	char text[RET_MAX_PAYLOAD + 1];
+
+	/* A terminated copy: deferred logging copies %s up to the terminator,
+	 * whatever the precision.
+	 */
+	snprintf(text, sizeof(text), "%.*s", (int)MIN(len, RET_MAX_PAYLOAD), (const char *)data);
+	LOG_INF("RECEIVED %s", text);
 	if (len >= sizeof(prefix) - 1 && memcmp(data, prefix, sizeof(prefix) - 1) == 0) {
 		atomic_inc(&replies);
 		k_sem_give(&reply_sem);

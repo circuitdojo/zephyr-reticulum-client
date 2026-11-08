@@ -104,11 +104,17 @@ static void on_lxmf(const struct ret_lxmf_message *m, void *user)
 
 	ARG_UNUSED(user);
 	hex(m->source, RET_DEST_HASH_LEN, src);
-	/* At most the first 64 bytes of each: log messages are bounded. */
-	LOG_INF("LXMF RECEIVED %s from %s: %.*s|%.*s (%u bytes)",
-		m->verified ? "verified" : "UNVERIFIED", src, (int)MIN(m->title_len, 64),
-		(const char *)m->title, (int)MIN(m->content_len, 64), (const char *)m->content,
-		(unsigned int)m->content_len);
+	char title[65];
+	char content[65];
+
+	/* Copies, zero-terminated: deferred logging copies a %s argument up
+	 * to its terminator, whatever the precision, and LXMF fields have none.
+	 */
+	snprintf(title, sizeof(title), "%.*s", (int)MIN(m->title_len, 64), (const char *)m->title);
+	snprintf(content, sizeof(content), "%.*s", (int)MIN(m->content_len, 64),
+		 (const char *)m->content);
+	LOG_INF("LXMF RECEIVED %s from %s: %s|%s (%u bytes)", m->verified ? "verified" : "UNVERIFIED",
+		src, title, content, (unsigned int)m->content_len);
 
 	if (m->verified && m->content_len >= strlen(ECHO_PREFIX) &&
 	    memcmp(m->content, ECHO_PREFIX, strlen(ECHO_PREFIX)) == 0) {
@@ -174,7 +180,10 @@ static void send_replies(k_timeout_t timeout)
 		if (err) {
 			LOG_ERR("reply not sent: %d", err);
 		} else {
-			LOG_INF("REPLY SENT %.*s", r.len, r.text);
+			char text[65];
+
+			snprintf(text, sizeof(text), "%.*s", (int)MIN(r.len, 64), r.text);
+			LOG_INF("REPLY SENT %s", text);
 		}
 		timeout = K_NO_WAIT;
 	}
@@ -249,7 +258,8 @@ int main(void)
 
 #if defined(CONFIG_RET_LXMF_SAMPLE_SYNC_AND_EXIT)
 	k_sem_take(&sync_sem, K_FOREVER);
-	k_sleep(K_MSEC(200));
+	/* Path responses for unverified senders, whose keys are then kept. */
+	k_sleep(K_SECONDS(1));
 #if defined(CONFIG_ARCH_POSIX)
 	nsi_exit(sync_status == 0 ? 0 : 1);
 #endif
