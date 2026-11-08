@@ -298,6 +298,27 @@ int ret_lxmf_send(struct ret_client *client, const uint8_t dest_hash[RET_DEST_HA
 		  size_t content_len, ret_receipt_cb_t cb, void *user);
 
 /**
+ * The display name in an lxmf.delivery announce's app_data
+ * (ret_announce_info.app_data), as LXMF.display_name_from_app_data() reads
+ * it: msgpack [name (bin) or nil, stamp cost, ...], or, from senders
+ * before LXMF 0.5.0, the bare UTF-8 name. In the msgpack form NULs are
+ * removed and surrounding whitespace stripped, as str.strip() does. Then
+ * truncated to fit @p cap at a character boundary; always NUL-terminated.
+ *
+ * Differences, on input LXMF would not display the same way: NULs are
+ * dropped from the bare-name form too (a C string cannot hold them), and
+ * only the first array element is read, where LXMF rejects app_data whose
+ * later elements are malformed. The name may hold control characters:
+ * sanitise it before printing it to a terminal.
+ *
+ * @return length of the name in @p out (0 for an empty name)
+ * @retval -ENOENT no name (nil, or empty app_data)
+ * @retval -EBADMSG malformed msgpack, a name that is not bin, or not UTF-8
+ * @retval -ENOBUFS @p cap is 0
+ */
+int ret_lxmf_display_name(const uint8_t *app_data, size_t len, char *out, size_t cap);
+
+/**
  * Called on the client thread when a sync ends: @p status 0 and the
  * number of messages delivered (through on_lxmf, as they arrived), or a
  * negative errno: -EACCES (the node refused us), -ETIMEDOUT, -ECONNRESET,

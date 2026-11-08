@@ -502,6 +502,32 @@ def lxmf_vectors():
     assert LXMF.display_name_from_app_data(app_data) == "ret-node"
     assert LXMF.stamp_cost_from_app_data(app_data) is None
 
+    # Display names as other LXMF nodes announce them (LXMRouter.
+    # get_announce_app_data: [name, stamp cost, [SF_COMPRESSION]]), and as
+    # senders before LXMF 0.5.0 did (the bare UTF-8 name). Each is paired
+    # with what LXMF.display_name_from_app_data() reads from it.
+    names = {
+        # NULs removed, whitespace stripped, a stamp cost and functionality.
+        "padded": mp.packb([b"  Mom's phone\x00 ", 8, [LXMF.SF_COMPRESSION]]),
+        "utf8": mp.packb(["Zoë 📡".encode(), None, [LXMF.SF_COMPRESSION]]),
+        "legacy": "Old node ✓".encode(),
+        # Unicode whitespace (str.isspace) stripped too, and more leading
+        # whitespace than ret_chat keeps of a name.
+        "unicode_ws": mp.packb([("\u00a0\u3000" + " " * 40 + "Bob\u2009\x00\u205f").encode()]),
+        # array16 form (more than 15 elements) is still the new format.
+        "array16": mp.packb([b"Wide", None] + [None] * 14),
+    }
+    dn = {}
+    for key, data in names.items():
+        name = LXMF.display_name_from_app_data(data)
+        assert name is not None, key
+        dn[f"v_lxmf_dn_{key}"] = data
+        dn[f"v_lxmf_dn_{key}_name"] = name.encode()
+    assert names["array16"][0] == 0xDC
+    no_name = mp.packb([None, None, [LXMF.SF_COMPRESSION]])
+    assert LXMF.display_name_from_app_data(no_name) is None
+    dn["v_lxmf_dn_none"] = no_name
+
     return {
         "v_lxmf_dev_prv": dev.get_private_key(),
         "v_lxmf_dev_dest": dev_dest.hash,
@@ -516,6 +542,7 @@ def lxmf_vectors():
         "v_lxmf_str_packed": str_packed,
         "v_lxmf_str_hash": str_hash,
         "v_lxmf_app_data": app_data,
+        **dn,
     }
 
 

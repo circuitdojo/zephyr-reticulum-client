@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+menu "ret_chat sample"
+
+config CHAT_DISPLAY_NAME
+	string "Display name announced with the LXMF address"
+	default "ret-chat"
+
+config CHAT_PROPAGATION_NODE
+	string "LXMF propagation node to collect messages from (32 hex digits)"
+	default ""
+	help
+	  The node's lxmf.propagation hash (lxmd logs it; see
+	  tools/lxmd-hw). Messages held there are collected on every
+	  connect and with the 'sync' command. Empty: no sync.
+
+config CHAT_CONTACTS
+	int "Contacts kept (settings chat/ct/<n>)"
+	default 16
+	range 1 256
+
+config CHAT_HEARD
+	int "LXMF addresses heard announcing, kept since boot"
+	default 8
+	range 1 64
+
+config CHAT_INBOX_BYTES
+	int "Inbox size in bytes (RAM only, oldest messages evicted)"
+	default 4096
+	range 512 65536
+	help
+	  Received titles and contents, never written to flash. A message
+	  larger than this keeps its first part.
+
+config CHAT_INBOX_MESSAGES
+	int "Messages the inbox holds at most"
+	default 16
+	range 1 256
+
+endmenu
+
+source "Kconfig.zephyr"

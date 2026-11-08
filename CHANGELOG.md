@@ -4,6 +4,15 @@
 
 ### Added
 
+- `samples/ret_chat`: LXMF chat over the console with the Zephyr shell: see who announced
+  (`heard`), name addresses (`contact`, kept in settings), send by name (`msg send`: opportunistic
+  or DIRECT by length, delivery reported), and read the inbox (`msg inbox`, `msg read`, RAM only).
+  `src/chat.c` is the shell-free layer a station UI could reuse. e2e: `chat` drives its shell
+  through stdin against `lxmf_peer.py`.
+- `ret_lxmf_display_name()`: the display name in an LXMF announce's app_data, as
+  `LXMF.display_name_from_app_data()` reads it (including the pre-0.5.0 bare-name form).
+- `run_e2e.sh` refuses to start only when a test tool is attached to `tools/rnsd-test`, so a
+  hardware hub (`tools/rnsd-hw`, `tools/lxmd-hw`) can keep running.
 - Ratchets for the client's own destination (`CONFIG_RET_RATCHETS`, default on): every announce
   carries the newest ratchet, senders encrypt to it, and the client decrypts inbound packets and
   synced LXMF messages with any of the last `CONFIG_RET_RATCHET_COUNT` (8), rotated once per

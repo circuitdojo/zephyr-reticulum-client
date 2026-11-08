@@ -11,6 +11,8 @@
 
 #include <zephyr/ztest.h>
 
+#include <ret/ret_client.h>
+
 #include "ret_crypto.h"
 #include "ret_lxmf.h"
 #include "ret_lxmf_seen.h"
@@ -188,6 +190,93 @@ ZTEST(lxmf, test_app_data)
 	zassert_mem_equal(out, v_lxmf_app_data, n);
 	zassert_equal(ret_lxmf_app_data("ret-node", out, 4), -ENOBUFS);
 	zassert_equal(ret_lxmf_app_data(NULL, out, sizeof(out)), 4); /* 93 c0 c0 90 */
+}
+
+static void check_name(const uint8_t *app_data, size_t len, const uint8_t *want,
+		       size_t want_len)
+{
+	char out[64];
+
+	zassert_equal(ret_lxmf_display_name(app_data, len, out, sizeof(out)), (int)want_len);
+	zassert_mem_equal(out, want, want_len);
+	zassert_equal(out[want_len], '\0');
+}
+
+ZTEST(lxmf, test_display_name_matches_lxmf)
+{
+	/* What LXMF.display_name_from_app_data() reads from each. */
+	check_name(v_lxmf_dn_padded, sizeof(v_lxmf_dn_padded), v_lxmf_dn_padded_name,
+		   sizeof(v_lxmf_dn_padded_name));
+	check_name(v_lxmf_dn_utf8, sizeof(v_lxmf_dn_utf8), v_lxmf_dn_utf8_name,
+		   sizeof(v_lxmf_dn_utf8_name));
+	check_name(v_lxmf_dn_legacy, sizeof(v_lxmf_dn_legacy), v_lxmf_dn_legacy_name,
+		   sizeof(v_lxmf_dn_legacy_name));
+	check_name(v_lxmf_dn_array16, sizeof(v_lxmf_dn_array16), v_lxmf_dn_array16_name,
+		   sizeof(v_lxmf_dn_array16_name));
+	check_name(v_lxmf_dn_unicode_ws, sizeof(v_lxmf_dn_unicode_ws), v_lxmf_dn_unicode_ws_name,
+		   sizeof(v_lxmf_dn_unicode_ws_name));
+	/* Our own announce reads back. */
+	check_name(v_lxmf_app_data, sizeof(v_lxmf_app_data), (const uint8_t *)"ret-node", 8);
+}
+
+ZTEST(lxmf, test_display_name_rejects)
+{
+	char out[8];
+	/* fixarray [str "abc"]: LXMF decodes bytes only. */
+	const uint8_t str_name[] = { 0x91, 0xa3, 'a', 'b', 'c' };
+	/* fixarray [bin 2 "\xc3\x28"]: not UTF-8. */
+	const uint8_t bad_utf8[] = { 0x91, 0xc4, 0x02, 0xc3, 0x28 };
+	/* fixarray [bin 4] with 1 byte: truncated. */
+	const uint8_t truncated[] = { 0x91, 0xc4, 0x04, 'a' };
+	/* An overlong NUL, and a surrogate, in the legacy form. */
+	const uint8_t overlong[] = { 'a', 0xc0, 0x80 };
+	const uint8_t surrogate[] = { 0xed, 0xa0, 0x80 };
+	const uint8_t empty_array[] = { 0x90 };
+
+	zassert_equal(ret_lxmf_display_name(v_lxmf_dn_none, sizeof(v_lxmf_dn_none), out,
+					    sizeof(out)),
+		      -ENOENT);
+	zassert_equal(out[0], '\0');
+	zassert_equal(ret_lxmf_display_name(NULL, 0, out, sizeof(out)), -ENOENT);
+	zassert_equal(ret_lxmf_display_name(empty_array, sizeof(empty_array), out, sizeof(out)),
+		      -ENOENT);
+	zassert_equal(ret_lxmf_display_name(str_name, sizeof(str_name), out, sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(ret_lxmf_display_name(bad_utf8, sizeof(bad_utf8), out, sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(ret_lxmf_display_name(truncated, sizeof(truncated), out, sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(ret_lxmf_display_name(overlong, sizeof(overlong), out, sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(out[0], '\0');
+	zassert_equal(ret_lxmf_display_name(surrogate, sizeof(surrogate), out, sizeof(out)),
+		      -EBADMSG);
+	zassert_equal(ret_lxmf_display_name(v_lxmf_app_data, sizeof(v_lxmf_app_data), out, 0),
+		      -ENOBUFS);
+}
+
+ZTEST(lxmf, test_display_name_truncates_whole_chars)
+{
+	char out[8];
+
+	/* "Zoë 📡" is Z o ë(2) space 📡(4) = 9 bytes: 7 fit, but the
+	 * 4-byte character does not, so "Zoë " (stripping comes before the
+	 * cut, so the space stays).
+	 */
+	zassert_equal(ret_lxmf_display_name(v_lxmf_dn_utf8, sizeof(v_lxmf_dn_utf8), out,
+					    sizeof(out)),
+		      5);
+	zassert_mem_equal(out, "Zo\xc3\xab ", 6);
+	/* Stripped before it is cut: 40-odd leading spaces do not use up a
+	 * small buffer.
+	 */
+	zassert_equal(ret_lxmf_display_name(v_lxmf_dn_unicode_ws, sizeof(v_lxmf_dn_unicode_ws),
+					    out, sizeof(out)),
+		      3);
+	zassert_equal(strcmp(out, "Bob"), 0);
+	/* Room for exactly one byte of text. */
+	zassert_equal(ret_lxmf_display_name(v_lxmf_app_data, sizeof(v_lxmf_app_data), out, 2), 1);
+	zassert_equal(strcmp(out, "r"), 0);
 }
 
 ZTEST_SUITE(lxmf, NULL, setup, NULL, NULL, NULL);

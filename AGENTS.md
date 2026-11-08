@@ -18,6 +18,10 @@ Samples:
   wake it resumes, syncs, answers, messages its contact, waits for proofs, then suspends the
   client (socket closed) and the peripherals (NOR, UART, PMIC BUCK2) and sleeps. The modem drops
   into PSM between wakes.
+- `samples/ret_chat`: LXMF chat over the console (Zephyr shell): `heard` lists who announced,
+  `contact add` names an address (settings `chat/ct/<n>`), `msg send` / `msg inbox` / `msg read`
+  message and read (inbox in RAM only), plus `announce`, `sync` and `status`. `src/chat.c` is the
+  shell-free layer a station UI would reuse; `src/chat_shell.c` only parses and prints.
 
 Targets:
 - `native_sim`: NSOS host sockets, PSA Crypto from mbedTLS.
@@ -150,6 +154,11 @@ For `ret_lxmf`, build with `-DEXTRA_CONF_FILE=env/<name>.conf` from
 waits for network time (date_time: modem, else NTP) before sending, because LXMF timestamps are
 wall-clock time. Run `tools/rns_peer/lxmf_peer.py --config ret-client/tools/rnsd-hw` as its contact,
 or message its address from NomadNet or Sideband.
+
+`ret_chat` uses the same `env/` overlay (server, optional `CONFIG_CHAT_PROPAGATION_NODE`). Its
+shell is on that console: type `heard` once NomadNet or Sideband has announced, `contact add mom
+#1`, `msg send mom hi`. `kernel thread stacks` shows stack use. The board build sets
+`CONFIG_RET_RESOURCE_MAX_SIZE=4096` to fit RAM, so messages are limited to about 3.9 KB each way.
 
 `ret_lxmf_sleep` needs `CONFIG_RET_SLEEP_PROPAGATION_NODE` in its `env/` overlay: the lxmd from
 `tools/lxmd-hw`, attached to `tools/rnsd-hw`. Its identity stays in that directory (gitignored),
@@ -390,7 +399,9 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   signatures validated on both sides), `lxmf-direct` (the same with DIRECT echoes over a link
   to the device, a 3000-byte message delivered as a Resource, a 12000-byte one refused; and the
   device's own DIRECT replies, a 314-byte one as a link packet and a 1024-byte one as a Resource),
-  `store-forward` (a fresh `lxmd` from `tools/lxmd-test`: messages deposited with
+  `chat` (`ret_chat` with its shell on a FIFO via `--uart_stdinout`: `heard`, `contact add`, `msg
+  send` by name, opportunistic and as a Resource, the peer's echoes read from the inbox, and the
+  contact still there after a reboot), `store-forward` (a fresh `lxmd` from `tools/lxmd-test`: messages deposited with
   `tools/rns_peer/lxmf_send.py` while the device is down are collected by its sync, and the
   node's store ends with only an oversized one; a third boot verifies a new message with the
   sender key kept in flash), `sleep` (`ret_lxmf_sleep`: three wakes with mail deposited while

@@ -31,6 +31,12 @@
 #             to the device, which is the responder), plus a 3000-byte
 #             message (a Resource: delivered) and a 12000-byte one (over
 #             RET_RESOURCE_MAX_SIZE: refused, LXMF marks it rejected)
+#   chat      ret_chat, driven through its shell on stdin (--uart_stdinout):
+#             it hears the peer's announce ('heard'), names it ('contact
+#             add'), sends to it by name (opportunistic) and gets the
+#             peer's echo into its inbox ('msg read'); a 451-byte message
+#             goes DIRECT as a Resource and its long echo arrives DIRECT;
+#             after a reboot the contact is still there -> all checked
 #   store-forward  a local lxmd propagation node: the device boots and syncs
 #             (nothing waiting), stops; tools/rns_peer/lxmf_send.py
 #             deposits 12 PROPAGATED messages of 600 bytes and one of
@@ -80,6 +86,7 @@ BUILD_ECHO="$TOP/build/ret_e2e-echo"
 BUILD_LXMF="$TOP/build/ret_e2e-lxmf"
 BUILD_SF="$TOP/build/ret_e2e-sf"
 BUILD_SLEEP="$TOP/build/ret_e2e-sleep"
+BUILD_CHAT="$TOP/build/ret_e2e-chat"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
@@ -91,7 +98,7 @@ COUNT_LXMF=3
 COUNT_SF=12
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf lxmf-direct store-forward sleep late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf lxmf-direct chat store-forward sleep late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -173,8 +180,18 @@ FLASH="$LOGS/flash.bin"
 needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
 needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
 	-DCONFIG_RET_SAMPLE_LINK_TEST=y
-if needs lxmf lxmf-direct; then
+if needs lxmf lxmf-direct chat; then
 	LXMF_PEER=$("$PY" "$PEER_PROJECT/lxmf_peer.py" --print-hash)
+fi
+if needs chat; then
+	echo "== build $(basename "$BUILD_CHAT") (shell)"
+	west build -b native_sim "$RET/samples/ret_chat" -d "$BUILD_CHAT" -p --no-sysbuild -- \
+		-DCONFIG_RET_SERVER_PORT=$PORT \
+		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
+		>"$LOGS/build-$(basename "$BUILD_CHAT").log" 2>&1 ||
+		fail "build failed, see $LOGS/build-$(basename "$BUILD_CHAT").log"
+fi
+if needs lxmf lxmf-direct; then
 	echo "== build $(basename "$BUILD_LXMF") ($COUNT_LXMF messages)"
 	west build -b native_sim "$RET/samples/ret_lxmf" -d "$BUILD_LXMF" -p --no-sysbuild -- \
 		-DCONFIG_RET_SERVER_PORT=$PORT \
@@ -220,8 +237,11 @@ if needs late stall bootdown restart; then
 fi
 
 port_open && fail "port $PORT already in use; stop whatever is listening there"
-pgrep -f "$PEER_PROJECT/((lxmf_peer|peer|lxmf_send)\.py|\.venv/bin/lxmd)" >/dev/null &&
-	fail "a test peer is still running (pgrep -af peer.py); stop it first"
+# Only tools attached to the test rnsd (tools/rnsd-test) disturb a run;
+# a hardware hub on tools/rnsd-hw (peer.py, lxmd) can stay up.
+pgrep -af "$PEER_PROJECT/((lxmf_peer|peer|lxmf_send)\.py|\.venv/bin/lxmd)" |
+	grep -qF -- "$RNSD_CONFIG" &&
+	fail "a test peer is still attached to $RNSD_CONFIG (pgrep -af rnsd-test); stop it first"
 
 echo "== start rnsd ($RNSD_CONFIG)"
 start_rnsd
@@ -455,6 +475,102 @@ scenario_lxmf() { # [direct]
 	else
 		echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
 	fi
+}
+
+# ret_chat with its shell on a FIFO: chat_say types a line into it.
+CHAT_PID=
+chat_start() { # <log>
+	local fifo="$LOGS/chat-in"
+	rm -f "$fifo"
+	mkfifo "$fifo"
+	"$BUILD_CHAT/zephyr/zephyr.exe" --seed-random --flash="$FLASH" --uart_stdinout \
+		<"$fifo" >"$1" 2>&1 &
+	CHAT_PID=$!
+	pids+=("$CHAT_PID")
+	exec 7>"$fifo"
+}
+
+chat_stop() {
+	exec 7>&-
+	kill "$CHAT_PID" 2>/dev/null || true
+	wait "$CHAT_PID" 2>/dev/null || true
+}
+
+chat_say() { printf '%s\n' "$1" >&7; }
+
+# The device log without the shell's colour codes. Read through process
+# substitution, not a pipe: grep -q (or awk's exit) stopping early would
+# fail a pipe's writer under pipefail.
+chat_log() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$1"; }
+
+chat_has() { # <log> <pattern>
+	grep -q -- "$2" <(chat_log "$1")
+}
+
+scenario_chat() {
+	local dev_log="$LOGS/device-chat.log" dev2_log="$LOGS/device-chat-2.log"
+	local peer_log="$LOGS/peer-chat.log" own long n
+
+	"$PY" "$PEER_PROJECT/lxmf_peer.py" --config "$RNSD_CONFIG" --announce-interval 3 \
+		>"$peer_log" 2>&1 &
+	PEER_PID=$!
+	pids+=("$PEER_PID")
+	wait_for 30 "LXMF peer ready" grep -q "^PEER READY" "$peer_log"
+
+	chat_start "$dev_log"
+	wait_for 30 "the chat client" chat_has "$dev_log" "CHAT ADDRESS"
+	own=$(awk '/CHAT ADDRESS/ {print $(NF-1); exit}' <(chat_log "$dev_log"))
+	# The shell answers before the client is connected, and the peer
+	# announces every 3 s: ask until it is listed.
+	n=0
+	until chat_has "$dev_log" "#[0-9] $LXMF_PEER ret-lxmf-peer"; do
+		[ $n -lt 30 ] || fail "chat: the peer never showed in 'heard', see $dev_log"
+		chat_say "heard"
+		sleep 1
+		n=$((n + 1))
+	done
+
+	# A name for it (left over from an earlier run on the same flash: replaced).
+	chat_say "contact del peer"
+	chat_say "contact add peer $LXMF_PEER"
+	wait_for 10 "the contact" chat_has "$dev_log" "added peer"
+
+	# By name, opportunistic; the peer echoes it into the inbox.
+	chat_say "msg send peer hello chat"
+	wait_for 10 "the send" chat_has "$dev_log" "queued #1 to peer (10 bytes)"
+	wait_for 30 "delivery of #1" chat_has "$dev_log" "sent #1 to peer: delivered"
+	wait_for 30 "the echo" chat_has "$dev_log" "new message #1 from peer: echo: hello chat"
+	# LXMF proves a delivery before handling it: the peer's line can come
+	# after the device's "delivered", but always before its echo.
+	grep -q "^LXMF RECEIVED validated $own |hello chat$" "$peer_log" ||
+		fail "chat: the peer did not validate the message, see $peer_log"
+	chat_say "msg read 1"
+	wait_for 10 "msg read" chat_has "$dev_log" "#1 from peer, sent 20[0-9-]* [0-9:]* UTC"
+
+	# Too long for one packet: DIRECT, as a Resource; its echo comes back
+	# DIRECT as well.
+	long="hello long $(printf '%*s' 440 '' | tr ' ' '.')"
+	chat_say "msg send peer $long"
+	wait_for 10 "the long send" chat_has "$dev_log" "queued #2 to peer (451 bytes)"
+	wait_for 60 "delivery of #2" chat_has "$dev_log" "sent #2 to peer: delivered"
+	chat_has "$dev_log" "DIRECT message .* sent as a resource" ||
+		fail "chat: the long message did not go as a resource, see $dev_log"
+	wait_for 60 "the long echo" chat_has "$dev_log" "new message #2 from peer: echo: hello long"
+	grep -q "^LXMF RECEIVED validated $own |hello long (451 bytes)$" "$peer_log" ||
+		fail "chat: the peer did not validate the long message, see $peer_log"
+	chat_say "msg inbox"
+	wait_for 10 "the inbox" chat_has "$dev_log" "#2 peer, 457 bytes"
+	chat_stop
+
+	# The contact is in settings: there after a reboot, before the network.
+	chat_start "$dev2_log"
+	wait_for 30 "the contacts" chat_has "$dev2_log" "1 contact(s) loaded"
+	chat_say "contact list"
+	wait_for 10 "the contact after a reboot" chat_has "$dev2_log" "peer  *$LXMF_PEER"
+	chat_stop
+	stop_peer
+	echo "   heard the peer, named it, messaged it by name (opportunistic and a"
+	echo "   451-byte Resource), both echoes in the inbox; the contact survived a reboot"
 }
 
 LXMD_PID=
@@ -749,6 +865,7 @@ for s in "${scenarios[@]}"; do
 	echo) scenario_echo ;;
 	lxmf) scenario_lxmf ;;
 	lxmf-direct) scenario_lxmf direct ;;
+	chat) scenario_chat ;;
 	store-forward) scenario_store_forward ;;
 	sleep) scenario_sleep ;;
 	late) scenario_late ;;
