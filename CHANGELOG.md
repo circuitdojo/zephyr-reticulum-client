@@ -4,6 +4,25 @@
 
 ### Added
 
+- LXMF DIRECT sending: `ret_lxmf_send()` sends a message too long for one packet over a link to
+  the recipient, as one link packet or as a Resource (up to `RET_LXMF_DIRECT_MAX_CONTENT`, about
+  8 KB), so long messages are no longer refused. `ret_lxmf_send_method()` forces opportunistic
+  or DIRECT. Messages queue (`CONFIG_RET_LXMF_DIRECT_QUEUE`, `CONFIG_RET_LXMF_DIRECT_POOL`; 0
+  turns DIRECT sending off) until the outbound link is free, and each is attempted up to
+  `CONFIG_RET_LXMF_DIRECT_ATTEMPTS` times; a sync waits for the message in flight. New receipt
+  status `RET_RECEIPT_REJECTED` for a message the recipient refused.
+- Resources, sending side (`ret_resource_tx_*`), byte for byte as RNS builds them, and link
+  packet proofs (`ret_link_packet_proof_validate()`).
+- The samples' replies quote up to 1 KB of the message (`ret_lxmf`, `ret_lxmf_sleep`), so they go
+  DIRECT when long. e2e: `lxmf-direct` checks the device's DIRECT packet and Resource arrive
+  intact; `sleep` checks a 604-byte reply is delivered DIRECT before the device suspends.
+
+### Changed
+
+- `RET_LXMF_MAX_CONTENT` is now `RET_LXMF_OPPORTUNISTIC_MAX_CONTENT`.
+- `ret_lxmf_sync()` no longer fails with `-EBUSY` while a DIRECT delivery holds the link: it
+  waits for it.
+
 - Links other nodes open to the client's destination (responder side, `CONFIG_RET_INBOUND_LINKS`,
   default 2), as RNS's `Link.validate_request()` handles them: LRPROOF signed by the identity
   (MTU 500 confirmed), RTT, keepalive answers, stale and close; link DATA delivered (to

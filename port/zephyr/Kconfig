@@ -243,6 +243,38 @@ config RET_INBOUND_LINKS
 	  replaced; otherwise the request is dropped. Repeated (replayed)
 	  link requests are ignored. 0 drops every link request.
 
+config RET_LXMF_DIRECT_QUEUE
+	int "LXMF messages queued for DIRECT delivery"
+	default 4
+	range 1 16
+	help
+	  Messages ret_lxmf_send() hands to DIRECT delivery (larger than
+	  one opportunistic packet, or asked for) wait here, packed, until
+	  the client thread has delivered them one at a time.
+
+config RET_LXMF_DIRECT_POOL
+	int "Bytes for LXMF messages queued for DIRECT delivery"
+	default RET_RESOURCE_MAX_SIZE
+	range 0 1048576
+	help
+	  The packed messages in the DIRECT queue (title and content plus
+	  about 120 bytes each). A message larger than one link packet goes
+	  as a Resource, so RET_RESOURCE_MAX_SIZE also bounds it; the default
+	  holds one message of the largest size. It must hold more than one
+	  opportunistic message (about 405 bytes); 0 turns DIRECT sending off,
+	  for an application that sends no LXMF: ret_lxmf_send() then refuses
+	  messages over one packet (-EMSGSIZE) and RET_LXMF_METHOD_DIRECT
+	  (-ENOTSUP).
+
+config RET_LXMF_DIRECT_ATTEMPTS
+	int "Delivery attempts per DIRECT LXMF message"
+	default 3
+	range 1 10
+	help
+	  Each attempt opens a new link to the recipient; a failed one is
+	  retried 10 s later, as LXMRouter does (it tries 5 times). A message
+	  the recipient refused is not retried.
+
 config RET_LXMF_SEEN_ENTRIES
 	int "LXMF messages remembered against repeats and replays"
 	default 64

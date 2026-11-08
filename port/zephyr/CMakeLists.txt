@@ -81,6 +81,7 @@ zephyr_library_sources_ifdef(CONFIG_RET_CLIENT
     ../../src/ret_client_link.c
     ../../src/ret_client_lxmf.c
     ../../src/ret_client_lxmf_sync.c
+    ../../src/ret_client_lxmf_direct.c
     ../../src/ret_storage.c
 )
 

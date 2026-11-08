@@ -22,6 +22,10 @@ static struct ret_resource_rx rx;
 static uint8_t stream[40960];
 static uint8_t plain[40960];
 static uint8_t req[256];
+static struct ret_resource_tx tx;
+static struct ret_resource_tx_req txreq;
+static uint8_t tx_stream[40960];
+static uint8_t tx_data[36000];
 
 static void *setup(void)
 {
@@ -378,6 +382,191 @@ ZTEST(resource, test_adv_parse_skips_unknown_keys)
 	memcpy(&ext[sizeof(v_res_adv_plain)], "\xa2zz\xc0", 4);
 	zassert_ok(ret_resource_adv_parse(ext, sizeof(ext), &adv));
 	zassert_equal(adv.t, sizeof(v_res_stream));
+}
+
+/* --- Sending --------------------------------------------------------- */
+
+static void fill_tx_data(size_t len)
+{
+	/* gen_vectors.sender_resource_vectors: (i * 11 + 5) & 0xFF. */
+	for (size_t i = 0; i < len; i++) {
+		tx_data[i] = (uint8_t)((i * 11 + 5) & 0xFF);
+	}
+}
+
+/* Our receiver against our sender: requests, parts and hashmap updates
+ * go back and forth until it is complete; then the proof must satisfy the
+ * sender. Returns the hashmap updates sent.
+ */
+static int loopback(size_t data_len)
+{
+	struct ret_resource_adv adv;
+	uint8_t adv_plain[RET_LINK_MDU];
+	uint8_t hmu[RET_LINK_MDU];
+	uint8_t proof[RET_RESOURCE_PROOF_LEN];
+	int hmus = 0;
+	int n;
+
+	n = ret_resource_tx_adv(&tx, adv_plain, sizeof(adv_plain));
+	zassert_true(n > 0);
+	parse_adv(adv_plain, n, &adv);
+	zassert_ok(ret_resource_rx_init(&rx, &adv, stream, sizeof(stream)));
+
+	for (int rounds = 0;; rounds++) {
+		enum ret_resource_part st = RET_RESOURCE_PART_IGNORED;
+
+		zassert_true(rounds < 200, "transfer did not converge");
+		zassert_false(ret_resource_tx_all_sent(&tx) && rounds > 100);
+		n = ret_resource_rx_request(&rx, req, sizeof(req));
+		zassert_true(n > 0);
+		zassert_ok(ret_resource_tx_request(&tx, req, n, &txreq));
+		for (size_t k = 0; k < txreq.n_parts; k++) {
+			size_t plen;
+			const uint8_t *part = ret_resource_tx_part(&tx, txreq.parts[k], &plen);
+
+			st = ret_resource_rx_part(&rx, part, plen);
+		}
+		if (txreq.hmu) {
+			n = ret_resource_tx_hmu(&tx, txreq.hmu_segment, hmu, sizeof(hmu));
+			zassert_true(n > 0);
+			zassert_ok(ret_resource_rx_hmu(&rx, hmu, n));
+			hmus++;
+		}
+		if (st == RET_RESOURCE_PART_COMPLETE) {
+			break;
+		}
+	}
+	zassert_true(ret_resource_tx_all_sent(&tx));
+	n = ret_resource_rx_assemble(&rx, v_link_key, plain, sizeof(plain));
+	zassert_equal(n, data_len);
+	zassert_mem_equal(plain, tx_data, data_len);
+	zassert_ok(ret_resource_proof(&rx, plain, n, proof));
+	zassert_true(ret_resource_tx_proof_valid(&tx, proof, sizeof(proof)));
+	return hmus;
+}
+
+ZTEST(resource, test_tx_matches_rns)
+{
+	uint8_t adv[RET_LINK_MDU];
+	int n;
+
+	fill_tx_data(sizeof(v_restx_data));
+	zassert_mem_equal(tx_data, v_restx_data, sizeof(v_restx_data));
+	zassert_ok(ret_resource_tx_init(&tx, v_link_key, v_restx_iv, v_restx_prefix, tx_data,
+					sizeof(v_restx_data), tx_stream, sizeof(tx_stream)));
+	zassert_ok(ret_resource_tx_map(&tx, tx_data, sizeof(v_restx_data), v_restx_r));
+	zassert_equal(tx.t, sizeof(v_restx_stream));
+	zassert_equal(tx.t, RET_RESOURCE_STREAM_LEN(sizeof(v_restx_data)));
+	zassert_mem_equal(tx_stream, v_restx_stream, tx.t);
+	zassert_mem_equal(tx.h, v_restx_h, sizeof(tx.h));
+	zassert_mem_equal(tx.hashmap, v_restx_hashmap, sizeof(v_restx_hashmap));
+	zassert_mem_equal(tx.expected_proof, v_restx_expected_proof, 32);
+
+	n = ret_resource_tx_adv(&tx, adv, sizeof(adv));
+	zassert_equal(n, sizeof(v_restx_adv_plain));
+	zassert_mem_equal(adv, v_restx_adv_plain, n);
+	zassert_equal(ret_resource_tx_adv(&tx, adv, 60), -ENOBUFS);
+
+	zassert_equal(loopback(sizeof(v_restx_data)), 0);
+}
+
+ZTEST(resource, test_tx_hashmap_update_matches_rns)
+{
+	uint8_t adv[RET_LINK_MDU];
+	uint8_t hmu[RET_LINK_MDU];
+	int n;
+
+	fill_tx_data(36000);
+	zassert_ok(ret_resource_tx_init(&tx, v_link_key, v_restxbig_iv, v_restxbig_prefix,
+					tx_data, 36000, tx_stream, sizeof(tx_stream)));
+	zassert_ok(ret_resource_tx_map(&tx, tx_data, 36000, v_restxbig_r));
+	zassert_equal(tx.t, sizeof(v_restxbig_stream));
+	zassert_mem_equal(tx_stream, v_restxbig_stream, tx.t);
+	zassert_mem_equal(tx.hashmap, v_restxbig_hashmap, sizeof(v_restxbig_hashmap));
+	zassert_mem_equal(tx.expected_proof, v_restxbig_expected_proof, 32);
+	n = ret_resource_tx_adv(&tx, adv, sizeof(adv));
+	zassert_equal(n, sizeof(v_restxbig_adv_plain));
+	zassert_mem_equal(adv, v_restxbig_adv_plain, n);
+
+	/* RNS's answer to running out of map hashes after part 73: parts
+	 * 70..73, then segment 1.
+	 */
+	zassert_ok(ret_resource_tx_request(&tx, v_restxbig_req, sizeof(v_restxbig_req), &txreq));
+	zassert_equal(txreq.n_parts, 4);
+	for (size_t k = 0; k < 4; k++) {
+		zassert_equal(txreq.parts[k], 70 + k);
+	}
+	zassert_true(txreq.hmu);
+	zassert_equal(txreq.hmu_segment, 1);
+	n = ret_resource_tx_hmu(&tx, 1, hmu, sizeof(hmu));
+	zassert_equal(n, sizeof(v_restxbig_hmu_plain));
+	zassert_mem_equal(hmu, v_restxbig_hmu_plain, n);
+	zassert_equal(tx.min_height, 74 - 1 - RET_RESOURCE_WINDOW_MAX);
+
+	/* The next request is matched from that height: parts 74..77, and a
+	 * map hash below it (part 0) is out of scope.
+	 */
+	uint8_t next[1 + 32 + 5 * 4];
+
+	next[0] = 0x00;
+	memcpy(&next[1], v_restxbig_h, 32);
+	memcpy(&next[33], &v_restxbig_hashmap[74 * 4], 4 * 4);
+	memcpy(&next[33 + 16], &v_restxbig_hashmap[0], 4);
+	zassert_ok(ret_resource_tx_request(&tx, next, sizeof(next), &txreq));
+	zassert_equal(txreq.n_parts, 4);
+	zassert_equal(txreq.parts[0], 74);
+	zassert_equal(txreq.parts[3], 77);
+	zassert_false(txreq.hmu);
+	zassert_true(ret_resource_tx_all_sent(&tx) == false);
+
+	/* From the start, against our receiver. */
+	zassert_ok(ret_resource_tx_init(&tx, v_link_key, v_restxbig_iv, v_restxbig_prefix,
+					tx_data, 36000, tx_stream, sizeof(tx_stream)));
+	zassert_ok(ret_resource_tx_map(&tx, tx_data, 36000, v_restxbig_r));
+	zassert_equal(loopback(36000), 1);
+}
+
+ZTEST(resource, test_tx_rejects)
+{
+	uint8_t bad[1 + 32 + 4];
+	uint8_t proof[RET_RESOURCE_PROOF_LEN];
+
+	fill_tx_data(36000);
+	zassert_equal(ret_resource_tx_init(&tx, v_link_key, v_restx_iv, v_restx_prefix, tx_data,
+					   sizeof(v_restx_data), tx_stream, 1000),
+		      -EFBIG);
+	zassert_equal(ret_resource_tx_init(&tx, v_link_key, v_restx_iv, v_restx_prefix, tx_data,
+					   0, tx_stream, sizeof(tx_stream)),
+		      -EFBIG);
+	zassert_ok(ret_resource_tx_init(&tx, v_link_key, v_restx_iv, v_restx_prefix, tx_data,
+					sizeof(v_restx_data), tx_stream, sizeof(tx_stream)));
+	zassert_ok(ret_resource_tx_map(&tx, tx_data, sizeof(v_restx_data), v_restx_r));
+
+	/* A request for another resource, or too short. */
+	bad[0] = 0x00;
+	memset(&bad[1], 0xAA, 32);
+	memcpy(&bad[33], v_restx_hashmap, 4);
+	zassert_equal(ret_resource_tx_request(&tx, bad, sizeof(bad), &txreq), -EBADMSG);
+	zassert_equal(ret_resource_tx_request(&tx, bad, 10, &txreq), -EBADMSG);
+
+	/* Out of map hashes where no segment ends: a sequencing error. */
+	uint8_t seq[1 + 4 + 32];
+
+	seq[0] = 0xFF;
+	memcpy(&seq[1], v_restx_hashmap, 4);
+	memcpy(&seq[5], v_restx_h, 32);
+	zassert_equal(ret_resource_tx_request(&tx, seq, sizeof(seq), &txreq), -EPROTO);
+
+	/* A proof must carry the hash and the expected proof. */
+	memcpy(proof, v_restx_h, 32);
+	memcpy(&proof[32], v_restx_expected_proof, 32);
+	zassert_true(ret_resource_tx_proof_valid(&tx, proof, sizeof(proof)));
+	zassert_false(ret_resource_tx_proof_valid(&tx, proof, sizeof(proof) - 1));
+	proof[40] ^= 1;
+	zassert_false(ret_resource_tx_proof_valid(&tx, proof, sizeof(proof)));
+	proof[40] ^= 1;
+	proof[0] ^= 1;
+	zassert_false(ret_resource_tx_proof_valid(&tx, proof, sizeof(proof)));
 }
 
 ZTEST_SUITE(resource, NULL, setup, NULL, NULL, NULL);

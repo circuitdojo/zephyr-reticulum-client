@@ -5,8 +5,10 @@
  * An always-connected LXMF node: announces its lxmf.delivery address,
  * logs every message it receives (answering each when
  * CONFIG_RET_LXMF_SAMPLE_REPLY is set), and messages
- * CONFIG_RET_LXMF_SAMPLE_CONTACT periodically. Messages are opportunistic:
- * one encrypted packet each.
+ * CONFIG_RET_LXMF_SAMPLE_CONTACT periodically. ret_lxmf_send() picks the
+ * method: opportunistic (one encrypted packet) when a message fits, DIRECT
+ * (over a link to the recipient) when it does not, as a reply quoting a
+ * long message does.
  */
 
 #include <stdio.h>
@@ -28,6 +30,10 @@ LOG_MODULE_REGISTER(ret_lxmf, LOG_LEVEL_INF);
 
 #define ECHO_PREFIX  "echo: hello #"
 #define REPLY_PREFIX "re: "
+/* A reply quotes up to this much: longer than one packet, so it goes
+ * DIRECT.
+ */
+#define REPLY_MAX MIN(1024, RET_LXMF_DIRECT_MAX_CONTENT)
 
 static struct ret_client *client;
 static K_SEM_DEFINE(connected_sem, 0, 1);
@@ -51,9 +57,9 @@ static K_SEM_DEFINE(echo_sem, 0, K_SEM_MAX_LIMIT);
 struct reply {
 	uint8_t to[RET_DEST_HASH_LEN];
 	uint16_t len;
-	char text[RET_LXMF_MAX_CONTENT];
+	char text[REPLY_MAX];
 };
-K_MSGQ_DEFINE(reply_q, sizeof(struct reply), 4, 4);
+K_MSGQ_DEFINE(reply_q, sizeof(struct reply), 2, 4);
 
 static void hex(const uint8_t *b, size_t n, char *out)
 {
@@ -129,7 +135,8 @@ static void on_lxmf(const struct ret_lxmf_message *m, void *user)
 	if (IS_ENABLED(CONFIG_RET_LXMF_SAMPLE_REPLY) && m->verified &&
 	    !(m->content_len >= strlen(REPLY_PREFIX) &&
 	      memcmp(m->content, REPLY_PREFIX, strlen(REPLY_PREFIX)) == 0)) {
-		struct reply r;
+		/* static: the client thread's only, and kept off its stack. */
+		static struct reply r;
 		size_t room = sizeof(r.text) - strlen(REPLY_PREFIX);
 
 		memcpy(r.to, m->source, sizeof(r.to));
@@ -158,6 +165,9 @@ static void on_receipt(const uint8_t packet_hash[RET_PACKET_HASH_LEN],
 	case RET_RECEIPT_TIMEOUT:
 		LOG_WRN("LXMF NOT PROVED #%d", n);
 		break;
+	case RET_RECEIPT_REJECTED:
+		LOG_WRN("LXMF REJECTED #%d", n);
+		break;
 	default:
 		LOG_WRN("LXMF FAILED #%d (%d)", n, status);
 		break;
@@ -171,7 +181,7 @@ static void on_receipt(const uint8_t packet_hash[RET_PACKET_HASH_LEN],
 /* Send queued replies (receipt user 0), waiting up to @p timeout for one. */
 static void send_replies(k_timeout_t timeout)
 {
-	struct reply r;
+	static struct reply r; /* main thread only */
 
 	while (k_msgq_get(&reply_q, &r, timeout) == 0) {
 		int err = ret_lxmf_send(client, r.to, NULL, 0, (const uint8_t *)r.text, r.len,
@@ -183,7 +193,7 @@ static void send_replies(k_timeout_t timeout)
 			char text[65];
 
 			snprintf(text, sizeof(text), "%.*s", (int)MIN(r.len, 64), r.text);
-			LOG_INF("REPLY SENT %s", text);
+			LOG_INF("REPLY SENT %s (%u bytes)", text, r.len);
 		}
 		timeout = K_NO_WAIT;
 	}

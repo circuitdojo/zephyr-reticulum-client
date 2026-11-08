@@ -13,6 +13,7 @@ import hashlib
 import os
 import sys
 import tempfile
+import time
 from unittest import mock
 
 import RNS
@@ -305,6 +306,8 @@ def responder_vectors(identity, linkrequest, rx_prv, key, link_packet):
     with mock.patch.object(RNS.Packet, "send", capture):
         link.prove_packet(rx)
     data_proof = sent[-1]
+    tx = sender_resource_vectors(link, "restx", 1500)
+    tx.update(sender_resource_vectors(link, "restxbig", 36000))
     RNS.Transport.deregister_destination(dest)
 
     return {
@@ -317,7 +320,64 @@ def responder_vectors(identity, linkrequest, rx_prv, key, link_packet):
         "v_link_data_plain": data_plain,
         "v_link_data_hash": rx.packet_hash,
         "v_link_data_proof": data_proof,
+    } | tx
+
+
+def sender_resource_vectors(link, tag, data_len):
+    """A Resource RNS sends on `link` (RNS/Resource.py, uncompressed, not a
+    request or response, as LXMF DIRECT sends a packed message), with its
+    randoms pinned: the stream prefix, the random hash and the token IV.
+    The advertisement, stream, hashmap and expected proof are RNS's own; for
+    more than 74 parts, so is the hashmap update a request for more map
+    hashes gets."""
+    mp = RNS.vendor.umsgpack
+    data = bytes((i * 11 + 5) & 0xFF for i in range(data_len))
+    prefix, r, iv = fixed(tag + "_prefix", 32), fixed(tag + "_r", 32), fixed(tag + "_iv", 16)
+    link.rtt = 0.25
+    with (
+        mock.patch.object(RNS.Identity, "get_random_hash", side_effect=[prefix, r]),
+        mock.patch("RNS.Cryptography.Token.os.urandom", return_value=iv),
+    ):
+        res = RNS.Resource(data, link, advertise=False, auto_compress=False)
+    assert not res.compressed and res.random_hash == r[:4]
+    stream = b"".join(p.data for p in res.parts)
+    out = {
+        f"v_{tag}_data": data,
+        f"v_{tag}_prefix": prefix[:4],
+        f"v_{tag}_r": r[:4],
+        f"v_{tag}_iv": iv,
+        f"v_{tag}_stream": stream,
+        f"v_{tag}_h": res.hash,
+        f"v_{tag}_hashmap": res.hashmap,
+        f"v_{tag}_expected_proof": res.expected_proof,
+        f"v_{tag}_adv_plain": RNS.ResourceAdvertisement(res).pack(),
     }
+    if len(res.parts) > 74:
+        # The receiver ran out of map hashes after part 73: RNS answers a
+        # request flagged 0xFF | last map hash with parts and segment 1.
+        sent = []
+
+        def capture(self):
+            sent.append((self.context, self.data))
+            return True
+
+        req = bytes([0xFF]) + res.hashmap[73 * 4 : 74 * 4] + res.hash + res.hashmap[70 * 4 : 74 * 4]
+        res.adv_sent = time.time()
+        link.status = RNS.Link.ACTIVE  # ensure_link()
+        with (
+            mock.patch.object(RNS.Packet, "send", capture),
+            mock.patch.object(RNS.Packet, "resend", capture),
+            mock.patch.object(RNS.Resource, "watchdog_job"),
+        ):
+            res.request(req)
+        hmu = [d for ctx, d in sent if ctx == RNS.Packet.RESOURCE_HMU]
+        parts = [d for ctx, d in sent if ctx == RNS.Packet.RESOURCE]
+        assert len(hmu) == 1 and parts == [stream[i * 464 : (i + 1) * 464] for i in range(70, 74)]
+        assert hmu[0] == res.hash + mp.packb([1, res.hashmap[74 * 4 :]])
+        del out[f"v_{tag}_data"]  # regenerated from the formula in the test
+        out[f"v_{tag}_req"] = req
+        out[f"v_{tag}_hmu_plain"] = hmu[0]
+    return out
 
 
 def resource_vectors(key, link_id, request_id, tag, payload_len):

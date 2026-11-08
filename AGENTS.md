@@ -6,9 +6,9 @@ client. It connects to a Python `rnsd` TCPServerInterface and supports:
 - receiving and validating announces
 - sending encrypted DATA packets to SINGLE destinations
 - validating delivery proofs
-- links, both sides: opening them (with requests) and accepting them from other nodes, and
-  receiving Resources
-- LXMF messaging (opportunistic, both ways)
+- links, both sides: opening them (with requests) and accepting them from other nodes
+- Resources, both ways: receiving (responses, deliveries) and sending (LXMF DIRECT)
+- LXMF messaging: opportunistic and DIRECT, both ways
 
 Samples:
 - `samples/ret_basic`: raw Reticulum packets and a link test. The e2e workhorse.
@@ -177,10 +177,13 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
 - `src/ret_link.c`: link packet formats (request, link_id, proof validation and key, link
   packets, request/response/identify/RTT payloads). Pure functions, tested against RNS-built
   vectors in `tests/lib/ret_link`.
-- `src/ret_resource.c`: receiving Resources (responses larger than a packet): advertisement parsing,
-  windowed part requests, hashmap updates, assembly against the resource hash, and the proof.
-  Pure functions, tested in `tests/lib/ret_resource`. Compressed, split and oversized resources
-  are refused, not decompressed.
+- `src/ret_resource.c`: Resources. Receiving (responses and deliveries larger than a packet):
+  advertisement parsing, windowed part requests, hashmap updates, assembly against the resource
+  hash, and the proof; compressed, split and oversized resources are refused, not decompressed.
+  Sending (`ret_resource_tx_*`, LXMF DIRECT): stream, hashmap with the collision guard,
+  advertisement, answering requests (parts, hashmap updates) and checking the proof, byte for
+  byte as RNS builds them. Pure functions, tested in `tests/lib/ret_resource` against vectors
+  from RNS's own Resource class.
 - `src/ret_lxmf.c`: the LXMF message format: unpack (a stamp is dropped from the hash as LXMF does),
   signature check, pack and sign, and the `lxmf.delivery` announce app_data. Pure functions,
   tested against vectors from the real LXMF in `tests/lib/ret_lxmf`. Signing and verifying work on
@@ -193,7 +196,9 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
   timestamps persisted as `ret/lx/*` in settings, a 30-day age limit, and a floor raised on
   eviction. `ret_lxmf_send()` packs and signs on the caller's thread
   (identity and address are immutable after start), stamps it with `SYS_CLOCK_REALTIME`, and
-  returns -ENODATA while the wall clock is unset. Then it goes through `ret_client_send()`.
+  returns -ENODATA while the wall clock is unset. Up to 287 bytes of title plus content go
+  opportunistic, through `ret_client_send()`; longer ones (or `RET_LXMF_METHOD_DIRECT`) go to
+  the DIRECT queue below.
 - Known senders: the keys of senders that messaged us are kept as `ret/lk/*`
   (`CONFIG_RET_LXMF_KNOWN_SENDERS`; the least recently verified is replaced first, an order kept in
   RAM and taken from storage order after a reboot), so after a sleep or reboot their
@@ -210,12 +215,22 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
   directly, never through the request queue (a full queue cannot strand a sync). While a sync
   runs, the application's link requests fail with -EBUSY. Items are decrypted into the resource
   stream buffer (`ret_link_drv_scratch()`), which is spent by the time a response is delivered.
+- `src/ret_client_lxmf_direct.c`: LXMF DIRECT sending. `ret_lxmf_send()` packs and signs on the
+  caller's thread straight into a pool (`CONFIG_RET_LXMF_DIRECT_POOL`, 0 to turn it off); the
+  client thread takes the head when the outbound link is free (no application link, no sync),
+  links to the recipient, sends a packet or a Resource (`ret_link_drv_send_packet/_resource`),
+  waits for its proof, keeps the link 10 s for the next message, and retries on a new link
+  (`CONFIG_RET_LXMF_DIRECT_ATTEMPTS`). Like the sync, callbacks only record; its service function
+  acts from the client loop. While it holds the link, application link calls get -EBUSY and a
+  sync waits (`SYNC_WAITING`).
 - `src/ret_client_link.c`: the link driver, run on the client thread; shared state is in
   `src/ret_client_internal.h`.
   - What every link shares works on `struct link`: sending, closing, stale timers, and the one
-    Resource at a time (`CONFIG_RET_RESOURCE_MAX_SIZE` each for the stream and plaintext buffers).
+    Resource at a time, arriving or leaving (`CONFIG_RET_RESOURCE_MAX_SIZE` each for the stream
+    and plaintext buffers).
   - The client's own link (`struct link_out`, initiator): path wait, handshake, RTT, requests with
-    timeouts, response resources, identify, keepalives.
+    timeouts, response resources, identify, keepalives, and one proved send at a time (a DATA
+    packet whose link proof is awaited, or a Resource we send).
   - Links other nodes open to the client's destination (`struct link in[]`,
     `CONFIG_RET_INBOUND_LINKS`, responder): LRPROOF, RTT, keepalive answers, DATA delivered and
     proved, LXMF DIRECT delivery resources. A delivery arriving while another resource is received
@@ -341,8 +356,9 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   It answers messages starting with `hello` with `echo: ...`, and logs whether each received
   signature validated and the app_data of each `lxmf.delivery` announce. `--print-hash` prints
   its address for `CONFIG_RET_LXMF_SAMPLE_CONTACT`. `--reply-method direct` sends the echoes over
-  a link to the device, and `--big-reply`/`--huge-reply BYTES` add larger messages (`REPLY
-  REJECTED` when the device refuses one).
+  a link to the device, and `--mid-reply`/`--big-reply`/`--huge-reply BYTES` add larger messages
+  (`REPLY REJECTED` when the device refuses one). Long received contents are logged as their
+  words and length (`re: big (1024 bytes)`).
 - `peer.py --link-client N` opens a link to the client's own destination (the device as
   responder), sends N packets that must be proved, idles 15 s on keepalives, sends one more and
   closes.
@@ -352,12 +368,14 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   replies to the client's own destination, proved both ways, while the peer holds its own link
   to the device), `lxmf` (`ret_lxmf` against `lxmf_peer.py`: messages and echoes both ways,
   signatures validated on both sides), `lxmf-direct` (the same with DIRECT echoes over a link
-  to the device, a 3000-byte message delivered as a Resource, a 12000-byte one refused),
+  to the device, a 3000-byte message delivered as a Resource, a 12000-byte one refused; and the
+  device's own DIRECT replies, a 314-byte one as a link packet and a 1024-byte one as a Resource),
   `store-forward` (a fresh `lxmd` from `tools/lxmd-test`: messages deposited with
   `tools/rns_peer/lxmf_send.py` while the device is down are collected by its sync, and the
   node's store ends with only an oversized one; a third boot verifies a new message with the
   sender key kept in flash), `sleep` (`ret_lxmf_sleep`: three wakes with mail deposited while
-  it sleeps),
+  it sleeps, a long reply delivered DIRECT before suspending; it runs after `store-forward`,
+  whose kept sender key in the shared flash verifies the last message),
   plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
   `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash
   build. Each known-hash scenario starts a fresh rnsd, because

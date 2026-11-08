@@ -23,7 +23,11 @@
 
 LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 
-BUILD_ASSERT(RET_LXMF_MAX_CONTENT == RET_LXMF_OPPORTUNISTIC_MAX);
+BUILD_ASSERT(RET_LXMF_OPPORTUNISTIC_MAX_CONTENT == RET_LXMF_OPPORTUNISTIC_MAX);
+/* DIRECT carries more than one opportunistic packet, or it has no point. */
+BUILD_ASSERT(CONFIG_RET_LXMF_DIRECT_POOL == 0 ||
+		     RET_LXMF_DIRECT_MAX_CONTENT > RET_LXMF_OPPORTUNISTIC_MAX_CONTENT,
+	     "RET_LXMF_DIRECT_POOL / RET_RESOURCE_MAX_SIZE too small for DIRECT");
 
 /* 2020-01-01: anything earlier means the wall clock was never set. */
 #define WALL_CLOCK_VALID_S 1577836800LL
@@ -309,35 +313,66 @@ void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len
 	(void)ret_lxmf_drv_deliver(c, plain, len);
 }
 
-int ret_lxmf_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LEN],
-		  const uint8_t *title, size_t title_len, const uint8_t *content,
-		  size_t content_len, ret_receipt_cb_t cb, void *user)
+static bool fits(size_t title_len, size_t content_len, size_t max)
+{
+	return title_len <= max && content_len <= max - title_len;
+}
+
+int ret_lxmf_send_method(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LEN],
+			 enum ret_lxmf_method method, const uint8_t *title, size_t title_len,
+			 const uint8_t *content, size_t content_len, ret_receipt_cb_t cb,
+			 void *user)
 {
 	uint8_t packed[RET_LXMF_ADDR_LEN + RET_MAX_PAYLOAD];
 	uint8_t hash[RET_SHA256_LEN];
 	struct timespec now;
+	double timestamp;
 	int n;
 	int err;
 
 	if (!c->started) {
 		return -ENOTCONN;
 	}
-	if (c->cfg.on_lxmf == NULL || !c->has_local) {
+	if (c->cfg.on_lxmf == NULL || !c->has_local || method > RET_LXMF_METHOD_DIRECT) {
 		return -EINVAL;
 	}
-	if (title_len > RET_LXMF_MAX_CONTENT || content_len > RET_LXMF_MAX_CONTENT - title_len) {
+	if (method == RET_LXMF_METHOD_AUTO) {
+		/* LXMessage: opportunistic falls back to DIRECT when the
+		 * content does not fit one packet.
+		 */
+		method = fits(title_len, content_len, RET_LXMF_OPPORTUNISTIC_MAX_CONTENT)
+				 ? RET_LXMF_METHOD_OPPORTUNISTIC
+				 : RET_LXMF_METHOD_DIRECT;
+		if (method == RET_LXMF_METHOD_DIRECT && CONFIG_RET_LXMF_DIRECT_POOL == 0) {
+			return -EMSGSIZE;
+		}
+	} else if (method == RET_LXMF_METHOD_DIRECT && CONFIG_RET_LXMF_DIRECT_POOL == 0) {
+		return -ENOTSUP;
+	}
+	if (!fits(title_len, content_len,
+		  method == RET_LXMF_METHOD_OPPORTUNISTIC ? RET_LXMF_OPPORTUNISTIC_MAX_CONTENT
+							  : RET_LXMF_DIRECT_MAX_CONTENT)) {
 		return -EMSGSIZE;
 	}
 	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &now) != 0 || now.tv_sec < WALL_CLOCK_VALID_S) {
 		LOG_WRN("LXMF send refused: wall clock not set (SYS_CLOCK_REALTIME)");
 		return -ENODATA;
 	}
+	timestamp = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 
 	/* The identity and address are fixed once the client started, so
 	 * signing here, off the client thread, reads no changing state.
 	 */
-	n = ret_lxmf_pack(&c->id, c->local_dest, dest_hash,
-			  (double)now.tv_sec + (double)now.tv_nsec / 1e9, title, title_len, content,
+	if (method == RET_LXMF_METHOD_DIRECT) {
+		err = ret_lxmf_direct_queue(c, dest_hash, timestamp, title, title_len, content,
+					    content_len, cb, user);
+		if (!err) {
+			ret_client_wake(c);
+		}
+		return err;
+	}
+
+	n = ret_lxmf_pack(&c->id, c->local_dest, dest_hash, timestamp, title, title_len, content,
 			  content_len, packed, sizeof(packed), hash);
 	if (n < 0) {
 		return n == -ENOBUFS ? -EMSGSIZE : n;
@@ -349,4 +384,12 @@ int ret_lxmf_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LE
 			      (size_t)n - RET_LXMF_ADDR_LEN, cb, user);
 	ret_wipe(packed, sizeof(packed));
 	return err;
+}
+
+int ret_lxmf_send(struct ret_client *c, const uint8_t dest_hash[RET_DEST_HASH_LEN],
+		  const uint8_t *title, size_t title_len, const uint8_t *content,
+		  size_t content_len, ret_receipt_cb_t cb, void *user)
+{
+	return ret_lxmf_send_method(c, dest_hash, RET_LXMF_METHOD_AUTO, title, title_len, content,
+				    content_len, cb, user);
 }

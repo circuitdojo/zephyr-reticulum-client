@@ -367,7 +367,7 @@ scenario_lxmf() { # [direct]
 	local mode=${1:-opportunistic} name=lxmf peer_args=()
 	if [ "$mode" = direct ]; then
 		name=lxmf-direct
-		peer_args=(--reply-method direct --big-reply 3000 --huge-reply 12000)
+		peer_args=(--reply-method direct --mid-reply 310 --big-reply 3000 --huge-reply 12000)
 	fi
 	local peer_log="$LOGS/peer-$name.log" dev_log="$LOGS/device-$name.log" n
 
@@ -418,7 +418,23 @@ scenario_lxmf() { # [direct]
 			fail "lxmf-direct: oversized message not refused for its size, see $dev_log"
 		grep -q "^REPLY REJECTED huge$" "$peer_log" ||
 			fail "lxmf-direct: sender did not see the refusal, see $peer_log"
-		echo "   DIRECT: $COUNT_LXMF echoes, a 3000-byte resource delivered, 12000 bytes refused"
+		# The device's own DIRECT sends: its quotes of mid and big are
+		# too long for one packet; mid fits a link packet, big (cut to
+		# the sample's 1024) goes as a Resource. Intact on arrival.
+		grep -q "DIRECT message .* sent as a packet" "$dev_log" ||
+			fail "lxmf-direct: device sent no DIRECT packet, see $dev_log"
+		grep -q "DIRECT message .* sent as a resource" "$dev_log" ||
+			fail "lxmf-direct: device sent no DIRECT resource, see $dev_log"
+		grep -q "resource proved: .* bytes delivered" "$dev_log" ||
+			fail "lxmf-direct: device's resource not proved, see $dev_log"
+		[ "$(grep -c "DIRECT message .*: delivered" "$dev_log")" -ge 2 ] ||
+			fail "lxmf-direct: device's DIRECT messages not confirmed, see $dev_log"
+		grep -q "^LXMF RECEIVED validated $own |re: mid (314 bytes)$" "$peer_log" ||
+			fail "lxmf-direct: peer did not validate the device's DIRECT packet, see $peer_log"
+		grep -q "^LXMF RECEIVED validated $own |re: big (1024 bytes)$" "$peer_log" ||
+			fail "lxmf-direct: peer did not validate the device's DIRECT resource, see $peer_log"
+		echo "   DIRECT: $COUNT_LXMF echoes, a 3000-byte resource delivered, 12000 bytes refused;"
+		echo "   device sent DIRECT: 314 bytes as a packet, 1024 bytes as a resource"
 	else
 		echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
 	fi
@@ -520,6 +536,8 @@ scenario_store_forward() {
 	echo "   after a reboot the kept key verifies the sender"
 }
 
+# Runs after store-forward: the sender key it kept in the shared flash is what
+# verifies "later #1" here.
 scenario_sleep() {
 	local send_log="$LOGS/sender-sleep.log" go="$LOGS/sleep-go" dev="$LOGS/device-sleep.log"
 
@@ -528,7 +546,8 @@ scenario_sleep() {
 	fresh_rnsd
 	start_lxmd
 	"$PY" "$PEER_PROJECT/lxmf_send.py" --config "$RNSD_CONFIG" --node "$NODE" \
-		--to-name ret-sleep --count 2 --prefix "night #" --then 1 --go-file "$go" --linger \
+		--to-name ret-sleep --count 2 --prefix "night #" --then 1 --later-size 600 \
+		--go-file "$go" --linger \
 		>"$send_log" 2>&1 &
 	local send_pid=$!
 	pids+=("$send_pid")
@@ -559,6 +578,16 @@ scenario_sleep() {
 	grep -q "LXMF RECEIVED .* from $sender: |night #2" "$dev" || fail "sleep: night #2 missing"
 	grep -q "LXMF RECEIVED verified from $sender: |later #1" "$dev" ||
 		fail "sleep: later #1 not verified, see $dev"
+	# Its reply quotes 600 bytes: DIRECT, as a resource, proved before
+	# the device suspended.
+	local own
+	own=$(awk '/^TARGET/ {print $2; exit}' "$send_log")
+	grep -q "DIRECT message .* sent as a resource" "$dev" ||
+		fail "sleep: the long reply did not go DIRECT, see $dev"
+	grep -q "^RECEIVED validated $own re: later #1 (604 bytes)$" "$send_log" ||
+		fail "sleep: the sender did not get the DIRECT reply, see $send_log"
+	awk '/DIRECT message .*: delivered/ {d = 1} /-> SUSPENDED/ && d {ok = 1} END {exit !ok}' \
+		"$dev" || fail "sleep: the DIRECT reply was not proved before suspending, see $dev"
 	# No connection held between wakes; one announce per wake.
 	local suspends announces
 	suspends=$(grep -c -- "-> SUSPENDED" "$dev" || true)
@@ -566,7 +595,8 @@ scenario_sleep() {
 	[ "$suspends" -eq 3 ] || fail "sleep: $suspends suspends, want 3"
 	[ "$announces" -eq 3 ] || fail "sleep: $announces announces, want 3"
 	grep -q "DONE 3/3 wakes synced" "$dev" || fail "sleep: want DONE 3/3, see $dev"
-	echo "   3 wakes: mail deposited while asleep collected at the next wake"
+	echo "   3 wakes: mail deposited while asleep collected at the next wake;"
+	echo "   a 604-byte reply delivered DIRECT before suspending"
 }
 
 fresh_rnsd() {

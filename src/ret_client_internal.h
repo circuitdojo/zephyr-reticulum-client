@@ -101,6 +101,22 @@ struct link {
 	uint32_t keepalive_ms;
 };
 
+struct ret_client;
+
+/**
+ * The outcome of a send on the outbound link (ret_link_drv_send_packet/
+ * _resource): 0 proved, -ETIMEDOUT, -ECONNRESET (link gone), -EPERM (the
+ * receiver refused the resource), -EPROTO (it asked for something
+ * impossible), -ECANCELED. @p rtt_ms is from the send to the proof.
+ */
+typedef void (*link_sent_cb_t)(struct ret_client *c, int status, uint32_t rtt_ms);
+
+enum out_send {
+	OUT_SEND_NONE,
+	OUT_SEND_PACKET,   /* a DATA packet, its proof awaited */
+	OUT_SEND_RESOURCE, /* c->res is RES_SENDING */
+};
+
 /** The one link this client may open (initiator side). */
 struct link_out {
 	struct link l;
@@ -115,6 +131,12 @@ struct link_out {
 	ret_link_cb_t cb;
 	void *user;
 	struct link_request req[CONFIG_RET_LINK_MAX_REQUESTS];
+	/* One proved send at a time. */
+	enum out_send send;
+	link_sent_cb_t sent_cb;
+	uint8_t send_hash[RET_HASH_LEN];
+	int64_t send_ms;
+	int64_t send_deadline_ms;
 };
 
 enum res_state {
@@ -122,6 +144,15 @@ enum res_state {
 	RES_RECEIVING,
 	/* Assembled: its data in plain[] is being handed over; stream[] is spent. */
 	RES_DELIVERING,
+	/* Ours, on the outbound link: stream[] holds it, encrypted. */
+	RES_SENDING,
+};
+
+/* Where a resource we send is (Resource.py's sender states). */
+enum res_tx_phase {
+	RES_TX_ADVERTISED,
+	RES_TX_TRANSFERRING,
+	RES_TX_AWAITING_PROOF,
 };
 
 enum res_purpose {
@@ -129,7 +160,7 @@ enum res_purpose {
 	RES_DELIVERY, /* data sent to us over an inbound link (LXMF DIRECT) */
 };
 
-/** The one incoming resource, on any link. */
+/** The one resource, arriving on any link or leaving on the outbound one. */
 struct link_resource {
 	enum res_state state;
 	enum res_purpose purpose;
@@ -140,7 +171,16 @@ struct link_resource {
 	/* No resource may hold the buffers longer than this. */
 	int64_t give_up_ms;
 	uint8_t retries;
-	struct ret_resource_rx rx;
+	/* RES_SENDING */
+	enum res_tx_phase tx_phase;
+	int64_t tx_adv_ms;
+	int64_t tx_activity_ms;
+	int64_t tx_last_part_ms;
+	uint32_t tx_rtt_ms;
+	union {
+		struct ret_resource_rx rx;
+		struct ret_resource_tx tx;
+	};
 	uint8_t stream[CONFIG_RET_RESOURCE_MAX_SIZE];
 	uint8_t plain[CONFIG_RET_RESOURCE_MAX_SIZE];
 };
@@ -176,6 +216,7 @@ enum sync_phase {
 	SYNC_FETCHING,
 	SYNC_ACKING,
 	SYNC_CLOSING,
+	SYNC_WAITING, /* for a DIRECT delivery to give the link up */
 };
 
 /** A propagation node sync in progress (ret_client_lxmf_sync.c). */
@@ -208,6 +249,48 @@ struct lxmf_sync {
 	uint8_t item_plain[RET_LINK_MDU];
 	/* Requests refused because a delivery resource held the buffers. */
 	uint8_t busy_retries;
+	/* SYNC_WAITING: the node to link to once a DIRECT send frees the link. */
+	uint8_t node[RET_TRUNC_HASH_LEN];
+};
+
+/** An LXMF message queued for DIRECT delivery: packed in the pool. */
+struct lxmf_direct_msg {
+	uint8_t dest[RET_TRUNC_HASH_LEN];
+	uint8_t hash[RET_SHA256_LEN];
+	uint32_t len;
+	ret_receipt_cb_t cb;
+	void *user;
+};
+
+enum direct_step {
+	DIRECT_IDLE,    /* no link of ours */
+	DIRECT_LINKING, /* opening one to the head message's recipient */
+	DIRECT_SENDING, /* the head message is out, its proof awaited */
+	DIRECT_READY,   /* link up, nothing in flight (kept a while for more) */
+	DIRECT_CLOSING, /* LINKCLOSE asked for */
+};
+
+/** LXMF DIRECT delivery (ret_client_lxmf_direct.c). */
+struct lxmf_direct {
+	/* Queue and pool: appended by any thread, consumed by the client. */
+	struct k_mutex lock;
+	struct lxmf_direct_msg q[CONFIG_RET_LXMF_DIRECT_QUEUE];
+	size_t n;
+	size_t pool_used;
+	uint8_t pool[MAX(1, CONFIG_RET_LXMF_DIRECT_POOL)];
+	/* Client thread only. */
+	enum direct_step step;
+	uint8_t link_dest[RET_TRUNC_HASH_LEN];
+	bool link_up;   /* recorded by the link callback */
+	bool link_gone; /* recorded by the link callback */
+	bool have_result;
+	int result;
+	uint32_t result_rtt_ms;
+	uint8_t attempts;
+	int64_t next_attempt_ms;
+	int64_t idle_until_ms;
+	/* The head waits on the link or the buffers since (0: not blocked). */
+	int64_t blocked_since_ms;
 };
 
 struct ret_client {
@@ -247,6 +330,7 @@ struct ret_client {
 	uint8_t lxmf_wanted[RET_LXMF_WANTED][RET_TRUNC_HASH_LEN];
 	size_t lxmf_wanted_next;
 	struct lxmf_sync sync;
+	struct lxmf_direct direct;
 	struct ret_lxmf_seen_entry lxmf_seen_entries[CONFIG_RET_LXMF_SEEN_ENTRIES];
 	struct ret_lxmf_seen lxmf_seen;
 
@@ -289,6 +373,9 @@ void ret_client_remember_packet(struct ret_client *c, const uint8_t hash[RET_HAS
  * LXMF DIRECT delivery with on_lxmf, else on_data.
  */
 void ret_client_on_link_data(struct ret_client *c, const uint8_t *data, size_t len);
+
+/** Wake the client thread (any thread): new work outside the request queue. */
+void ret_client_wake(struct ret_client *c);
 
 /** HDLC-frame c->tx_raw[0..raw_len) and send it. -ECONNRESET: link dropped. */
 int ret_client_send_frame(struct ret_client *c, size_t raw_len);
@@ -335,14 +422,46 @@ int64_t ret_lxmf_sync_drv_next_event(const struct ret_client *c);
 /** A sync is running: the link is not the application's. */
 bool ret_lxmf_sync_drv_owns_link(const struct ret_client *c);
 
+/** A sync waits for a DIRECT send to give the link up. */
+bool ret_lxmf_sync_drv_waiting(const struct ret_client *c);
+
+/** Suspending: a sync still waiting for the link ends with @p err. */
+void ret_lxmf_sync_drv_abort_waiting(struct ret_client *c, int err);
+
+/* --- Provided by ret_client_lxmf_direct.c -------------------------- */
+
+void ret_lxmf_direct_drv_init(struct ret_client *c);
+
+/**
+ * Pack and sign a message into the pool and queue it (any thread).
+ *
+ * @retval -EAGAIN queue or pool full
+ * @retval -EMSGSIZE too large for CONFIG_RET_RESOURCE_MAX_SIZE
+ */
+int ret_lxmf_direct_queue(struct ret_client *c, const uint8_t dest[RET_DEST_HASH_LEN],
+			  double timestamp, const uint8_t *title, size_t title_len,
+			  const uint8_t *content, size_t content_len, ret_receipt_cb_t cb,
+			  void *user);
+
+/** Drive the DIRECT queue (client loop, connected). */
+void ret_lxmf_direct_drv_service(struct ret_client *c);
+int64_t ret_lxmf_direct_drv_next_event(const struct ret_client *c);
+
+/** The outbound link is DIRECT delivery's: not the application's. */
+bool ret_lxmf_direct_drv_owns_link(const struct ret_client *c);
+
+/** Fail every queued message with @p status (suspended). */
+void ret_lxmf_direct_drv_fail_all(struct ret_client *c, enum ret_receipt_status status);
+
 /* --- Provided by ret_client_link.c --------------------------------- */
 
 /**
  * A buffer of CONFIG_RET_RESOURCE_MAX_SIZE bytes, free for use inside a
  * link response callback: the resource stream buffer, whose content is
  * spent once a response is delivered (responses themselves live in other
- * buffers). NULL while a resource is arriving (on any link): the response
- * being handled then came in one packet. Wipe what you put there.
+ * buffers). NULL while a resource is arriving (on any link) or leaving:
+ * the response being handled then came in one packet. Wipe what you put
+ * there.
  */
 uint8_t *ret_link_drv_scratch(struct ret_client *c, size_t *cap);
 
@@ -354,6 +473,29 @@ void ret_link_drv_open(struct ret_client *c, const struct send_req *r);
 void ret_link_drv_request(struct ret_client *c, const struct send_req *r);
 void ret_link_drv_identify(struct ret_client *c);
 void ret_link_drv_close(struct ret_client *c);
+
+/**
+ * Send @p data as one DATA packet on the active outbound link and await
+ * its proof; @p cb reports the outcome. @p data must fit RET_LINK_MDU.
+ *
+ * @retval -ENOTCONN no active link
+ * @retval -EBUSY a send is in progress
+ */
+int ret_link_drv_send_packet(struct ret_client *c, const uint8_t *data, size_t len,
+			     link_sent_cb_t cb);
+
+/**
+ * Send @p data as a Resource on the active outbound link (encrypted into
+ * the resource buffers; @p data itself is only read during the call); @p cb
+ * reports the outcome once the receiver proved it, refused it, or the
+ * transfer failed.
+ *
+ * @retval -ENOTCONN no active link
+ * @retval -EBUSY a send is in progress, or a resource is arriving
+ * @retval -EFBIG larger than CONFIG_RET_RESOURCE_MAX_SIZE allows
+ */
+int ret_link_drv_send_resource(struct ret_client *c, const uint8_t *data, size_t len,
+			       link_sent_cb_t cb);
 
 /** A LINKREQUEST for the client's destination: accept it (responder). */
 void ret_link_drv_on_request(struct ret_client *c, const struct ret_packet *pkt,

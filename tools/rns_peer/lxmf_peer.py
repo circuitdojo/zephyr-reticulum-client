@@ -13,6 +13,9 @@ Lines meant for scripts start with a fixed tag:
   PEER READY <lxmf address>
   ANNOUNCED
   LXMF RECEIVED <validated|unverified:<reason>> <source> <title>|<content>
+    (content over 64 characters: its words without the trailing '.' padding
+    and its length, "re: big (2048 bytes)", so an intact padded message
+    reads cleanly)
   LXMF DEVICE ANNOUNCE <address> <display name>
   REPLY SENT <content>, REPLY DELIVERED <content>, REPLY FAILED <content>,
   REPLY REJECTED <content> (the recipient refused it); long contents are
@@ -65,6 +68,14 @@ def main() -> None:
         default=0,
         metavar="BYTES",
         help="and one of this size ('huge ...'), expected to be refused",
+    )
+    ap.add_argument(
+        "--mid-reply",
+        type=int,
+        default=0,
+        metavar="BYTES",
+        help="and one of this size ('mid ...'): the device's quote of it is too long "
+        "for one opportunistic packet but fits one link packet",
     )
     ap.add_argument(
         "--print-hash",
@@ -138,9 +149,11 @@ def main() -> None:
         else:
             state = f"unverified:{message.unverified_reason}"
         content = message.content_as_string()
+        shown = content
+        if len(content) > 64:
+            shown = f"{content.rstrip('.').strip()} ({len(content)} bytes)"
         out(
-            f"LXMF RECEIVED {state} {message.source_hash.hex()} "
-            f"{message.title_as_string()}|{content}"
+            f"LXMF RECEIVED {state} {message.source_hash.hex()} {message.title_as_string()}|{shown}"
         )
         if content.startswith("hello"):
             src = message.source_hash
@@ -148,6 +161,8 @@ def main() -> None:
 
             def replies():
                 reply(src, f"echo: {content}")
+                if first and args.mid_reply:
+                    reply(src, "mid ".ljust(args.mid_reply, "."))
                 if first and args.big_reply:
                     reply(src, "big ".ljust(args.big_reply, "."))
                 if first and args.huge_reply:
