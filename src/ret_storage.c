@@ -209,7 +209,11 @@ int ret_storage_load_lxmf_seen(struct ret_lxmf_seen *s)
 			LOG_WRN("more ret/lx records than expected; some remain");
 		}
 		if (err) {
+			/* Starts empty in RAM regardless; the reset is tried
+			 * again next boot.
+			 */
 			LOG_ERR("resetting the LXMF replay table failed: %d", err);
+			err = 0;
 		}
 	}
 	return err;
@@ -234,6 +238,97 @@ int ret_storage_save_lxmf_seen(const struct ret_lxmf_seen *s, size_t slot, bool 
 	if (err) {
 		/* Still remembered in RAM until the next boot. */
 		LOG_ERR("saving LXMF replay state failed: %d", err);
+	}
+	return err;
+}
+
+/* --- Known LXMF senders ------------------------------------------------ */
+
+#define KNOWN_RECORD_LEN (RET_TRUNC_HASH_LEN + RET_PUBKEY_LEN + sizeof(uint32_t))
+
+struct known_ctx {
+	struct ret_storage_known *out;
+	size_t count;
+	int err;
+	char keys[CONFIG_RET_LXMF_KNOWN_SENDERS + 8][8];
+	size_t n_keys;
+};
+
+static int known_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		    void *param)
+{
+	struct known_ctx *ctx = param;
+	uint8_t rec[KNOWN_RECORD_LEN];
+	char *end;
+	unsigned long slot = strtoul(key, &end, 10);
+	bool digits = key[0] >= '0' && key[0] <= '9' && strlen(key) <= 5 && *end == '\0';
+	ssize_t n;
+	int err = 0;
+
+	if (ctx->n_keys < ARRAY_SIZE(ctx->keys) && strlen(key) < sizeof(ctx->keys[0])) {
+		strcpy(ctx->keys[ctx->n_keys++], key);
+	}
+	n = (digits && len == sizeof(rec)) ? read_cb(cb_arg, rec, sizeof(rec)) : -EINVAL;
+	if (n != sizeof(rec)) {
+		err = n < 0 ? (int)n : -EIO;
+	} else if (slot < ctx->count) {
+		struct ret_storage_known *k = &ctx->out[slot];
+
+		memcpy(k->dest, rec, RET_TRUNC_HASH_LEN);
+		memcpy(k->pub, &rec[RET_TRUNC_HASH_LEN], RET_PUBKEY_LEN);
+		memcpy(&k->seq, &rec[RET_TRUNC_HASH_LEN + RET_PUBKEY_LEN], sizeof(k->seq));
+	} /* beyond a shrunken table: dropped */
+	if (err && !ctx->err) {
+		LOG_ERR("stored LXMF sender %s unreadable: %d", key, err);
+		ctx->err = err;
+	}
+	return err;
+}
+
+int ret_storage_load_known(struct ret_storage_known *out, size_t count)
+{
+	static struct known_ctx ctx;
+	char name[24];
+	int err;
+
+	memset(out, 0, count * sizeof(out[0]));
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.out = out;
+	ctx.count = count;
+	err = settings_load_subtree_direct("ret/lk", known_cb, &ctx);
+	if (!err) {
+		err = ctx.err;
+	}
+	if (err) {
+		/* Expendable: those senders verify again once they announce. */
+		LOG_ERR("LXMF sender keys unreadable (%d): resetting them", err);
+		memset(out, 0, count * sizeof(out[0]));
+		err = 0;
+		for (size_t i = 0; i < ctx.n_keys && !err; i++) {
+			snprintf(name, sizeof(name), "ret/lk/%s", ctx.keys[i]);
+			err = settings_delete(name);
+		}
+		if (err) {
+			LOG_ERR("resetting the LXMF sender keys failed: %d", err);
+			err = 0;
+		}
+	}
+	return err;
+}
+
+int ret_storage_save_known(size_t slot, const struct ret_storage_known *k)
+{
+	uint8_t rec[KNOWN_RECORD_LEN];
+	char key[24];
+	int err;
+
+	memcpy(rec, k->dest, RET_TRUNC_HASH_LEN);
+	memcpy(&rec[RET_TRUNC_HASH_LEN], k->pub, RET_PUBKEY_LEN);
+	memcpy(&rec[RET_TRUNC_HASH_LEN + RET_PUBKEY_LEN], &k->seq, sizeof(k->seq));
+	snprintf(key, sizeof(key), "ret/lk/%u", (unsigned int)slot);
+	err = settings_save_one(key, rec, sizeof(rec));
+	if (err) {
+		LOG_ERR("saving an LXMF sender key failed: %d", err);
 	}
 	return err;
 }

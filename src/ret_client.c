@@ -59,6 +59,8 @@ static const char *state_str(enum ret_client_state s)
 		return "CONNECTED";
 	case RET_STATE_RECONNECTING:
 		return "RECONNECTING";
+	case RET_STATE_SUSPENDED:
+		return "SUSPENDED";
 	}
 	return "?";
 }
@@ -103,6 +105,9 @@ static void handle_announce(struct ret_client *c, const struct ret_packet *pkt)
 	if (d->path_valid) {
 		release_held(c, d->dest_hash);
 		ret_link_drv_on_path(c, d);
+	}
+	if (c->cfg.on_lxmf != NULL) {
+		ret_lxmf_drv_on_announce(c, d);
 	}
 
 	if (!fresh) {
@@ -814,6 +819,16 @@ static void run_connected(struct ret_client *c)
 			if (!process_queue(c)) {
 				return;
 			}
+			if (atomic_get(&c->want_suspended)) {
+				/* Tell the peer an established link is going, rather
+				 * than let it go stale. One still being set up just
+				 * fails (disconnect() tears it down).
+				 */
+				if (c->link.state == LINK_ACTIVE || c->link.state == LINK_STALE) {
+					ret_link_drv_close(c);
+				}
+				return;
+			}
 		}
 
 		if (!service_held(c) || watchdog(c)) {
@@ -837,7 +852,7 @@ static void backoff(struct ret_client *c, int ms)
 	struct zsock_pollfd pfd = { .fd = c->efd, .events = ZSOCK_POLLIN };
 	int64_t until = k_uptime_get() + ms;
 
-	while (k_uptime_get() < until) {
+	while (k_uptime_get() < until && !atomic_get(&c->want_suspended)) {
 		int64_t next = MIN(until, held_next_event(c));
 
 		if (zsock_poll(&pfd, 1, poll_timeout_ms(next)) > 0) {
@@ -909,6 +924,10 @@ static int connect_serviced_inner(struct ret_client *c)
 				(void)process_queue(c); /* holds sends until connected */
 			}
 			(void)service_held(c);
+			if (atomic_get(&c->want_suspended)) {
+				zsock_close(fd);
+				return -ECANCELED;
+			}
 
 			if (n > 0 && (fds[0].revents & (ZSOCK_POLLOUT | ZSOCK_POLLERR |
 							ZSOCK_POLLHUP))) {
@@ -928,6 +947,27 @@ static int connect_serviced_inner(struct ret_client *c)
 	return err;
 }
 
+/* Suspended: no socket, no timers. Waiting sends cannot complete, so they
+ * fail now; requests that arrive fail as they come (not connected).
+ */
+static void suspended(struct ret_client *c)
+{
+	struct zsock_pollfd pfd = { .fd = c->efd, .events = ZSOCK_POLLIN };
+
+	for (size_t i = 0; i < ARRAY_SIZE(c->held); i++) {
+		if (c->held[i].used) {
+			free_held(&c->held[i], RET_RECEIPT_DISCONNECTED, true);
+		}
+	}
+	set_state(c, RET_STATE_SUSPENDED);
+	while (atomic_get(&c->want_suspended)) {
+		if (zsock_poll(&pfd, 1, -1) > 0) {
+			drain_eventfd(c);
+			(void)process_queue(c);
+		}
+	}
+}
+
 static void client_thread(void *p1, void *p2, void *p3)
 {
 	struct ret_client *c = p1;
@@ -937,16 +977,32 @@ static void client_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	for (;;) {
-		set_state(c, c->state == RET_STATE_DISCONNECTED ? RET_STATE_CONNECTING
-								 : RET_STATE_RECONNECTING);
+		if (atomic_get(&c->want_suspended)) {
+			suspended(c);
+			delay_s = 1;
+		}
+		set_state(c, (c->state == RET_STATE_DISCONNECTED || c->state == RET_STATE_SUSPENDED)
+				     ? RET_STATE_CONNECTING
+				     : RET_STATE_RECONNECTING);
 		LOG_INF("connecting to %s:%u", c->host, c->port);
 
 		c->sock = connect_serviced(c);
+		if (c->sock == -ECANCELED) {
+			c->sock = -1;
+			continue; /* suspended mid-connect */
+		}
 		if (c->sock < 0) {
 			LOG_WRN("connect failed: %d, retry in %d s", c->sock, delay_s);
 			c->sock = -1;
 			backoff(c, delay_s * MSEC_PER_SEC);
 			delay_s = MIN(delay_s * 2, CONFIG_RET_RECONNECT_BACKOFF_MAX_S);
+			continue;
+		}
+
+		if (atomic_get(&c->want_suspended)) {
+			/* Connected at once, but a suspend came meanwhile. */
+			zsock_close(c->sock);
+			c->sock = -1;
 			continue;
 		}
 
@@ -956,6 +1012,9 @@ static void client_thread(void *p1, void *p2, void *p3)
 		set_state(c, RET_STATE_CONNECTED);
 		run_connected(c);
 		disconnect(c);
+		if (atomic_get(&c->want_suspended)) {
+			continue;
+		}
 		set_state(c, RET_STATE_RECONNECTING);
 
 		/* Only a connection that was established for real resets the
@@ -1234,4 +1293,24 @@ int ret_lxmf_sync(struct ret_client *c, const uint8_t node_hash[RET_DEST_HASH_LE
 	}
 	memcpy(r.dest_hash, node_hash, RET_DEST_HASH_LEN);
 	return queue_req(c, &r);
+}
+
+int ret_client_suspend(struct ret_client *c)
+{
+	if (!c->started) {
+		return -ENOTCONN;
+	}
+	atomic_set(&c->want_suspended, 1);
+	(void)zvfs_eventfd_write(c->efd, 1);
+	return 0;
+}
+
+int ret_client_resume(struct ret_client *c)
+{
+	if (!c->started) {
+		return -ENOTCONN;
+	}
+	atomic_set(&c->want_suspended, 0);
+	(void)zvfs_eventfd_write(c->efd, 1);
+	return 0;
 }

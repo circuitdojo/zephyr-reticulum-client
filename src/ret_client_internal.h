@@ -114,6 +114,18 @@ struct link_resource {
 	uint8_t plain[CONFIG_RET_RESOURCE_MAX_SIZE];
 };
 
+/** A sender whose key is persisted (ret/lk/<n>), for after a reboot. */
+struct lxmf_known {
+	bool used;
+	uint8_t dest[RET_TRUNC_HASH_LEN];
+	uint8_t pub[RET_PUBKEY_LEN];
+	/* Store order: the lowest goes first when the table is full. */
+	uint32_t seq;
+};
+
+/* Unknown senders whose announce (path response) we wait for. */
+#define RET_LXMF_WANTED 4
+
 /* Ids per /get request: [wants, [], limit] must fit one link packet. */
 #define RET_LXMF_SYNC_BATCH 10
 /* Too-large message ids remembered within one sync, so a re-list skips them. */
@@ -180,6 +192,8 @@ struct ret_client {
 	bool conn_broken;
 	/** A connect is in progress: queued sends are held until it is done. */
 	bool connecting;
+	/** ret_client_suspend() asked for (any thread); resume clears it. */
+	atomic_t want_suspended;
 	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
 	struct link link;
 	struct link_resource res;
@@ -189,6 +203,10 @@ struct ret_client {
 	 */
 	uint8_t lxmf_app_data[128];
 	int64_t lxmf_last_path_request_ms;
+	struct lxmf_known lxmf_known[CONFIG_RET_LXMF_KNOWN_SENDERS];
+	uint32_t lxmf_known_seq;
+	uint8_t lxmf_wanted[RET_LXMF_WANTED][RET_TRUNC_HASH_LEN];
+	size_t lxmf_wanted_next;
 	struct lxmf_sync sync;
 	struct ret_lxmf_seen_entry lxmf_seen_entries[CONFIG_RET_LXMF_SEEN_ENTRIES];
 	struct ret_lxmf_seen lxmf_seen;
@@ -244,6 +262,9 @@ enum lxmf_outcome {
 	LXMF_BAD_SIGNATURE,
 	LXMF_MALFORMED,
 };
+
+/** A validated announce: keep an awaited sender's key. */
+void ret_lxmf_drv_on_announce(struct ret_client *c, const struct ret_destination *d);
 
 /** Check, remember and deliver a message body (packed[16:]) for us. */
 enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body, size_t len);

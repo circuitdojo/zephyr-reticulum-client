@@ -4,6 +4,13 @@
 
 ### Added
 
+- Sleep: `ret_client_suspend()` / `ret_client_resume()` and `samples/ret_lxmf_sleep`, a sleepy
+  LXMF node modelled on lion_sleep (suspend client and peripherals, modem in PSM, wake, sync,
+  answer, sleep). e2e scenario `sleep`: three wakes, mail deposited while asleep collected at
+  the next.
+- Known LXMF senders: the keys of senders that messaged the device are kept in settings, so
+  their messages verify after a sleep or reboot. e2e `store-forward` checks it across a reboot.
+
 - LXMF propagation sync: `ret_lxmf_sync()` collects the messages an LXMF propagation node
   (lxmd) holds for the device, then acknowledges them so the node deletes them. Batches are
   bounded by `CONFIG_RET_LXMF_SYNC_LIMIT_KB`; larger messages are left at the node and logged.
@@ -133,6 +140,10 @@
 - `ret_client_name_hash()` works before `ret_client_start()`.
 
 ### Fixed
+
+- Samples logged received text with `%.*s`; deferred logging copies `%s` up to a terminator
+  whatever the precision, so it read past unterminated message buffers. They log bounded,
+  terminated copies now.
 
 - PSA Crypto is now selected through `MBEDTLS_PSA_CRYPTO_C`, which exists
   in vanilla Zephyr 4.2 as well as NCS (`PSA_CRYPTO` is NCS-only).

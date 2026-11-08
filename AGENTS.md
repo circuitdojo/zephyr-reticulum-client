@@ -12,7 +12,11 @@ client. It connects to a Python `rnsd` TCPServerInterface and supports:
 Samples:
 - `samples/ret_basic`: raw Reticulum packets and a link test. The e2e workhorse.
 - `samples/ret_lxmf`: an always-connected LXMF node. It announces `lxmf.delivery`, sends to a
-  contact and answers what it receives.
+  contact and answers what it receives, and syncs from a propagation node.
+- `samples/ret_lxmf_sleep`: the sleepy node, modelled on `lion-client/samples/lion_sleep`. Each
+  wake it resumes, syncs, answers, messages its contact, waits for proofs, then suspends the
+  client (socket closed) and the peripherals (NOR, UART, PMIC BUCK2) and sleeps. The modem drops
+  into PSM between wakes.
 
 Targets:
 - `native_sim`: NSOS host sockets, PSA Crypto from mbedTLS.
@@ -129,6 +133,11 @@ waits for network time (date_time: modem, else NTP) before sending, because LXMF
 wall-clock time. Run `tools/rns_peer/lxmf_peer.py --config ret-client/tools/rnsd-hw` as its contact,
 or message its address from NomadNet or Sideband.
 
+`ret_lxmf_sleep` needs `CONFIG_RET_SLEEP_PROPAGATION_NODE` (an lxmd the hub runs, attached to
+`tools/rnsd-hw`) in its `env/` overlay. Measure sleep current with the PPK between wakes. The
+sample prints stack use (thread analyzer) once per wake, after the sync: that is the client
+thread's deepest path.
+
 The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7` and
 `lxmf==1.2.1` (`uv run --project ret-client/tools/rns_peer ...`). Always use `uv`, never bare pip.
 
@@ -167,6 +176,15 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
   eviction. `ret_lxmf_send()` packs and signs on the caller's thread
   (identity and address are immutable after start), stamps it with `SYS_CLOCK_REALTIME`, and
   returns -ENODATA while the wall clock is unset. Then it goes through `ret_client_send()`.
+- Known senders: the keys of senders that messaged us are kept as `ret/lk/*`
+  (`CONFIG_RET_LXMF_KNOWN_SENDERS`; the least recently verified is replaced first, an order kept in
+  RAM and taken from storage order after a reboot), so after a sleep or reboot their
+  messages still verify. A key is kept when a message from it verified against a current
+  announce, or when the announce answering the path request for an unverified sender arrives.
+  Records are checked against their address on load; an unreadable set is reset.
+- `ret_client_suspend()` / `ret_client_resume()`: suspend closes the link (LINKCLOSE), fails
+  waiting sends, closes the socket and reports `RET_STATE_SUSPENDED`; the thread then only
+  answers requests. Resume reconnects (announce, fresh paths).
 - `src/ret_client_lxmf_sync.c`: `ret_lxmf_sync()`, propagation node sync: link, identify, `/get`
   list, fetch in batches of 10 under `CONFIG_RET_LXMF_SYNC_LIMIT_KB` (re-asking for what a full
   batch left out), acknowledge, close. Link callbacks only record the next step;
@@ -258,8 +276,8 @@ Kconfig notes carried over from lion-client:
 in the `ret-client-ci` image (`ci/Dockerfile`). It has two jobs:
 - `native_sim` (vanilla workspace): ruff, a golden-vector regeneration diff, the flash.py
   tests, the unit tests, warning-free sample builds and the full e2e.
-- `nrf9151` (NCS workspace, after `native_sim`): warning-free sysbuilds of both samples for the
-  Feather. It uploads their `merged.hex` files as the `samples-nrf9151` artifact.
+- `nrf9151` (NCS workspace, after `native_sim`): warning-free sysbuilds of the three samples for
+  the Feather. It uploads their `merged.hex` files as the `samples-nrf9151` artifact.
 
 Runner setup (image build, volume allowlist) is in `docs/ci-forgejo.md`. After pushing a
 PR, `scripts/forgejo.sh ci` waits for the run.
@@ -305,7 +323,9 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   `lxmf_peer.py`: messages and echoes both ways, signatures validated on both sides),
   `store-forward` (a fresh `lxmd` from `tools/lxmd-test`: messages deposited with
   `tools/rns_peer/lxmf_send.py` while the device is down are collected by its sync, and the
-  node's store ends empty),
+  node's store ends with only an oversized one; a third boot verifies a new message with the
+  sender key kept in flash), `sleep` (`ret_lxmf_sleep`: three wakes with mail deposited while
+  it sleeps),
   plus `late` (path request, and sends held during the connect), `stall` (receipt watchdog),
   `bootdown` (rnsd down at boot) and `restart` (rnsd restarted mid-run) using a known-hash
   build. Each known-hash scenario starts a fresh rnsd, because

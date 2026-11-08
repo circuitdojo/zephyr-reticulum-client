@@ -239,6 +239,18 @@ config RET_LXMF_SEEN_ENTRIES
 	  forgotten and messages as old as it are refused from then on.
 	  Only verified messages evict; see src/ret_lxmf_seen.h.
 
+config RET_LXMF_KNOWN_SENDERS
+	int "LXMF senders whose keys are kept across reboots"
+	default 16
+	range 1 256
+	help
+	  A sender's key normally comes from its announce, which a device
+	  that was asleep or rebooted has not heard: its messages would
+	  arrive unverified. The keys of senders that messaged us are kept
+	  in settings (84 bytes each), the least recently verified replaced
+	  first, so their
+	  messages verify after a sleep or reboot too.
+
 config RET_LXMF_SYNC_LIMIT_KB
 	int "Propagation sync: largest batch of messages per request (KB)"
 	default 4

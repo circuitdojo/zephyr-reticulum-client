@@ -27,6 +27,8 @@ enum ret_client_state {
 	RET_STATE_CONNECTING,
 	RET_STATE_CONNECTED,
 	RET_STATE_RECONNECTING,
+	/** ret_client_suspend(): no socket, no timers, until resumed. */
+	RET_STATE_SUSPENDED,
 };
 
 enum ret_receipt_status {
@@ -190,6 +192,27 @@ int ret_client_dest_hash(const struct ret_client *client, uint8_t out[RET_DEST_H
 
 /** Queue an announce of the client's own destination. */
 int ret_client_announce(struct ret_client *client);
+
+/**
+ * Suspend the client, for a device about to sleep: an open link is
+ * closed (LINKCLOSE) and a sync ends, sends waiting for a proof or a path
+ * fail (RET_RECEIPT_DISCONNECTED), and the socket is closed, so the modem
+ * can enter PSM and rnsd probes nothing. on_state reports
+ * RET_STATE_SUSPENDED once done. Until ret_client_resume() the thread
+ * only waits for requests, failing sends with RET_RECEIPT_FAILED.
+ * Returns at once.
+ */
+int ret_client_suspend(struct ret_client *client);
+
+/**
+ * Resume a suspended client: it reconnects (announcing, and requesting
+ * paths afresh, as on any connect). Returns at once; on_state reports
+ * RET_STATE_CONNECTING, then RET_STATE_CONNECTED, or RET_STATE_RECONNECTING
+ * while connects fail (it keeps retrying). A resume that follows a suspend
+ * before the client thread acted on it cancels it: no RET_STATE_SUSPENDED
+ * is reported then.
+ */
+int ret_client_resume(struct ret_client *client);
 
 /* --- LXMF ----------------------------------------------------------- */
 

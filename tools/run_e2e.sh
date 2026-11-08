@@ -29,7 +29,16 @@
 #             5000 for it; the device boots again and its sync collects
 #             the 12 in batches the 4 KB transfer limit cuts short, and
 #             acknowledges them -> 12 delivered, only the 5000-byte one
-#             (over the limit) left at the node, exit 0
+#             (over the limit) left at the node, exit 0. Those arrive
+#             unverified (sender unseen); the device asks for the
+#             sender's path and keeps its key, so on a third boot a new
+#             message verifies with nothing but the kept key.
+#
+# ret_lxmf_sleep build (the sleepy node):
+#   sleep     3 wakes, 30 s apart: each resumes, reconnects, announces,
+#             syncs and suspends (socket closed). Messages deposited while
+#             it sleeps arrive at the next wake -> syncs of 0, 2, 1, the
+#             last one verified, exit 0
 #
 # Known-hash build (sends to the peer's destination hash at once):
 #   late      peer announced once before the device started: the only way
@@ -59,6 +68,7 @@ BUILD_HASH="$TOP/build/ret_e2e-hash"
 BUILD_ECHO="$TOP/build/ret_e2e-echo"
 BUILD_LXMF="$TOP/build/ret_e2e-lxmf"
 BUILD_SF="$TOP/build/ret_e2e-sf"
+BUILD_SLEEP="$TOP/build/ret_e2e-sleep"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
@@ -70,7 +80,7 @@ COUNT_LXMF=3
 COUNT_SF=12
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf store-forward late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove echo lxmf store-forward sleep late stall bootdown restart)
 
 pids=()
 cleanup() {
@@ -164,7 +174,7 @@ if needs lxmf; then
 		>"$LOGS/build-$(basename "$BUILD_LXMF").log" 2>&1 ||
 		fail "build failed, see $LOGS/build-$(basename "$BUILD_LXMF").log"
 fi
-if needs store-forward; then
+if needs store-forward sleep; then
 	# A fresh node per run: its identity decides the hash the device
 	# syncs with, and its message store starts empty.
 	LXMD_DIR="$LOGS/lxmd"
@@ -178,6 +188,16 @@ if needs store-forward; then
 		-DCONFIG_RET_LXMF_SAMPLE_SYNC_AND_EXIT=y \
 		>"$LOGS/build-$(basename "$BUILD_SF").log" 2>&1 ||
 		fail "build failed, see $LOGS/build-$(basename "$BUILD_SF").log"
+	echo "== build $(basename "$BUILD_SLEEP") (sleepy node)"
+	west build -b native_sim "$RET/samples/ret_lxmf_sleep" -d "$BUILD_SLEEP" -p --no-sysbuild -- \
+		-DCONFIG_RET_SERVER_PORT=$PORT \
+		-DCONFIG_RET_SLEEP_PROPAGATION_NODE=\""$NODE"\" \
+		-DCONFIG_RET_SLEEP_CYCLES=3 \
+		-DCONFIG_RET_SLEEP_INTERVAL_S=30 \
+		-DCONFIG_RET_SLEEP_WAKE_TIMEOUT_S=30 \
+		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
+		>"$LOGS/build-$(basename "$BUILD_SLEEP").log" 2>&1 ||
+		fail "build failed, see $LOGS/build-$(basename "$BUILD_SLEEP").log"
 fi
 if needs late stall bootdown restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
@@ -364,23 +384,38 @@ scenario_lxmf() {
 	echo "   $COUNT_LXMF/$COUNT_LXMF each way, signatures validated both ways (device $own)"
 }
 
-scenario_store_forward() {
-	local lxmd_log="$LOGS/lxmd.log" send_log="$LOGS/sender-sf.log" go="$LOGS/sf-go"
-	local dev1="$LOGS/device-sf-1.log" dev2="$LOGS/device-sf-2.log" n
-
+LXMD_PID=
+lxmd_n=0
+start_lxmd() {
+	lxmd_n=$((lxmd_n + 1))
+	local log="$LOGS/lxmd-$lxmd_n.log"
 	# Unbuffered: its log is how we know it is up.
-	PYTHONUNBUFFERED=1 "$PEER_PROJECT/.venv/bin/lxmd" --config "$LXMD_DIR" --rnsconfig "$RNSD_CONFIG" -p \
-		>"$lxmd_log" 2>&1 &
-	local lxmd_pid=$!
-	pids+=("$lxmd_pid")
-	wait_for 30 "lxmd to start" grep -q "$NODE" "$lxmd_log"
+	PYTHONUNBUFFERED=1 "$PEER_PROJECT/.venv/bin/lxmd" --config "$LXMD_DIR" \
+		--rnsconfig "$RNSD_CONFIG" -p >"$log" 2>&1 &
+	LXMD_PID=$!
+	pids+=("$LXMD_PID")
+	wait_for 30 "lxmd to start" grep -q "$NODE" "$log"
+}
 
+stop_pid() {
+	kill "$1" 2>/dev/null || true
+	wait "$1" 2>/dev/null || true
+}
+
+scenario_store_forward() {
+	local send_log="$LOGS/sender-sf.log" go="$LOGS/sf-go"
+	local dev1="$LOGS/device-sf-1.log" dev2="$LOGS/device-sf-2.log"
+	local dev3="$LOGS/device-sf-3.log" n
+
+	start_lxmd
+	# --linger: it stays attached, so the device's path request for it
+	# (after the unverified messages) is answered.
 	"$PY" "$PEER_PROJECT/lxmf_send.py" --config "$RNSD_CONFIG" --node "$NODE" \
-		--to-name ret-lxmf --count $COUNT_SF --size 600 --big 5000 --go-file "$go" \
-		>"$send_log" 2>&1 &
+		--to-name ret-lxmf --count $COUNT_SF --size 600 --big 5000 --then 1 \
+		--go-file "$go" --linger >"$send_log" 2>&1 &
 	local send_pid=$!
 	pids+=("$send_pid")
-	wait_for 30 "sender ready" grep -q "^SENDER READY" "$send_log"
+	wait_for 120 "sender ready (path to the node)" grep -q "^SENDER READY" "$send_log"
 	local sender
 	sender=$(awk '/^SENDER READY/ {print $3; exit}' "$send_log")
 
@@ -393,7 +428,7 @@ scenario_store_forward() {
 	# Offline: deposit at the node.
 	wait_for 30 "sender to see the device" grep -q "^TARGET" "$send_log"
 	touch "$go"
-	wait "$send_pid" || fail "store-forward: deposit failed, see $send_log"
+	wait_for 120 "the deposits" grep -q "^DEPOSITED big$" "$send_log"
 	for n in $(seq 1 $COUNT_SF); do
 		grep -q "^DEPOSITED stored #$n$" "$send_log" ||
 			fail "store-forward: stored #$n not deposited, see $send_log"
@@ -405,18 +440,32 @@ scenario_store_forward() {
 	[ "$held" -eq $((COUNT_SF + 1)) ] ||
 		fail "store-forward: node holds $held messages, want $((COUNT_SF + 1))"
 
-	# Boot 2: the sync collects them.
+	# Boot 2: the sync collects them, and keeps the sender's key.
 	run_device "$BUILD_SF/zephyr/zephyr.exe" "$dev2"
-	kill "$lxmd_pid" 2>/dev/null || true
-	wait "$lxmd_pid" 2>/dev/null || true
+	grep -q "keeping the key of LXMF sender ${sender:0:8}" "$dev2" ||
+		fail "store-forward: the sender's key was not kept, see $dev2"
 
-	[ $RC -eq 0 ] || fail "store-forward: second sync failed (exit $RC), see $dev2"
+	# Boot 3: a fresh process knows the sender only from flash.
+	touch "$go.2"
+	wait_for 60 "the later deposit" grep -q "^DEPOSITED later #1$" "$send_log"
+	run_device "$BUILD_SF/zephyr/zephyr.exe" "$dev3"
+	stop_pid "$send_pid"
+	stop_pid "$LXMD_PID"
+	[ $RC -eq 0 ] || fail "store-forward: third sync failed (exit $RC), see $dev3"
+	grep -q "LXMF RECEIVED verified from $sender: |later #1" "$dev3" ||
+		fail "store-forward: later #1 not verified with the kept key, see $dev3"
+	# And the key came from flash, not from a fresh announce this boot.
+	! grep -q "path request for ${sender:0:8}" "$dev3" ||
+		fail "store-forward: boot 3 had to ask for the sender's path, see $dev3"
+	! grep -q "keeping the key of LXMF sender" "$dev3" ||
+		fail "store-forward: boot 3 learned the key anew, see $dev3"
+
+	grep -q "SYNC DONE 0 $COUNT_SF" "$dev2" ||
+		fail "store-forward: second sync failed, see $dev2"
 	for n in $(seq 1 $COUNT_SF); do
 		grep -q "LXMF RECEIVED [A-Za-z]* from $sender: |stored #$n\b" "$dev2" ||
 			fail "store-forward: stored #$n not delivered, see $dev2"
 	done
-	grep -q "SYNC DONE 0 $COUNT_SF" "$dev2" ||
-		fail "store-forward: want SYNC DONE 0 $COUNT_SF, see $dev2"
 	grep -q "1 propagated message(s) exceed RET_LXMF_SYNC_LIMIT_KB" "$dev2" ||
 		fail "store-forward: the oversized message was not reported, see $dev2"
 	! grep -q "LXMF RECEIVED .*|big" "$dev2" ||
@@ -427,7 +476,57 @@ scenario_store_forward() {
 	[ "$left" -eq 1 ] || fail "store-forward: $left message(s) at the node, want 1"
 	local unverified
 	unverified=$(grep -c "LXMF RECEIVED UNVERIFIED" "$dev2" || true)
-	echo "   $COUNT_SF/$COUNT_SF collected and acknowledged, oversized one left ($unverified unverified: sender unseen)"
+	echo "   $COUNT_SF/$COUNT_SF collected and acknowledged, oversized one left ($unverified unverified: sender unseen);"
+	echo "   after a reboot the kept key verifies the sender"
+}
+
+scenario_sleep() {
+	local send_log="$LOGS/sender-sleep.log" go="$LOGS/sleep-go" dev="$LOGS/device-sleep.log"
+
+	# A fresh rnsd: store-forward just asked it for the node's path, and
+	# rnsd drops repeat path requests for 45 s.
+	fresh_rnsd
+	start_lxmd
+	"$PY" "$PEER_PROJECT/lxmf_send.py" --config "$RNSD_CONFIG" --node "$NODE" \
+		--to-name ret-sleep --count 2 --prefix "night #" --then 1 --go-file "$go" --linger \
+		>"$send_log" 2>&1 &
+	local send_pid=$!
+	pids+=("$send_pid")
+	wait_for 120 "sender ready (path to the node)" grep -q "^SENDER READY" "$send_log"
+	local sender
+	sender=$(awk '/^SENDER READY/ {print $3; exit}' "$send_log")
+
+	RC=0
+	timeout 300 "$BUILD_SLEEP/zephyr/zephyr.exe" --seed-random --flash="$FLASH" >"$dev" 2>&1 &
+	local dev_pid=$!
+	pids+=("$dev_pid")
+	# Deposit only while it sleeps: after wake 1, then after wake 2.
+	wait_for 60 "the first sleep" grep -q "SLEEPING" "$dev"
+	touch "$go"
+	wait_for 60 "the night deposits" grep -q "^DEPOSITED night #2$" "$send_log"
+	wait_for 60 "the second sleep" bash -c "[ \$(grep -c SLEEPING '$dev') -ge 2 ]"
+	touch "$go.2"
+	wait "$dev_pid" || RC=$?
+	stop_pid "$send_pid"
+	stop_pid "$LXMD_PID"
+
+	[ $RC -eq 0 ] || fail "sleep: device exit $RC, see $dev"
+	local syncs
+	syncs=$(grep -o "SYNC DONE -\?[0-9]* [0-9]*" "$dev" | tr '\n' ' ')
+	[ "$syncs" = "SYNC DONE 0 0 SYNC DONE 0 2 SYNC DONE 0 1 " ] ||
+		fail "sleep: syncs were '$syncs', want 0, 2 and 1 messages, see $dev"
+	grep -q "LXMF RECEIVED .* from $sender: |night #1" "$dev" || fail "sleep: night #1 missing"
+	grep -q "LXMF RECEIVED .* from $sender: |night #2" "$dev" || fail "sleep: night #2 missing"
+	grep -q "LXMF RECEIVED verified from $sender: |later #1" "$dev" ||
+		fail "sleep: later #1 not verified, see $dev"
+	# No connection held between wakes; one announce per wake.
+	local suspends announces
+	suspends=$(grep -c -- "-> SUSPENDED" "$dev" || true)
+	announces=$(grep -c "announced own destination" "$dev" || true)
+	[ "$suspends" -eq 3 ] || fail "sleep: $suspends suspends, want 3"
+	[ "$announces" -eq 3 ] || fail "sleep: $announces announces, want 3"
+	grep -q "DONE 3/3 wakes synced" "$dev" || fail "sleep: want DONE 3/3, see $dev"
+	echo "   3 wakes: mail deposited while asleep collected at the next wake"
 }
 
 fresh_rnsd() {
@@ -537,6 +636,7 @@ for s in "${scenarios[@]}"; do
 	echo) scenario_echo ;;
 	lxmf) scenario_lxmf ;;
 	store-forward) scenario_store_forward ;;
+	sleep) scenario_sleep ;;
 	late) scenario_late ;;
 	stall) scenario_stall ;;
 	bootdown) scenario_bootdown ;;
