@@ -19,21 +19,26 @@ request. One job, `native_sim`, in the `ret-client-ci` container:
 
 Then the `nrf9151` job (needs `native_sim`), in the NCS workspace
 (`west-ncs.yml`) on its own `ret-client-ncs-west` volume. It builds
-`ret_basic` and `ret_lxmf` for `circuitdojo_feather_nrf9151/nrf9151/ns` with
-sysbuild, fails on compiler warnings, and uploads each `merged.hex` (TF-M plus
-app, what `scripts/flash.py` programs) as the `samples-nrf9151` artifact (14
-days).
+the three samples for `circuitdojo_feather_nrf9151/nrf9151/ns` with sysbuild
+and fails on compiler warnings. It uploads `ret_basic`'s and `ret_lxmf`'s
+`tfm_merged.hex` (TF-M plus app) together with nfed's
+`uicr_debug_access_open.hex` as the `samples-nrf9151` artifact (14 days).
+Flash both (`scripts/flash.py` does, from a build directory): without the UICR
+image an erased nRF91 protects its debug port after the first reset.
 Its first run on a cold volume clones all of NCS and takes the better part
 of an hour.
 
 ## Runner setup (once, on bigbox.local)
 
-1. Build the image (not built by any workflow); rebuild when a pinned
-   version in `ci/Dockerfile` changes:
+1. Build the image (not built by any workflow). Its tag names the Zephyr
+   SDK it carries (`zsdk-<ZSDK_VERSION>` from `ci/Dockerfile`), and
+   `.forgejo/workflows/ci.yml` names that tag. A change that moves to a new
+   SDK builds a new tag and points its workflow there, so `main` keeps its
+   image until the change merges:
 
    ```bash
    git clone https://forgejo.internal.circuitdojo.com/circuitdojo/ret-client.git
-   cd ret-client && docker build -t ret-client-ci:latest ci/
+   cd ret-client && docker build -t ret-client-ci:zsdk-1.0.1 ci/
    ```
 
 2. Allowlist the volumes in the runner's `config.yml` (a missing entry is

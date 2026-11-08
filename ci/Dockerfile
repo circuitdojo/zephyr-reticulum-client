@@ -2,11 +2,14 @@
 # needs, and uv for the Python test peer / rnsd used by the e2e test.
 #
 # Build it on the runner host (not in a workflow):
-#   docker build -t ret-client-ci:latest ci/
+#   docker build -t ret-client-ci:zsdk-<ZSDK_VERSION> ci/
 #
+# The tag names the Zephyr SDK it carries, and .forgejo/workflows/ci.yml
+# names the tag: a branch moving to a new SDK builds a new tag and points
+# its workflow there, so main keeps its image until the change merges.
 # Rebuild when a pinned version below changes. The west workspace and the
 # compiler cache live in named volumes mounted by the workflow; see
-# docs/ci-forgejo.md. Same base and SDK as lion-client's image.
+# docs/ci-forgejo.md.
 FROM docker.io/zephyrprojectrtos/ci-base:v0.29.3
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,9 +38,9 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
     && uv --version
 
 # Pinned to zephyr/SDK_VERSION on the revision west-vanilla.yml tracks
-# (v4.2.2 wants 0.17.4; NCS v3.2.1 in west-ncs.yml wants the same).
+# (v4.4.2 wants 1.0.1; NCS v3.5 in west-ncs.yml wants the same).
 # x86_64-zephyr-elf for native_sim, arm-zephyr-eabi for the nRF9151.
-ARG ZSDK_VERSION=0.17.4
+ARG ZSDK_VERSION=1.0.1
 RUN cd /opt \
     && curl -fsSL -O "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZSDK_VERSION}/zephyr-sdk-${ZSDK_VERSION}_linux-x86_64_minimal.tar.xz" \
     && tar xf "zephyr-sdk-${ZSDK_VERSION}_linux-x86_64_minimal.tar.xz" \

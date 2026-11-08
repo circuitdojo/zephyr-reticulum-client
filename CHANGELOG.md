@@ -122,6 +122,17 @@
 
 ### Changed
 
+- Moved to NCS v3.5 (via nfed `v3.5.x`, v3.5.0-preview3) and vanilla Zephyr v4.4.2, the line
+  NCS 3.5 is built on. Zephyr SDK 1.0.1 (CI image).
+  - `RET_CORE` selects `PSA_CRYPTO`, which both now have: TF-M provides it on the nRF9151,
+    Mbed TLS / TF-PSA-Crypto on native_sim.
+  - No Partition Manager: the samples' flash layout is a devicetree overlay
+    (`samples/common/circuitdojo_feather_nrf9151_ns_flash.dtsi`) giving the bootloader's space
+    to TF-M and the app; settings stay on the external NOR's `lfs_partition`.
+  - `scripts/flash.py` follows Zephyr Tools 0.7.0: images from `domains.yaml` in flash order
+    (`tfm_merged.hex` plus nfed's UICR debug-access image), UICR checked across images, CTRL-AP
+    erase, `--dry-run`. It needs `pyyaml` now.
+
 - The TCP connect is non-blocking and polled with the client's queue and
   deadlines, trying each resolved address in turn; sends queued while
   connecting are held instead of failed.
@@ -145,8 +156,6 @@
   whatever the precision, so it read past unterminated message buffers. They log bounded,
   terminated copies now.
 
-- PSA Crypto is now selected through `MBEDTLS_PSA_CRYPTO_C`, which exists
-  in vanilla Zephyr 4.2 as well as NCS (`PSA_CRYPTO` is NCS-only).
 - `run_e2e.sh` no longer leaves test peers running after a scenario.
 - A socket send that hits `SO_SNDTIMEO` now fails and drops the
   connection instead of being retried forever.

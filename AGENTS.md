@@ -35,21 +35,23 @@ Read it before touching packet, crypto or announce code.
 
 Everything builds from the **workspace root** (`nrf9160-feather-examples-and-drivers/`),
 not from inside this repo. Its manifest is one of this repo's:
-- `west-vanilla.yml`: vanilla Zephyr v4.2.2, mbedTLS, picolibc, Monocypher and mpack. native_sim
-  only.
-- `west-ncs.yml`: NCS v3.2.1, needed for the nRF9151.
+- `west-vanilla.yml`: vanilla Zephyr v4.4.2 (the line NCS v3.5 is built on), Mbed TLS,
+  TF-PSA-Crypto, picolibc, Monocypher and mpack. native_sim only.
+- `west-ncs.yml`: nfed `v3.5.x`, which imports NCS v3.5 (v3.5.0-preview3 at the time of
+  writing). Needed for the nRF9151.
 
-Switch with `west config manifest.file <file>` and `west update`. Code must build in both: they
-differ in Kconfig (for example, only NCS has `PSA_CRYPTO`). native_sim builds pass
-`--no-sysbuild` to keep output paths identical. Hardware builds use sysbuild, which NCS
-requires.
+Switch with `west config manifest.file <file>` and `west update`. Code must build in both. Since
+Zephyr 4.4 both have `PSA_CRYPTO`, which `RET_CORE` selects: its provider is TF-M on the nRF9151
+and Mbed TLS / TF-PSA-Crypto on native_sim. native_sim builds pass `--no-sysbuild` to keep output
+paths identical. Hardware builds use sysbuild, which NCS requires.
 
 Toolchain environment:
 
 ```bash
 source ~/.zephyrtools/env/bin/activate
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
-export ZEPHYR_SDK_INSTALL_DIR=$HOME/.zephyrtools/toolchain/zephyr-sdk-0.16.4
+# Zephyr 4.4 / NCS 3.5 want SDK 1.0.x (zephyr/SDK_VERSION); CI pins 1.0.1.
+export ZEPHYR_SDK_INSTALL_DIR=$HOME/.zephyrtools/toolchain/zephyr-sdk-1.0.0
 ```
 
 ```bash
@@ -79,23 +81,29 @@ west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_basi
 uv run ret-client/scripts/flash.py build/ret_nrf9151
 
 # flash.py's tests (ported from Zephyr Tools' uicr/flash-hex suites)
-uv run --with pytest pytest ret-client/scripts
+uv run --with pytest --with pyyaml pytest ret-client/scripts
 ```
 
-The 9151 build is not in twister: nfed's board YAML still carries the pre-HWMv2 identifier
-(`circuitdojo_feather_nrf9151_ns`), and twister does not pick the board up. Build it with
-`west build` as above. That is also the plan for its CI job.
+The 9151 builds are `west build` runs of the samples (sysbuild: TF-M, nfed's UICR image), not
+twister tests; the unit tests are native_sim only. CI's `nrf9151` job does the same. (nfed
+`v3.5.x`'s board YAML carries the HWMv2 identifier, so twister could target the board now.)
 
-**Flashing** must follow the Zephyr Tools load sequence (`~/Git/zephyr-tools`,
-`src/commands/flash.ts`). `scripts/flash.py` reproduces it:
-1. Program `build/<dir>/merged.hex`: TF-M plus the app, chosen as Zephyr Tools does for a
-   Partition Manager build. `west flash` programs only the app and leaves whatever TF-M was on
-   the chip, and every PSA call then fails.
-2. Run `recovery --unlock-only`, the nRF91 recovery tool from Zephyr Tools setup.
-3. Check UICR. If the device already has the hex's UICR words, strip them from the download.
-   Otherwise a full chip erase is required (`--erase` or a typed confirmation), and it wipes
-   internal flash.
-4. Run `probe-rs download`, then `probe-rs reset`.
+**Flashing** must follow the Zephyr Tools load sequence (`~/Git/zephyr-tools` 0.7.0,
+`src/commands/flash.ts`, `src/build/flash-hex.ts`). `scripts/flash.py` reproduces it
+(`--dry-run` prints the images and commands without touching the probe):
+1. Pick the images as Zephyr Tools does. NCS 3.5 sysbuild (no Partition Manager): each domain in
+   `domains.yaml` `flash_order` names its hex in `<domain>/zephyr/runners.yaml`. The app domain
+   gives `tfm_merged.hex` (TF-M plus the app); the other images (here nfed's
+   `uicr_debug_access_open`, which keeps the debug port open without a bootloader) are merged
+   into `zephyr-tools/bootloaders.hex` and flashed first with `--preverify`. A Partition Manager
+   build (NCS <= 3.4) flashes `merged.hex`. `west flash` programs only the app and leaves
+   whatever TF-M was on the chip, and every PSA call then fails.
+2. Run `recovery --unlock-only --no-reset`, the nRF91 recovery tool from Zephyr Tools setup.
+3. Check UICR across all images. If the device already has every UICR word, strip them from the
+   download (an image left empty, like the UICR image, is skipped). Otherwise a full chip erase
+   is required (`--erase` or a typed confirmation): `recovery --erase-only --force`, a CTRL-AP
+   ERASEALL, which wipes internal flash and keeps the debug port open for probe-rs.
+4. Run `probe-rs download` per image, then `probe-rs reset`.
 
 **Board config** is in `samples/ret_basic/boards/circuitdojo_feather_nrf9151_ns.conf`.
 - **TF-M:** must be `TFM_PROFILE_TYPE_NOT_SET`. NCS's minimal profile builds the secure image
@@ -103,6 +111,15 @@ The 9151 build is not in twister: nfed's board YAML still carries the pre-HWMv2 
   with `PSA_ERROR_NOT_SUPPORTED` (-134). `port/zephyr/CMakeLists.txt` refuses to build with it.
   To check what TF-M really contains, look at the symbols in `ret_basic/tfm/bin/tfm_s.elf`,
   not the non-secure API headers.
+- **Moving a board from an NCS 3.2 build:** flash once with `--erase`. The Partition Manager put
+  different data at the TF-M storage partitions (0xf0000 on), and a board whose UICR already
+  matches skips the erase. Settings on the NOR, and so the address, survive it.
+- **Flash layout:** NCS 3.5 has no Partition Manager; partitions are devicetree. nfed's board
+  reserves room for MCUboot. The samples flash without a bootloader, so each one's
+  `boards/circuitdojo_feather_nrf9151_ns.overlay` includes
+  `samples/common/circuitdojo_feather_nrf9151_ns_flash.dtsi`, which gives that space to TF-M
+  (128 kB) and the app (832 kB). The TF-M storage partitions and the external NOR's
+  `lfs_partition` stay where the board puts them.
 - **Settings:** stored in `/lfs/ret-settings` on LittleFS on the external W25Q128 NOR, as in
   lion_sleep. Internal flash holds only firmware, so a re-layout, reflash or UICR erase keeps
   the board's identity (its address). Deleting that file gives the board a new address.
@@ -249,7 +266,7 @@ Kconfig notes carried over from lion-client:
    - `ret-client/tools/run_e2e.sh` when anything on the wire path changed: framing, packet,
      crypto, announce, receipt or client.
    - When Python changed: `uv run --group dev ruff check` and `ruff format --check` in
-     `tools/rns_peer`, plus `uv run --with pytest pytest ret-client/scripts`.
+     `tools/rns_peer`, plus `uv run --with pytest --with pyyaml pytest ret-client/scripts`.
    - When the hardware path changed: the nRF9151 build in the NCS workspace, and a board run
      (flash with `scripts/flash.py`).
 5. **Independent review.** Before committing a finished milestone or fix, run a review in a
@@ -277,7 +294,8 @@ in the `ret-client-ci` image (`ci/Dockerfile`). It has two jobs:
 - `native_sim` (vanilla workspace): ruff, a golden-vector regeneration diff, the flash.py
   tests, the unit tests, warning-free sample builds and the full e2e.
 - `nrf9151` (NCS workspace, after `native_sim`): warning-free sysbuilds of the three samples for
-  the Feather. It uploads their `merged.hex` files as the `samples-nrf9151` artifact.
+  the Feather. It uploads `tfm_merged.hex` (TF-M plus app) for `ret_basic` and `ret_lxmf`, with nfed's
+  `uicr_debug_access_open.hex`, as the `samples-nrf9151` artifact.
 
 Runner setup (image build, volume allowlist) is in `docs/ci-forgejo.md`. After pushing a
 PR, `scripts/forgejo.sh ci` waits for the run.

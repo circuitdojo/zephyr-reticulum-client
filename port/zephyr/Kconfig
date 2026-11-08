@@ -3,11 +3,10 @@
 
 config RET_CORE
 	bool "Reticulum protocol core"
-	# PSA Crypto provider: Zephyr's mbedTLS, unless TF-M or nrf_security
-	# provide the API. (NCS also has PSA_CRYPTO, vanilla 4.2 does not;
-	# MBEDTLS_PSA_CRYPTO_C exists in both.)
-	select MBEDTLS if !BUILD_WITH_TFM && !NRF_SECURITY
-	select MBEDTLS_PSA_CRYPTO_C if !BUILD_WITH_TFM && !NRF_SECURITY
+	# The PSA Crypto API (Zephyr 4.4+, so NCS 3.5+ too): its provider is
+	# TF-M on the nRF91 (BUILD_WITH_TFM), Mbed TLS / TF-PSA-Crypto on
+	# native_sim (PSA_CRYPTO_PROVIDER choice).
+	select PSA_CRYPTO
 	imply PSA_WANT_ALG_SHA_256
 	imply PSA_WANT_ALG_HMAC
 	imply PSA_WANT_KEY_TYPE_HMAC
