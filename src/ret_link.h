@@ -38,6 +38,14 @@
 #define RET_LINK_REQUEST_LEN  (RET_X25519_LEN + RET_ED25519_PUB_LEN + 3)
 #define RET_LINK_IDENTIFY_LEN (RET_PUBKEY_LEN + RET_SIG_LEN)
 
+#define RET_LINK_MODE_AES256_CBC  1
+/* sig | responder X25519 pub | signalling. */
+#define RET_LINK_LRPROOF_LEN      (RET_SIG_LEN + RET_X25519_LEN + 3)
+/* packet hash | signature. */
+#define RET_LINK_PACKET_PROOF_LEN (RET_HASH_LEN + RET_SIG_LEN)
+/* An RTT report above this is not believed. */
+#define RET_LINK_RTT_MAX_S        3600.0
+
 /** The initiator's per-link ephemeral keys. */
 struct ret_link_keys {
 	uint8_t x25519_prv[RET_X25519_LEN];
@@ -80,6 +88,59 @@ int ret_link_proof_validate(const uint8_t link_id[RET_TRUNC_HASH_LEN],
 			    const uint8_t dest_ed25519_pub[RET_ED25519_PUB_LEN],
 			    const struct ret_link_keys *k, const struct ret_packet *proof,
 			    uint8_t key[RET_TOKEN_KEY_LEN], uint16_t *mtu);
+
+/** HKDF-SHA256(64, X25519(@p prv, @p peer_pub), salt = link_id): both sides. */
+int ret_link_derive_key(const uint8_t prv[RET_X25519_LEN], const uint8_t peer_pub[RET_X25519_LEN],
+			const uint8_t link_id[RET_TRUNC_HASH_LEN], uint8_t key[RET_TOKEN_KEY_LEN]);
+
+/* --- Responder side ------------------------------------------------- */
+
+/** An initiator's LINKREQUEST; pointers reference the packet data. */
+struct ret_link_peer_request {
+	const uint8_t *x25519_pub;
+	const uint8_t *ed25519_pub;
+	/** Signalled MTU, or RET_MTU when the request has no signalling. */
+	uint32_t mtu;
+	bool signalled;
+};
+
+/**
+ * Parse a LINKREQUEST (64 bytes, or 67 with signalling) as
+ * Link.validate_request does.
+ *
+ * @retval -EBADMSG not a link request, or a wrong size
+ * @retval -EPROTO a link mode other than AES-256-CBC
+ */
+int ret_link_request_parse(const struct ret_packet *pkt, struct ret_link_peer_request *req);
+
+/**
+ * The responder's LRPROOF packet for @p link_id, signed by the
+ * destination's identity, confirming @p mtu (Link.prove()).
+ *
+ * @return packet length, or a negative errno
+ */
+int ret_link_proof_build(const struct ret_local_identity *id,
+			 const uint8_t link_id[RET_TRUNC_HASH_LEN],
+			 const uint8_t resp_x25519_pub[RET_X25519_LEN], uint32_t mtu, uint8_t *out,
+			 size_t cap);
+
+/**
+ * The proof for a received link packet: a PROOF on the link carrying
+ * packet_hash | Ed25519(identity, packet_hash), unencrypted
+ * (Link.prove_packet()).
+ *
+ * @return packet length, or a negative errno
+ */
+int ret_link_packet_proof_build(const struct ret_local_identity *id,
+				const uint8_t link_id[RET_TRUNC_HASH_LEN],
+				const uint8_t packet_hash[RET_HASH_LEN], uint8_t *out, size_t cap);
+
+/**
+ * The initiator's LRRTT plaintext: one msgpack number, seconds.
+ *
+ * @retval -EBADMSG not exactly one finite number in [0, RET_LINK_RTT_MAX_S]
+ */
+int ret_link_rtt_parse(const uint8_t *plain, size_t len, uint32_t *rtt_ms);
 
 /**
  * Build a link DATA packet (H1, BROADCAST, LINK, hops 0) with @p context.

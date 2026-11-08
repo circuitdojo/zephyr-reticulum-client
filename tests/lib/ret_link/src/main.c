@@ -296,4 +296,137 @@ ZTEST(link, test_keepalive_interval)
 	zassert_equal(ret_link_keepalive_ms(2000), 360000);
 }
 
+/* --- Responder side (vectors from Link.validate_request/prove/prove_packet) */
+
+static void unpack_ok(const uint8_t *raw, size_t len, struct ret_packet *p)
+{
+	zassert_ok(ret_packet_unpack(raw, len, p));
+}
+
+ZTEST(link, test_request_parse)
+{
+	struct ret_packet p;
+	struct ret_link_peer_request req;
+
+	unpack_ok(v_link_request, sizeof(v_link_request), &p);
+	zassert_ok(ret_link_request_parse(&p, &req));
+	zassert_true(req.signalled);
+	zassert_equal(req.mtu, 500);
+	zassert_mem_equal(req.x25519_pub, keys.x25519_pub, RET_X25519_LEN);
+	zassert_mem_equal(req.ed25519_pub, keys.ed25519_pub, RET_ED25519_PUB_LEN);
+
+	unpack_ok(v_link_request_nosig, sizeof(v_link_request_nosig), &p);
+	zassert_ok(ret_link_request_parse(&p, &req));
+	zassert_false(req.signalled);
+	zassert_equal(req.mtu, 500);
+
+	unpack_ok(v_link_request_mtu_big, sizeof(v_link_request_mtu_big), &p);
+	zassert_ok(ret_link_request_parse(&p, &req));
+	zassert_equal(req.mtu, 262144);
+
+	unpack_ok(v_link_request_mode0, sizeof(v_link_request_mode0), &p);
+	zassert_equal(ret_link_request_parse(&p, &req), -EPROTO);
+
+	/* Wrong sizes, and a packet that is not a link request. */
+	unpack_ok(v_link_request, sizeof(v_link_request), &p);
+	p.data_len = 63;
+	zassert_equal(ret_link_request_parse(&p, &req), -EBADMSG);
+	p.data_len = 65;
+	zassert_equal(ret_link_request_parse(&p, &req), -EBADMSG);
+	p.data_len = 68;
+	zassert_equal(ret_link_request_parse(&p, &req), -EBADMSG);
+	unpack_ok(v_link_proof, sizeof(v_link_proof), &p);
+	zassert_equal(ret_link_request_parse(&p, &req), -EBADMSG);
+}
+
+ZTEST(link, test_responder_key_matches_rns)
+{
+	uint8_t key[RET_TOKEN_KEY_LEN];
+
+	zassert_ok(ret_link_derive_key(v_link_resp_x25519_prv, keys.x25519_pub, v_link_id, key));
+	zassert_mem_equal(key, v_link_key, sizeof(key));
+}
+
+ZTEST(link, test_lrproof_matches_rns)
+{
+	struct ret_local_identity id;
+	uint8_t resp_pub[RET_X25519_LEN];
+	uint8_t out[RET_MTU];
+	struct ret_packet p;
+	uint8_t key[RET_TOKEN_KEY_LEN];
+	uint16_t mtu = 0;
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	ret_x25519_public_key(resp_pub, v_link_resp_x25519_prv);
+
+	/* For every request form (with, without, larger signalling) the
+	 * responder confirms 500: RNS's own proof for that.
+	 */
+	n = ret_link_proof_build(&id, v_link_id, resp_pub, 500, out, sizeof(out));
+	zassert_equal(n, sizeof(v_link_lrproof_rns));
+	zassert_mem_equal(out, v_link_lrproof_rns, n);
+	zassert_equal(sizeof(v_link_lrproof_rns_nosig), sizeof(v_link_lrproof_rns));
+	zassert_mem_equal(out, v_link_lrproof_rns_nosig, n);
+
+	/* And the initiator side accepts it. */
+	unpack_ok(out, n, &p);
+	zassert_ok(ret_link_proof_validate(v_link_id, &v_identity_pub[RET_X25519_LEN], &keys, &p,
+					   key, &mtu));
+	zassert_mem_equal(key, v_link_key, sizeof(key));
+	zassert_equal(mtu, 500);
+	ret_wipe(&id, sizeof(id));
+}
+
+ZTEST(link, test_packet_proof_matches_rns)
+{
+	struct ret_local_identity id;
+	struct ret_packet p;
+	uint8_t hash[RET_HASH_LEN];
+	uint8_t out[RET_MTU];
+	uint8_t plain[RET_MTU];
+	int n;
+
+	/* The data packet decrypts with the responder's key... */
+	unpack_ok(v_link_data, sizeof(v_link_data), &p);
+	n = ret_token_decrypt(v_link_key, p.data, p.data_len, plain, sizeof(plain));
+	zassert_equal(n, sizeof(v_link_data_plain));
+	zassert_mem_equal(plain, v_link_data_plain, n);
+
+	/* ...and its proof is RNS's, byte for byte. */
+	zassert_ok(ret_packet_hash(v_link_data, sizeof(v_link_data), hash));
+	zassert_mem_equal(hash, v_link_data_hash, sizeof(hash));
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	n = ret_link_packet_proof_build(&id, v_link_id, hash, out, sizeof(out));
+	zassert_equal(n, sizeof(v_link_data_proof));
+	zassert_mem_equal(out, v_link_data_proof, n);
+	ret_wipe(&id, sizeof(id));
+}
+
+ZTEST(link, test_rtt_parse)
+{
+	struct ret_packet p;
+	uint8_t plain[32];
+	uint32_t rtt_ms = 0;
+	int n;
+	static const uint8_t str[] = { 0xa1, 'x' };
+	static const uint8_t trailing[] = { 0xcb, 0x3f, 0xd0, 0, 0, 0, 0, 0, 0, 0xc0 };
+	static const uint8_t nan[] = { 0xcb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0 };
+	static const uint8_t negative[] = { 0xcb, 0xbf, 0xd0, 0, 0, 0, 0, 0, 0 };
+	static const uint8_t integer[] = { 0x02 };
+
+	unpack_ok(v_link_rtt, sizeof(v_link_rtt), &p);
+	n = ret_token_decrypt(v_link_key, p.data, p.data_len, plain, sizeof(plain));
+	zassert_true(n > 0);
+	zassert_ok(ret_link_rtt_parse(plain, n, &rtt_ms));
+	zassert_equal(rtt_ms, 250);
+
+	zassert_ok(ret_link_rtt_parse(integer, sizeof(integer), &rtt_ms));
+	zassert_equal(rtt_ms, 2000);
+	zassert_equal(ret_link_rtt_parse(str, sizeof(str), &rtt_ms), -EBADMSG);
+	zassert_equal(ret_link_rtt_parse(trailing, sizeof(trailing), &rtt_ms), -EBADMSG);
+	zassert_equal(ret_link_rtt_parse(nan, sizeof(nan), &rtt_ms), -EBADMSG);
+	zassert_equal(ret_link_rtt_parse(negative, sizeof(negative), &rtt_ms), -EBADMSG);
+}
+
 ZTEST_SUITE(link, NULL, setup, before, NULL, NULL);
