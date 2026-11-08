@@ -479,7 +479,7 @@ static bool name_ok(const char *name)
 int chat_contact_add(const char *name, const uint8_t addr[RET_DEST_HASH_LEN])
 {
 	uint8_t rec[CONTACT_RECORD_LEN] = { 0 };
-	char key[16];
+	char key[24]; /* "chat/ct/" and any int */
 	int slot = -1;
 	int err;
 
@@ -524,7 +524,7 @@ int chat_contact_add(const char *name, const uint8_t addr[RET_DEST_HASH_LEN])
 
 int chat_contact_del(const char *name)
 {
-	char key[16];
+	char key[24]; /* "chat/ct/" and any int */
 	int slot = -1;
 	int err;
 
