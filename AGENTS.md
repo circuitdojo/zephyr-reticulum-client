@@ -116,6 +116,14 @@ twister tests; the unit tests are native_sim only. CI's `nrf9151` job does the s
   with `PSA_ERROR_NOT_SUPPORTED` (-134). `port/zephyr/CMakeLists.txt` refuses to build with it.
   To check what TF-M really contains, look at the symbols in `ret_basic/tfm/bin/tfm_s.elf`,
   not the non-secure API headers.
+- **Trimmed native IP stack:** the modem runs TCP/IP and DNS (with modem DNS registered,
+  `zsock_getaddrinfo()` goes straight to it), so the board confs turn off native TCP (the
+  socket is the modem's), leave out `DNS_RESOLVER` and shrink packet buffers and contexts to
+  the minimum (about 16 KB of RAM). `CONFIG_NET_NATIVE=n` is not an option with
+  `NRF_MODEM_LIB_NET_IF`: the interface only gets its IPv4 flag from the native stack, and
+  `lte_net_if` fails with `ipv4_addr_add, error: -19` (NCS's cellular samples that drop the
+  stack also drop the net_if and use `lte_lc` directly). Native UDP stays because Zephyr's
+  IP core does not build with neither transport.
 - **Moving a board from an NCS 3.2 build:** flash once with `--erase`. The Partition Manager put
   different data at the TF-M storage partitions (0xf0000 on), and a board whose UICR already
   matches skips the erase. Settings on the NOR, and so the address, survive it.
