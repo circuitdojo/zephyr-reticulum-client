@@ -26,7 +26,8 @@ if(CONFIG_TFM_PROFILE_TYPE_MINIMAL)
     message(FATAL_ERROR
         "ret-client needs SHA-256, HMAC and AES-CBC from TF-M, which the minimal "
         "TF-M profile (CONFIG_TFM_PROFILE_TYPE_MINIMAL) does not provide. Set "
-        "CONFIG_TFM_PROFILE_TYPE_NOT_SET=y and size CONFIG_PM_PARTITION_SIZE_TFM.")
+        "CONFIG_TFM_PROFILE_TYPE_NOT_SET=y and size the TF-M slot (slot0_s_partition) "
+        "to fit it.")
 endif()
 
 # mpack (msgpack): pinned in the west manifests like Monocypher. Configured by

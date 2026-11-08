@@ -1,0 +1,41 @@
+/*
+ * Internal flash layout for the ret-client samples on the nRF9151 Feather:
+ * no bootloader, so TF-M and the application take the space nfed's board
+ * reserves for MCUboot and the secondary slot. The TF-M storage partitions
+ * (PS, ITS, OTP) and non-secure storage stay where the board puts them.
+ * Settings live on LittleFS on the external NOR (the board's lfs_partition).
+ *
+ * 0x0000_0000  slot0 (TF-M + application)   (960 kB)
+ *   0x0000_0000  TF-M secure                (128 kB)
+ *   0x0002_0000  Application (non-secure)   (832 kB)
+ * 0x000f_0000  TF-M PS, ITS, OTP, storage   (board)
+ */
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&flash0 {
+	partitions {
+		slot0_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-0";
+			reg = <0x0 0xf0000>;
+			ranges = <0x0 0x0 0xf0000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			slot0_s_partition: partition@0 {
+				compatible = "zephyr,mapped-partition";
+				label = "image-0-secure";
+				reg = <0x0 0x20000>;
+			};
+
+			slot0_ns_partition: partition@20000 {
+				compatible = "zephyr,mapped-partition";
+				label = "image-0-nonsecure";
+				reg = <0x20000 0xd0000>;
+			};
+		};
+	};
+};

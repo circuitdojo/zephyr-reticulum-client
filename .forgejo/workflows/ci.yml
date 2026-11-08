@@ -20,7 +20,7 @@ jobs:
     name: native_sim (unit tests, build, rnsd e2e)
     runs-on: docker
     container:
-      image: ret-client-ci:latest
+      image: ret-client-ci:zsdk-1.0.1
       options: >-
         --volume ret-client-west:/west-workspace
         --volume ret-client-ccache:/ccache
@@ -56,7 +56,7 @@ jobs:
           uv run --locked gen_vectors.py ../../tests/common/vectors_rns.h
           git -C ../.. diff --exit-code -- tests/common/vectors_rns.h
           # scripts/flash.py: tests ported from Zephyr Tools' own suites.
-          uv run --with pytest pytest -q ../../scripts
+          uv run --with pytest --with pyyaml pytest -q ../../scripts
           uv run --locked ruff check ../../scripts
           uv run --locked ruff format --check ../../scripts
 
@@ -100,7 +100,7 @@ jobs:
     needs: [native_sim]
     runs-on: docker
     container:
-      image: ret-client-ci:latest
+      image: ret-client-ci:zsdk-1.0.1
       # Its own workspace: west-ncs.yml (sdk-nrf, nfed, Monocypher) is a
       # different tree from the vanilla one. The first run on a cold volume
       # clones all of NCS (the better part of an hour); later runs fetch.
@@ -144,17 +144,24 @@ jobs:
           done
 
       - name: Collect the images
-        # merged.hex is TF-M plus the application: what scripts/flash.py
-        # programs. Copied under GITHUB_WORKSPACE, the only place
-        # upload-artifact collects from.
+        # tfm_merged.hex is TF-M plus the application (NCS 3.5, no Partition
+        # Manager). nfed's UICR image (debug access open) goes alongside:
+        # without it an erased nRF91 protects its debug port after the first
+        # reset. scripts/flash.py programs both from a build directory;
+        # anything else must flash the UICR image as well. Copied under
+        # GITHUB_WORKSPACE, the only place upload-artifact collects from.
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           # Not ret_lxmf_sleep: without a propagation node in an env/
           # overlay its image refuses to run.
           for s in ret_basic ret_lxmf; do
-            cp /ncs-workspace/build/${s}_nrf9151/merged.hex \
+            cp /ncs-workspace/build/${s}_nrf9151/$s/zephyr/tfm_merged.hex \
               "$GITHUB_WORKSPACE/dist/$s-circuitdojo_feather_nrf9151_ns.hex"
           done
+          uicr=$(sed -n 's/^ *hex_file: *//p' \
+            /ncs-workspace/build/ret_basic_nrf9151/uicr_debug_access_open/zephyr/runners.yaml)
+          [ -s "$uicr" ] || { echo "no UICR image at '$uicr'"; exit 1; }
+          cp "$uicr" "$GITHUB_WORKSPACE/dist/uicr_debug_access_open.hex"
 
       - name: Upload images
         uses: forgejo/upload-artifact@v4
