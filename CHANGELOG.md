@@ -52,10 +52,10 @@
 
 ### Changed
 
-- nRF9151 samples build without Zephyr's native IP stack (`CONFIG_NET_NATIVE=n`): the modem
-  runs TCP/IP and DNS, so Zephyr's packet buffers, TCP slab, network threads and DNS resolver
-  were unused. About 20 KB of RAM and 50 KB of flash freed per sample. native_sim keeps it (its
-  default Ethernet driver links against it).
+- nRF9151 samples trim Zephyr's native IP stack: the modem runs TCP/IP and DNS, so native TCP,
+  the DNS resolver and most packet buffers were unused. About 16 KB of RAM and 23 KB of flash
+  freed per sample. The stack itself stays: NCS's LTE net_if records the modem's addresses
+  through it (`CONFIG_NET_NATIVE=n` fails with `ipv4_addr_add, error: -19`).
 - `RET_LXMF_MAX_CONTENT` is now `RET_LXMF_OPPORTUNISTIC_MAX_CONTENT`.
 - `ret_lxmf_sync()` no longer fails with `-EBUSY` while a DIRECT delivery holds the link: it
   waits for it.
