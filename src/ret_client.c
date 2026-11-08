@@ -494,8 +494,36 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 		return;
 	}
 
+#if defined(CONFIG_RET_IFAC)
+	if (c->ifac_on) {
+		/* Every packet on a protected interface carries a code; check
+		 * and remove it in place (the decoder's buffer is ours until
+		 * this returns).
+		 */
+		bool flagged = len > 0 && (frame[0] & RET_IFAC_FLAG);
+		int n = ret_ifac_strip(&c->ifac, frame, len, (uint8_t *)frame, len);
+
+		if (n < 0) {
+			if (c->ifac_drops++ == 0) {
+				LOG_WRN("dropping packets with %s: does the interface's "
+					"network_name/passphrase/ifac_size match?",
+					!flagged      ? "no access code"
+					: n == -EACCES ? "a wrong access code"
+						       : "a malformed access code");
+			}
+			LOG_DBG("IFAC: dropped %zu byte frame: %d", len, n);
+			return;
+		}
+		len = (size_t)n;
+	}
+#endif
+
 	err = ret_packet_unpack(frame, len, &pkt);
 	if (err) {
+		if (err == -ENOTSUP && c->ifac_unexpected++ == 0) {
+			LOG_WRN("dropping packets with an access code: the interface is protected "
+				"(IFAC); configure its network name/passphrase (CONFIG_RET_IFAC)");
+		}
 		LOG_DBG("dropping %zu byte frame: %d", len, err);
 		return;
 	}
@@ -572,9 +600,23 @@ static void fail_req(const struct send_req *r, enum ret_receipt_status status)
 
 int ret_client_send_frame(struct ret_client *c, size_t raw_len)
 {
-	int flen = ret_hdlc_encode(c->tx_raw, raw_len, c->tx_frame, sizeof(c->tx_frame));
+	const uint8_t *raw = c->tx_raw;
+	int flen;
 	int err;
 
+#if defined(CONFIG_RET_IFAC)
+	if (c->ifac_on) {
+		int n = ret_ifac_apply(&c->ifac, c->tx_raw, raw_len, c->tx_ifac,
+				       sizeof(c->tx_ifac));
+
+		if (n < 0) {
+			return n;
+		}
+		raw = c->tx_ifac;
+		raw_len = (size_t)n;
+	}
+#endif
+	flen = ret_hdlc_encode(raw, raw_len, c->tx_frame, sizeof(c->tx_frame));
 	if (flen < 0) {
 		return flen;
 	}
@@ -1211,6 +1253,10 @@ static void client_thread(void *p1, void *p2, void *p3)
 		}
 
 		c->rx_packets = 0;
+		c->ifac_unexpected = 0;
+#if defined(CONFIG_RET_IFAC)
+		c->ifac_drops = 0;
+#endif
 		int64_t connected_at = k_uptime_get();
 
 		set_state(c, RET_STATE_CONNECTED);
@@ -1319,6 +1365,55 @@ static int setup_local(struct ret_client *c)
 	return 0;
 }
 
+/* Interface access codes: on when a network name or passphrase is set. */
+static int setup_ifac(struct ret_client *c)
+{
+	const char *name = c->cfg.ifac_network_name;
+	const char *pass = c->cfg.ifac_passphrase;
+
+#if defined(CONFIG_RET_IFAC)
+	int err;
+
+	name = name != NULL ? name : CONFIG_RET_IFAC_NETWORK_NAME;
+	pass = pass != NULL ? pass : CONFIG_RET_IFAC_PASSPHRASE;
+	c->ifac_on = name[0] != '\0' || pass[0] != '\0';
+	if (!c->ifac_on) {
+		/* No silent fallback to an open connection: a missing overlay
+		 * would otherwise just leave the client unheard.
+		 */
+		LOG_ERR("CONFIG_RET_IFAC is on but no network name or passphrase is set");
+		return -EINVAL;
+	}
+	err = ret_ifac_init(&c->ifac, name, pass, CONFIG_RET_IFAC_SIZE);
+	if (err) {
+		LOG_ERR("IFAC key derivation failed: %d", err);
+		c->ifac_on = false;
+		return err;
+	}
+	/* Neither value: with no passphrase the name alone is the secret. */
+	LOG_INF("IFAC on: %s network name, %s passphrase, %d-byte codes",
+		name[0] != '\0' ? "with" : "no", pass[0] != '\0' ? "with" : "no",
+		CONFIG_RET_IFAC_SIZE);
+	return 0;
+#else
+	if ((name != NULL && name[0] != '\0') || (pass != NULL && pass[0] != '\0')) {
+		LOG_ERR("IFAC configured but CONFIG_RET_IFAC is off");
+		return -ENOTSUP;
+	}
+	return 0;
+#endif
+}
+
+static void wipe_ifac(struct ret_client *c)
+{
+#if defined(CONFIG_RET_IFAC)
+	ret_wipe(&c->ifac, sizeof(c->ifac));
+	c->ifac_on = false;
+#else
+	ARG_UNUSED(c);
+#endif
+}
+
 int ret_client_start(struct ret_client *c)
 {
 	int err;
@@ -1328,6 +1423,9 @@ int ret_client_start(struct ret_client *c)
 	}
 
 	err = ret_crypto_init();
+	if (!err) {
+		err = setup_ifac(c);
+	}
 	if (err) {
 		return err;
 	}
@@ -1335,6 +1433,7 @@ int ret_client_start(struct ret_client *c)
 	c->efd = zvfs_eventfd(0, ZVFS_EFD_NONBLOCK);
 	if (c->efd < 0) {
 		LOG_ERR("eventfd failed: %d", errno);
+		wipe_ifac(c);
 		return -errno;
 	}
 
@@ -1352,6 +1451,7 @@ int ret_client_start(struct ret_client *c)
 			LOG_ERR("LXMF configuration invalid: %d", err);
 			zsock_close(c->efd);
 			c->efd = -1;
+			wipe_ifac(c);
 			return err;
 		}
 	}
@@ -1364,6 +1464,7 @@ int ret_client_start(struct ret_client *c)
 			LOG_ERR("own destination setup failed: %d", err);
 			zsock_close(c->efd);
 			c->efd = -1;
+			wipe_ifac(c);
 			return err;
 		}
 	}

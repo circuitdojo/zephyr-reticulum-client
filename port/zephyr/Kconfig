@@ -85,6 +85,46 @@ config RET_SERVER_PORT
 	int "rnsd TCP port"
 	default 4242
 
+config RET_IFAC
+	bool "Interface access codes (protected interfaces)"
+	help
+	  Join an rnsd interface configured with network_name and/or
+	  passphrase: every packet is signed with a key derived from them,
+	  and packets without a valid code are dropped, both ways (RNS's
+	  IFAC). With it on, a network name or passphrase must be set:
+	  ret_client_start() fails otherwise. Costs one Ed25519 signature
+	  per packet sent and received (every send path, and so the client
+	  thread's deepest stack use, grows by a signature: check
+	  RET_THREAD_STACK_SIZE with the thread analyzer), and about 800
+	  bytes of RAM.
+
+if RET_IFAC
+
+config RET_IFAC_NETWORK_NAME
+	string "IFAC network name (rnsd's network_name)"
+	default ""
+	help
+	  Used when ret_client_config.ifac_network_name is NULL. Empty: not
+	  part of the key. At least one of the name and passphrase must be
+	  set, matching the interface's.
+
+config RET_IFAC_PASSPHRASE
+	string "IFAC passphrase (rnsd's passphrase)"
+	default ""
+	help
+	  Used when ret_client_config.ifac_passphrase is NULL. It is built
+	  into the firmware image: keep it in a gitignored env/ overlay.
+
+config RET_IFAC_SIZE
+	int "IFAC size in bytes (rnsd's ifac_size / 8)"
+	default 16
+	range 1 64
+	help
+	  Must match the interface. RNS's TCP interfaces default to 16
+	  bytes (ifac_size = 128).
+
+endif # RET_IFAC
+
 config RET_THREAD_STACK_SIZE
 	int "Client thread stack size"
 	default 6144

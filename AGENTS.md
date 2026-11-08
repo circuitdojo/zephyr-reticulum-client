@@ -274,6 +274,10 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
     reboot: receivers ignore announces that are not newer than the last one they saw. `ret/aclk`
     stores a reservation. Values are used from RAM, flash is written once per
     `CONFIG_RET_ANNOUNCE_CLOCK_BLOCK` announces, and a boot resumes above the reservation.
+  - Interface access codes (`CONFIG_RET_IFAC`, `src/ret_ifac.c`): with a network name and/or
+    passphrase (`ret_client_config.ifac_*`, else `CONFIG_RET_IFAC_*`), `ret_client_send_frame()`
+    adds the code to every frame and `on_frame()` checks and strips it in place before unpacking;
+    frames without a valid code are dropped, the first per connection logged. Off by default.
   - A settings record that can't be read fails `ret_client_start()`. It is never treated as
     "no identity", which would silently replace the address.
   - Path requests for our address are answered once per tag, at most every
@@ -391,7 +395,9 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
 - `peer.py --link-client N` opens a link to the client's own destination (the device as
   responder), sends N packets that must be proved, idles 15 s on keepalives, sends one more and
   closes.
-- `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
+- `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `ifac`
+  (the same on `tools/rnsd-test`'s protected interface, port 4244: delivered with the right
+  passphrase, nothing through with a wrong one), `echo`
   (a link: open, identify, request, a resource response and a refused compressed one, 15 s idle on
   keepalives, request, close; then bidirectional
   replies to the client's own destination, proved both ways, while the peer holds its own link

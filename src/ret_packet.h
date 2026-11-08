@@ -65,8 +65,8 @@ struct ret_packet {
  *
  * @retval 0 on success
  * @retval -EMSGSIZE if @p len is shorter than the header or above the MTU
- * @retval -ENOTSUP if the IFAC flag is set (interface access codes are
- *         not supported)
+ * @retval -ENOTSUP if the IFAC flag is set: the access code must be
+ *         stripped first (ret_ifac_strip())
  */
 int ret_packet_unpack(const uint8_t *raw, size_t len, struct ret_packet *pkt);
 

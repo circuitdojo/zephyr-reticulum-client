@@ -24,3 +24,9 @@
     enabled = yes
     listen_ip = 0.0.0.0
     listen_port = 4242
+    # Protected interface (IFAC): only clients with the same values get in.
+    # Give the board the same with CONFIG_RET_IFAC=y,
+    # CONFIG_RET_IFAC_NETWORK_NAME and CONFIG_RET_IFAC_PASSPHRASE in its
+    # gitignored samples/<sample>/env/<name>.conf.
+    # network_name = my-hub
+    # passphrase = something long and random

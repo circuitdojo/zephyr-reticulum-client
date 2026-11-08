@@ -19,6 +19,7 @@
 #include "ret_destinations.h"
 #include "ret_hdlc.h"
 #include "ret_identity.h"
+#include "ret_ifac.h"
 #include "ret_link.h"
 #include "ret_packet.h"
 #include "ret_lxmf_seen.h"
@@ -294,6 +295,13 @@ struct lxmf_direct {
 	int64_t blocked_since_ms;
 };
 
+/* Bytes an access code adds to a frame on the wire. */
+#if defined(CONFIG_RET_IFAC)
+#define RET_IFAC_EXTRA CONFIG_RET_IFAC_SIZE
+#else
+#define RET_IFAC_EXTRA 0
+#endif
+
 struct ret_client {
 	struct ret_client_config cfg;
 	const char *host;
@@ -305,6 +313,8 @@ struct ret_client {
 	struct ret_hdlc_decoder hdlc;
 	/** Valid packets received on the current connection. */
 	uint32_t rx_packets;
+	/** Frames with the IFAC flag while IFAC is off, this connection. */
+	uint32_t ifac_unexpected;
 	int64_t last_rx_ms;
 	int consecutive_timeouts;
 	/** Set from inside frame handling when a send broke the connection. */
@@ -363,10 +373,19 @@ struct ret_client {
 	uint8_t recent[CONFIG_RET_RECENT_PACKETS][RET_HASH_LEN];
 	size_t recent_next;
 	uint8_t rx_plain[RET_MTU];
-	uint8_t rx_frame[RET_MTU];
+	/* Room for a frame with its access code, which is stripped in place. */
+	uint8_t rx_frame[RET_MTU + RET_IFAC_EXTRA];
 	uint8_t rx_chunk[256];
 	uint8_t tx_raw[RET_MTU];
-	uint8_t tx_frame[RET_HDLC_MAX_ENCODED(RET_MTU)];
+	uint8_t tx_frame[RET_HDLC_MAX_ENCODED(RET_MTU + RET_IFAC_EXTRA)];
+#if defined(CONFIG_RET_IFAC)
+	/** Interface access codes (cfg / CONFIG_RET_IFAC_*), when on. */
+	bool ifac_on;
+	struct ret_ifac ifac;
+	/** Frames dropped for a missing or wrong code, this connection. */
+	uint32_t ifac_drops;
+	uint8_t tx_ifac[RET_MTU + CONFIG_RET_IFAC_SIZE];
+#endif
 	struct send_req req;
 };
 

@@ -23,3 +23,13 @@
     enabled = yes
     listen_ip = 127.0.0.1
     listen_port = 4243
+
+  # A protected interface (IFAC) for the e2e 'ifac' scenario: the same
+  # network name and passphrase as tests/common/vectors_rns.h.
+  [[ret-client TCP IFAC]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 127.0.0.1
+    listen_port = 4244
+    network_name = ret-test
+    passphrase = correct horse battery staple

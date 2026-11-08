@@ -127,6 +127,16 @@ struct ret_client_config {
 	const char *host;
 	/** 0 selects CONFIG_RET_SERVER_PORT. */
 	uint16_t port;
+	/**
+	 * Interface access codes, for an rnsd interface with network_name
+	 * and/or passphrase (CONFIG_RET_IFAC). NULL selects
+	 * CONFIG_RET_IFAC_NETWORK_NAME / CONFIG_RET_IFAC_PASSPHRASE; "" leaves
+	 * that part out. With CONFIG_RET_IFAC at least one must be set
+	 * (ret_client_start() fails with -EINVAL otherwise); without it,
+	 * setting one fails with -ENOTSUP.
+	 */
+	const char *ifac_network_name;
+	const char *ifac_passphrase;
 	ret_announce_cb_t on_announce;
 	ret_state_cb_t on_state;
 	/**
