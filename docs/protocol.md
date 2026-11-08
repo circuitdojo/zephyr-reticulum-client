@@ -242,6 +242,7 @@ ret-client sends one kind of Resource: single segment, uncompressed, encrypted, 
 
 - **Addresses:** `lxmf.delivery` SINGLE destinations. Name hash `SHA256("lxmf.delivery")[:10]`.
 - **Announce app_data:** msgpack `[display name (bin) or nil, stamp cost or nil, [functionality]]`.
+  - Senders before LXMF 0.5.0 announce the bare UTF-8 name instead; `LXMF.display_name_from_app_data` tells them apart by the first byte (a fixarray `0x90`–`0x9f` or array16 `0xdc` is the new format). It reads the name only from bin (a str name gives none), removes NULs and strips whitespace (`str.strip()`, Unicode spaces included). `ret_lxmf_display_name()` does the same, except that it reads only the first array element and drops NULs from the bare-name form too.
   - ret-client announces stamp cost nil, so senders need no proof-of-work.
   - It announces an empty functionality list, without `SF_COMPRESSION` (0x00), so no sender compresses a delivery to it.
 - **Packed message:** `dest (16) | src (16) | Ed25519 signature (64) | payload`.
