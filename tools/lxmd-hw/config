@@ -1,0 +1,44 @@
+# lxmd (LXMF propagation node) for testing a board over LTE: a client of
+# tools/rnsd-hw, holding mail for ret_lxmf_sleep while it sleeps (and for
+# ret_lxmf's optional sync). lxmd keeps its identity and message store in
+# this directory (identity, storage/: gitignored), so the node's hash, which
+# the board is built with, stays the same across restarts.
+#
+# Start rnsd first (see tools/rnsd-hw), then:
+#
+#   uv run --project ret-client/tools/rns_peer lxmd --config ret-client/tools/lxmd-hw \
+#       --rnsconfig ret-client/tools/rnsd-hw -p
+#
+# It logs the propagation hash at start. To know it before the first start
+# (to build the board first):
+#
+#   uv run --project ret-client/tools/rns_peer ret-client/tools/rns_peer/lxmf_send.py \
+#       --make-node-identity ret-client/tools/lxmd-hw/identity
+#
+# and put it in samples/ret_lxmf_sleep/env/<name>.conf as
+# CONFIG_RET_SLEEP_PROPAGATION_NODE (or ret_lxmf's
+# CONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE).
+
+[propagation]
+enable_node = yes
+node_name = ret-hw node
+announce_at_start = yes
+# Minutes. Senders (NomadNet, Sideband) find the node from its announces.
+announce_interval = 30
+# A test node does not sync with other nodes.
+autopeer = no
+# The lowest cost LXMF accepts, so phones depositing mail compute the
+# stamp quickly. The board only collects, which needs no stamp.
+propagation_stamp_cost_target = 13
+propagation_stamp_cost_flexibility = 0
+# Megabytes.
+message_storage_limit = 50
+
+[lxmf]
+display_name = ret-hw lxmd
+announce_at_start = no
+
+[logging]
+# 4 (info) includes the propagation hash logged at start; 5 (verbose)
+# shows more of the deposits and syncs.
+loglevel = 4

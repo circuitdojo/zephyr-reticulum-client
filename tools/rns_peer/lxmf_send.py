@@ -10,8 +10,9 @@ node has accepted each. Python computes the propagation stamps.
         --to-name ret-lxmf --count 3
 
 Lines meant for scripts start with a fixed tag:
-  NODE READY, SENDER READY <lxmf address>, TARGET <address>, DEPOSITED <content>,
-  DEPOSIT FAILED <content>, RECEIVED <validated|unverified> <source> <content>
+  NODE READY, SENDER READY <lxmf address>, TARGET <address> ratchet=<id>,
+  ENCRYPTED <content> ratchet=<id> (the target's ratchet a deposit is
+  encrypted to, or None), DEPOSITED <content>, DEPOSIT FAILED <content>, RECEIVED <validated|unverified> <source> <content>
   (what the device sends back; content over 64 characters as its words
   without the '.' padding and its length)
 --make-node-identity <path> creates an identity file for lxmd and prints
@@ -145,7 +146,7 @@ def main() -> None:
     if not found.wait(args.timeout):
         out(f"DEPOSIT FAILED no announce from {args.to_name}")
         sys.exit(1)
-    out(f"TARGET {target['hash'].hex()}")
+    out(f"TARGET {target['hash'].hex()} ratchet={ratchet_id(target['hash'])}")
 
     dest = RNS.Destination(
         target["identity"], RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery"
@@ -188,9 +189,16 @@ def later_text(n: int, size: int) -> str:
     return f"later #{n} ".ljust(size, ".") if size else f"later #{n}"
 
 
+def ratchet_id(destination_hash: bytes) -> str | None:
+    """The target's ratchet RNS encrypts to: the last one it announced."""
+    rid = RNS.Identity.current_ratchet_id(destination_hash)
+    return rid.hex() if rid else None
+
+
 def deposit(router, dest, source, texts, timeout) -> bool:
     ok = True
     for text in texts:
+        out(f"ENCRYPTED {text.rstrip('.').strip()} ratchet={ratchet_id(dest.hash)}")
         msg = LXMessage(dest, source, text, "", desired_method=LXMessage.PROPAGATED)
         router.handle_outbound(msg)
         deadline = time.time() + timeout

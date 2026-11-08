@@ -170,7 +170,7 @@ ZTEST(announce, test_build_matches_rns)
 
 	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
 	zassert_ok(validate_raw(v_announce, sizeof(v_announce), &p, &a));
-	n = ret_announce_build(&id, v_name_hash, v_dest_hash, a.random_hash,
+	n = ret_announce_build(&id, v_name_hash, v_dest_hash, a.random_hash, NULL,
 			       (const uint8_t *)V_APP_DATA, strlen(V_APP_DATA), RET_CONTEXT_NONE,
 			       out, sizeof(out));
 	zassert_equal(n, sizeof(v_announce));
@@ -187,17 +187,42 @@ ZTEST(announce, test_build_path_response_validates)
 	int n;
 
 	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
-	n = ret_announce_build(&id, v_name_hash, v_dest_hash, rh, NULL, 0,
+	n = ret_announce_build(&id, v_name_hash, v_dest_hash, rh, NULL, NULL, 0,
 			       RET_CONTEXT_PATH_RESPONSE, out, sizeof(out));
 	zassert_equal(n, RET_H1_HEADER_LEN + 148);
 	zassert_ok(validate_raw(out, n, &p, &a));
 	zassert_equal(p.context, RET_CONTEXT_PATH_RESPONSE);
 	zassert_equal(a.app_data_len, 0);
 
-	zassert_equal(ret_announce_build(&id, v_name_hash, v_dest_hash, rh, out,
+	zassert_equal(ret_announce_build(&id, v_name_hash, v_dest_hash, rh, NULL, out,
 					 RET_MTU - RET_H1_HEADER_LEN - 148 + 1, RET_CONTEXT_NONE,
 					 out, sizeof(out)),
 		      -EMSGSIZE);
+	/* A ratchet takes 32 bytes of that room. */
+	zassert_equal(ret_announce_build(&id, v_name_hash, v_dest_hash, rh, v_ratchet_pub, out,
+					 RET_MTU - RET_H1_HEADER_LEN - 148 - 32 + 1,
+					 RET_CONTEXT_NONE, out, sizeof(out)),
+		      -EMSGSIZE);
+}
+
+ZTEST(announce, test_build_ratchet_matches_rns)
+{
+	/* Destination.announce() with ratchets enabled, its inputs pinned. */
+	struct ret_local_identity id;
+	struct ret_packet p;
+	struct ret_announce a;
+	uint8_t out[RET_MTU];
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+	zassert_ok(validate_raw(v_announce_real, sizeof(v_announce_real), &p, &a));
+	zassert_not_null(a.ratchet);
+	zassert_mem_equal(a.ratchet, v_ratchet_pub, RET_RATCHET_LEN);
+	n = ret_announce_build(&id, v_name_hash, v_dest_hash, a.random_hash, v_ratchet_pub,
+			       (const uint8_t *)V_APP_DATA, strlen(V_APP_DATA), RET_CONTEXT_NONE,
+			       out, sizeof(out));
+	zassert_equal(n, sizeof(v_announce_real));
+	zassert_mem_equal(out, v_announce_real, sizeof(v_announce_real));
 }
 
 ZTEST(announce, test_proof_build_matches_rns)

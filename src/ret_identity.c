@@ -226,13 +226,33 @@ void ret_local_identity_sign(const struct ret_local_identity *id, const uint8_t 
 	ret_ed25519_sign(sig, id->ed25519_sk, msg, len);
 }
 
-int ret_local_identity_decrypt(const struct ret_local_identity *id, const uint8_t *token,
-			       size_t len, uint8_t *out, size_t out_cap)
+/* SINGLE decryption with one X25519 private key; the salt is always the
+ * identity hash, ratchet or not.
+ */
+static int decrypt_with(const uint8_t prv[RET_X25519_LEN], const uint8_t salt[RET_TRUNC_HASH_LEN],
+			const uint8_t *token, size_t len, uint8_t *out, size_t out_cap)
 {
 	uint8_t shared[RET_X25519_LEN];
 	uint8_t derived[RET_TOKEN_KEY_LEN];
 	int err;
 
+	err = ret_x25519(shared, prv, token);
+	if (err) {
+		return -EBADMSG;
+	}
+	err = ret_hkdf_sha256(shared, sizeof(shared), salt, RET_TRUNC_HASH_LEN, NULL, 0, derived,
+			      sizeof(derived));
+	ret_wipe(shared, sizeof(shared));
+	if (!err) {
+		err = ret_token_decrypt(derived, token + RET_X25519_LEN, len - RET_X25519_LEN, out,
+					out_cap);
+	}
+	ret_wipe(derived, sizeof(derived));
+	return err;
+}
+
+static int check_token(size_t len, size_t out_cap)
+{
 	if (len < RET_TOKEN_OVERHEAD + RET_AES_BLOCK_LEN) {
 		return -EBADMSG;
 	}
@@ -242,18 +262,54 @@ int ret_local_identity_decrypt(const struct ret_local_identity *id, const uint8_
 	if (out_cap < len - RET_TOKEN_OVERHEAD) {
 		return -ENOBUFS;
 	}
+	return 0;
+}
 
-	err = ret_x25519(shared, id->x25519_prv, token);
+int ret_local_identity_decrypt(const struct ret_local_identity *id, const uint8_t *token,
+			       size_t len, uint8_t *out, size_t out_cap)
+{
+	int err = check_token(len, out_cap);
+
+	return err ? err : decrypt_with(id->x25519_prv, id->hash, token, len, out, out_cap);
+}
+
+int ret_local_identity_decrypt_ratchets(const struct ret_local_identity *id,
+					const uint8_t *const *ratchets,
+					size_t n_ratchets, const uint8_t *token, size_t len,
+					uint8_t *out, size_t out_cap, int *used)
+{
+	int err = check_token(len, out_cap);
+
 	if (err) {
-		return -EBADMSG;
+		return err;
 	}
-	err = ret_hkdf_sha256(shared, sizeof(shared), id->hash, RET_TRUNC_HASH_LEN, NULL, 0,
-			      derived, sizeof(derived));
-	ret_wipe(shared, sizeof(shared));
+	/* The HMAC is checked before anything is decrypted, so a wrong key
+	 * leaves @p out untouched.
+	 */
+	for (size_t i = 0; i < n_ratchets; i++) {
+		err = decrypt_with(ratchets[i], id->hash, token, len, out, out_cap);
+		if (err >= 0) {
+			*used = (int)i;
+		}
+		if (err != -EBADMSG) {
+			return err;
+		}
+	}
+	err = decrypt_with(id->x25519_prv, id->hash, token, len, out, out_cap);
+	if (err >= 0) {
+		*used = -1;
+	}
+	return err;
+}
+
+int ret_ratchet_id(const uint8_t pub[RET_RATCHET_LEN], uint8_t out[RET_RATCHET_ID_LEN])
+{
+	uint8_t full[RET_SHA256_LEN];
+	struct ret_iov iov = { pub, RET_RATCHET_LEN };
+	int err = ret_sha256(&iov, 1, full);
+
 	if (!err) {
-		err = ret_token_decrypt(derived, token + RET_X25519_LEN, len - RET_X25519_LEN, out,
-					out_cap);
+		memcpy(out, full, RET_RATCHET_ID_LEN);
 	}
-	ret_wipe(derived, sizeof(derived));
 	return err;
 }

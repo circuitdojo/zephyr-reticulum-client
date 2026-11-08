@@ -280,6 +280,52 @@ ZTEST(identity, test_decrypt_rns_token)
 	zassert_mem_equal(out, V_PLAINTEXT, n);
 }
 
+ZTEST(identity, test_decrypt_ratchets)
+{
+	struct ret_local_identity id;
+	uint8_t keys[3][RET_RATCHET_LEN];
+	const uint8_t *ratchets[] = { keys[0], keys[1], keys[2] };
+	uint8_t pub[RET_RATCHET_LEN];
+	uint8_t rid[RET_RATCHET_ID_LEN];
+	uint8_t out[64];
+	int used = 99;
+	int n;
+
+	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
+
+	/* RNS's Destination.encrypt() to our announced ratchet: found
+	 * after a ratchet that does not open it.
+	 */
+	memset(keys[0], 0x11, RET_RATCHET_LEN);
+	memcpy(keys[1], v_ratchet_prv, RET_RATCHET_LEN);
+	memset(keys[2], 0x22, RET_RATCHET_LEN);
+	n = ret_local_identity_decrypt_ratchets(&id, ratchets, 3, v_token_ratchet,
+						sizeof(v_token_ratchet), out, sizeof(out), &used);
+	zassert_equal(n, strlen(V_PLAINTEXT));
+	zassert_mem_equal(out, V_PLAINTEXT, n);
+	zassert_equal(used, 1);
+
+	/* To the identity key: every ratchet fails, then the identity. */
+	n = ret_local_identity_decrypt_ratchets(&id, ratchets, 3, v_token, sizeof(v_token), out,
+						sizeof(out), &used);
+	zassert_equal(n, strlen(V_PLAINTEXT));
+	zassert_equal(used, -1);
+
+	/* No ratchet held that opens it. */
+	used = 99;
+	zassert_equal(ret_local_identity_decrypt_ratchets(&id, &ratchets[2], 1, v_token_ratchet,
+							  sizeof(v_token_ratchet), out,
+							  sizeof(out), &used),
+		      -EBADMSG);
+	zassert_equal(used, 99);
+
+	/* The ratchet id RNS logs. */
+	ret_x25519_public_key(pub, v_ratchet_prv);
+	zassert_mem_equal(pub, v_ratchet_pub, RET_RATCHET_LEN);
+	zassert_ok(ret_ratchet_id(pub, rid));
+	zassert_mem_equal(rid, v_ratchet_id, RET_RATCHET_ID_LEN);
+}
+
 ZTEST(identity, test_decrypt_rejects)
 {
 	struct ret_local_identity id;
@@ -288,7 +334,7 @@ ZTEST(identity, test_decrypt_rejects)
 
 	zassert_ok(ret_local_identity_load(&id, v_identity_prv));
 
-	/* Encrypted to a ratchet key we do not hold. */
+	/* Encrypted to a ratchet, which the identity key alone cannot open. */
 	zassert_equal(ret_local_identity_decrypt(&id, v_token_ratchet, sizeof(v_token_ratchet),
 						 out, sizeof(out)),
 		      -EBADMSG);

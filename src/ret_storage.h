@@ -10,6 +10,9 @@
  *   ret/lx/f      the LXMF floor timestamp (double)
  *   ret/lk/<n>    known LXMF sender n: address (16) | public key (64) |
  *                 store order (u32)
+ *   ret/rt/<n>    ratchet n of the own destination: order (u32) | created
+ *                 (u64 wall-clock seconds, 0 if the clock was not set) |
+ *                 X25519 private key (32)
  */
 
 #ifndef RET_STORAGE_H_
@@ -57,6 +60,29 @@ struct ret_storage_known {
 int ret_storage_load_known(struct ret_storage_known *out, size_t count);
 
 int ret_storage_save_known(size_t slot, const struct ret_storage_known *k);
+
+/** One ratchet, as ret/rt/<n> holds it (@p key is the <n>). */
+struct ret_storage_ratchet {
+	uint8_t prv[RET_RATCHET_LEN];
+	uint64_t created;
+	uint32_t seq;
+	uint16_t key;
+};
+
+/**
+ * Load stored ratchets into @p out, newest (highest seq) first, at most
+ * @p count; @p n receives how many. Older records beyond @p count (the
+ * table was made smaller) are deleted.
+ *
+ * Fails if any record is unreadable: senders keep encrypting to the
+ * ratchet they last heard, so the set must not be silently replaced.
+ */
+int ret_storage_load_ratchets(struct ret_storage_ratchet *out, size_t count, size_t *n);
+
+int ret_storage_save_ratchet(const struct ret_storage_ratchet *r);
+
+/** Delete every ratchet (they belong to an identity that is gone). */
+int ret_storage_clear_ratchets(void);
 
 /** Persist slot @p slot, and the floor when @p floor changed. */
 int ret_storage_save_lxmf_seen(const struct ret_lxmf_seen *s, size_t slot, bool floor);

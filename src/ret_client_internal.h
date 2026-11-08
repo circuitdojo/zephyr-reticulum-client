@@ -23,6 +23,7 @@
 #include "ret_packet.h"
 #include "ret_lxmf_seen.h"
 #include "ret_resource.h"
+#include "ret_storage.h"
 
 enum send_kind {
 	REQ_SEND,
@@ -345,6 +346,13 @@ struct ret_client {
 	uint8_t local_dest[RET_TRUNC_HASH_LEN];
 	uint8_t local_name_hash[RET_NAME_HASH_LEN];
 	uint8_t path_request_dest[RET_TRUNC_HASH_LEN];
+#if defined(CONFIG_RET_RATCHETS)
+	/** Ratchets, newest first; their ids for logs; the newest's public key. */
+	struct ret_storage_ratchet ratchets[CONFIG_RET_RATCHET_COUNT];
+	uint8_t ratchet_ids[CONFIG_RET_RATCHET_COUNT][RET_RATCHET_ID_LEN];
+	size_t n_ratchets;
+	uint8_t ratchet_pub[RET_RATCHET_LEN];
+#endif
 	/** Last emission time used, and the persisted reservation above it. */
 	uint64_t aclk;
 	uint64_t aclk_reserved;
@@ -363,6 +371,21 @@ struct ret_client {
 };
 
 /* --- Provided by ret_client.c -------------------------------------- */
+
+/* 2020-01-01: anything earlier means the wall clock was never set. */
+#define RET_WALL_CLOCK_VALID_S 1577836800LL
+
+/** Wall-clock seconds, or 0 when the clock was never set. */
+int64_t ret_client_wall_now(void);
+
+/**
+ * Decrypt a SINGLE token to the own destination: with the ratchets,
+ * newest first, then the identity key.
+ *
+ * @return plaintext length, or a negative errno
+ */
+int ret_client_decrypt(struct ret_client *c, const uint8_t *token, size_t len, uint8_t *out,
+		       size_t cap);
 
 /** Recently delivered packet hashes: a repeat is proved, not redelivered. */
 bool ret_client_seen_packet(const struct ret_client *c, const uint8_t hash[RET_HASH_LEN]);

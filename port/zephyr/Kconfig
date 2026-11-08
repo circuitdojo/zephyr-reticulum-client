@@ -203,6 +203,52 @@ config RET_ANNOUNCE_CLOCK_BLOCK
 	  reboot skips the rest of the block, which costs nothing (the
 	  clock has 40 bits).
 
+config RET_RATCHETS
+	bool "Ratchets for the client's own destination"
+	default y
+	help
+	  Announce a ratchet (an X25519 key rotated over time) with the
+	  client's destination, as Destination.enable_ratchets() does.
+	  Senders that heard it encrypt to the ratchet instead of the
+	  identity key, so a key that has been rotated out and erased can
+	  no longer decrypt captured traffic (forward secrecy). Costs 32
+	  bytes per announce and one settings write per rotation. Turning
+	  it off leaves stored ratchets in place.
+
+if RET_RATCHETS
+
+config RET_RATCHET_COUNT
+	int "Ratchets kept"
+	default 8
+	range 1 32
+	help
+	  Ratchets kept to decrypt with, newest first (RNS keeps 512; each
+	  one here costs RAM, and X25519 time on every message to the
+	  identity key). Senders keep using
+	  the last ratchet they heard (RNS remembers one for 30 days), and
+	  a propagation node holds messages until they are synced, so
+	  count x RET_RATCHET_INTERVAL_S is how old a message to the
+	  client may be and still decrypt. Each one is a 44-byte settings
+	  record, and every message to the identity key (from a sender
+	  without our ratchet) costs one X25519 per ratchet before it
+	  decrypts.
+
+config RET_RATCHET_INTERVAL_S
+	int "Minimum time between ratchet rotations (s)"
+	default 86400
+	range 10 31536000
+	help
+	  An announce rotates to a new ratchet when the newest is older
+	  than this. Rotation needs the realtime clock (set by the
+	  application, e.g. from network time); without it the current
+	  ratchet keeps being announced. RNS's default is 1800 s; a day
+	  suits flash and the RET_RATCHET_COUNT window better. Values
+	  under a few minutes are for tests. If a new ratchet cannot be
+	  stored, the announce carries the current one and the next
+	  announce tries again.
+
+endif # RET_RATCHETS
+
 config RET_PATH_RESPONSE_INTERVAL_MS
 	int "Minimum time between path responses for our destination (ms)"
 	default 5000

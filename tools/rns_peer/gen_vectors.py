@@ -693,6 +693,8 @@ def main() -> None:
         c_array("v_name_hash", name_hash),
         c_array("v_dest_hash", dest_hash),
         c_array("v_ratchet_pub", ratchet_pub),
+        c_array("v_ratchet_prv", ratchet_prv),
+        c_array("v_ratchet_id", RNS.Identity._get_ratchet_id(ratchet_pub)),
         c_array("v_transport_id", fixed("transport_id", 16)),
         c_array("v_announce", announce),
         c_array("v_announce_ratchet_h2", announce_ratchet),

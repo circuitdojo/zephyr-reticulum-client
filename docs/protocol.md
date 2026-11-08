@@ -91,12 +91,43 @@ regenerate the test vectors.
 
 - Private key: X25519 private key (32) || Ed25519 seed (32), as
   `Identity.get_private_key()`. Address = H(name_hash | H(pub)[:16])[:16].
-- Announce: as above without a ratchet; `random_hash` is 5 random bytes then
+- Announce: as above, with a ratchet unless `CONFIG_RET_RATCHETS` is off;
+  `random_hash` is 5 random bytes then
   the emission time as 5 big-endian bytes. A node keeps the destination's
   newest emission time and ignores announces not newer than it (Transport.py
   ~L2236), and its path does not expire for days, so the emission time must
   be monotonic across reboots: ret-client persists it ("announce clock"),
   reserving values in blocks so it does not write flash on every announce.
+- **Ratchets** (`Destination.enable_ratchets`, `rotate_ratchets`;
+  `Identity.decrypt`):
+  - A ratchet is an X25519 key pair. The announce carries the newest one's
+    public key after `random_hash`, inside the signed data, and sets the
+    context flag. Its id is `SHA256(pub)[:10]`.
+  - A sender that validated the announce encrypts SINGLE packets to the
+    ratchet instead of the identity's X25519 key (the HKDF salt is still the
+    identity hash) and remembers it for 30 days (`RATCHET_EXPIRY`). LXMF
+    propagated messages are encrypted the same way, so a sync decrypts them
+    with ratchets too.
+  - The receiver tries each ratchet private key, newest first, then the
+    identity key. The token's HMAC tells which one fits; nothing in the
+    packet names the ratchet.
+  - RNS rotates inside `announce()` when the newest is older than
+    `RATCHET_INTERVAL` (30 min), and at the first announce after a restart
+    (the rotation time is not persisted); it keeps 512. ret-client rotates at most
+    once per `CONFIG_RET_RATCHET_INTERVAL_S` (a day) and keeps
+    `CONFIG_RET_RATCHET_COUNT` (8), so a message stays decryptable for about
+    count × interval after the sender last heard us. Rotation needs the wall
+    clock; without it the current ratchet keeps being announced.
+  - A new ratchet is stored (`ret/rt/<n>`) before the announce carrying it
+    goes out: senders keep using the last one they heard, so it must
+    survive a reboot. Proofs and links are unaffected (identity key).
+  - If that write fails, ret-client announces the current (stored) ratchet and
+    tries again at the next announce. RNS instead drops its ratchets
+    (`_persist_ratchets` sets them to None and raises): that announce is not
+    sent, later ones carry no ratchet, and senders keep encrypting to the old
+    one for 30 days, which it can no longer decrypt.
+  - Forward secrecy is only as good as the erase: a replaced settings record
+    can stay in flash until the backend compacts it.
 - A non-transport rnsd passes a TCP client's announce on to its local
   clients when it updates its path table with it.
 - Receiving: decrypt with HKDF salt = our identity hash; verify the HMAC
@@ -213,7 +244,6 @@ ret-client sends one kind of Resource: single segment, uncompressed, encrypted, 
 - **Announce app_data:** msgpack `[display name (bin) or nil, stamp cost or nil, [functionality]]`.
   - ret-client announces stamp cost nil, so senders need no proof-of-work.
   - It announces an empty functionality list, without `SF_COMPRESSION` (0x00), so no sender compresses a delivery to it.
-  - No ratchet.
 - **Packed message:** `dest (16) | src (16) | Ed25519 signature (64) | payload`.
   - The payload is msgpack `[timestamp float64, title bin, content bin, fields map(, stamp bin)]`. Title and content are written as bin, but str is accepted on receive.
   - `message hash = SHA256(dest | src | payload without the stamp)`, also called the message id.
@@ -224,7 +254,7 @@ ret-client sends one kind of Resource: single segment, uncompressed, encrypted, 
   - It goes as one link DATA packet when it fits the link MDU (431), otherwise as a Resource.
   - The resource is uncompressed, because our announce lists no functionality.
   - ret-client checks `packed[:16]` is its own address, then handles `packed[16:]` like an opportunistic body.
-  - LXMF uses DIRECT by default (NomadNet unless the contact is set to opportunistic or announces a ratchet), and always for content over 287 bytes.
+  - LXMF uses DIRECT by default (NomadNet unless the contact is set to opportunistic), and always for content over 287 bytes. Ratchets play no part in the choice: LXMRouter never looks at them.
   - The sender keeps the link for up to 10 minutes of inactivity and reuses it.
 - **DIRECT sending** (`ret_lxmf_send`, or `ret_lxmf_send_method`): the same, from the device.
   - `RET_LXMF_METHOD_AUTO` picks opportunistic when title plus content fit 287 bytes, otherwise DIRECT, as LXMessage falls back from opportunistic. DIRECT carries up to `RET_LXMF_DIRECT_MAX_CONTENT` (about 8 KB at the default `CONFIG_RET_RESOURCE_MAX_SIZE`).
