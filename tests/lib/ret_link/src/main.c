@@ -425,8 +425,11 @@ ZTEST(link, test_rtt_parse)
 	zassert_equal(rtt_ms, 2000);
 	zassert_equal(ret_link_rtt_parse(str, sizeof(str), &rtt_ms), -EBADMSG);
 	zassert_equal(ret_link_rtt_parse(trailing, sizeof(trailing), &rtt_ms), -EBADMSG);
-	zassert_equal(ret_link_rtt_parse(nan, sizeof(nan), &rtt_ms), -EBADMSG);
-	zassert_equal(ret_link_rtt_parse(negative, sizeof(negative), &rtt_ms), -EBADMSG);
+	/* As Link.rtt_packet's max(measured, reported): counts as 0. */
+	zassert_ok(ret_link_rtt_parse(nan, sizeof(nan), &rtt_ms));
+	zassert_equal(rtt_ms, 0);
+	zassert_ok(ret_link_rtt_parse(negative, sizeof(negative), &rtt_ms));
+	zassert_equal(rtt_ms, 0);
 }
 
 ZTEST_SUITE(link, NULL, setup, before, NULL, NULL);

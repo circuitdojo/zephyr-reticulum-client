@@ -188,7 +188,7 @@ static int send_announce(struct ret_client *c, uint8_t context)
 	return err;
 }
 
-static bool seen_recently(const struct ret_client *c, const uint8_t hash[RET_HASH_LEN])
+bool ret_client_seen_packet(const struct ret_client *c, const uint8_t hash[RET_HASH_LEN])
 {
 	for (size_t i = 0; i < ARRAY_SIZE(c->recent); i++) {
 		if (memcmp(c->recent[i], hash, RET_HASH_LEN) == 0) {
@@ -198,7 +198,7 @@ static bool seen_recently(const struct ret_client *c, const uint8_t hash[RET_HAS
 	return false;
 }
 
-static void remember_packet(struct ret_client *c, const uint8_t hash[RET_HASH_LEN])
+void ret_client_remember_packet(struct ret_client *c, const uint8_t hash[RET_HASH_LEN])
 {
 	memcpy(c->recent[c->recent_next], hash, RET_HASH_LEN);
 	c->recent_next = (c->recent_next + 1) % ARRAY_SIZE(c->recent);
@@ -220,7 +220,7 @@ static void handle_inbound(struct ret_client *c, const struct ret_packet *pkt,
 		return;
 	}
 
-	if (seen_recently(c, hash)) {
+	if (ret_client_seen_packet(c, hash)) {
 		/* Delivered already; prove again in case our proof was lost. */
 		LOG_DBG("duplicate packet, proving again");
 	} else {
@@ -233,7 +233,7 @@ static void handle_inbound(struct ret_client *c, const struct ret_packet *pkt,
 		/* Only packets that decrypted count as seen: a forged packet
 		 * must not earn a proof by being repeated.
 		 */
-		remember_packet(c, hash);
+		ret_client_remember_packet(c, hash);
 		if (c->cfg.on_lxmf != NULL) {
 			ret_lxmf_drv_on_data(c, c->rx_plain, (size_t)n);
 		} else if (c->cfg.on_data != NULL) {
@@ -359,9 +359,23 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 			handle_path_request(c, &pkt);
 		}
 		break;
-	default:
-		/* Link requests and other traffic are not for us. */
+	case RET_PKT_LINKREQUEST:
+		if (c->has_local && pkt.dest_type == RET_DEST_SINGLE &&
+		    memcmp(pkt.dest_hash, c->local_dest, RET_TRUNC_HASH_LEN) == 0) {
+			ret_link_drv_on_request(c, &pkt, frame, len);
+		}
 		break;
+	default:
+		break;
+	}
+}
+
+void ret_client_on_link_data(struct ret_client *c, const uint8_t *data, size_t len)
+{
+	if (c->cfg.on_lxmf != NULL) {
+		ret_lxmf_drv_on_direct(c, data, len);
+	} else if (c->cfg.on_data != NULL) {
+		c->cfg.on_data(data, len, c->cfg.user);
 	}
 }
 

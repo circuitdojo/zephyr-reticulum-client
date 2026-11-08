@@ -6,7 +6,8 @@ client. It connects to a Python `rnsd` TCPServerInterface and supports:
 - receiving and validating announces
 - sending encrypted DATA packets to SINGLE destinations
 - validating delivery proofs
-- links (initiator side) with requests, and receiving Resources
+- links, both sides: opening them (with requests) and accepting them from other nodes, and
+  receiving Resources
 - LXMF messaging (opportunistic, both ways)
 
 Samples:
@@ -209,10 +210,16 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
   directly, never through the request queue (a full queue cannot strand a sync). While a sync
   runs, the application's link requests fail with -EBUSY. Items are decrypted into the resource
   stream buffer (`ret_link_drv_scratch()`), which is spent by the time a response is delivered.
-- `src/ret_client_link.c`: the link driver (one link, initiator side): path wait, handshake, RTT,
-  requests with timeouts, response resources (one at a time, `CONFIG_RET_RESOURCE_MAX_SIZE` each
-  for the stream and plaintext buffers), identify, keepalive, stale and close. It runs on the
-  client thread; shared state is in `src/ret_client_internal.h`.
+- `src/ret_client_link.c`: the link driver, run on the client thread; shared state is in
+  `src/ret_client_internal.h`.
+  - What every link shares works on `struct link`: sending, closing, stale timers, and the one
+    Resource at a time (`CONFIG_RET_RESOURCE_MAX_SIZE` each for the stream and plaintext buffers).
+  - The client's own link (`struct link_out`, initiator): path wait, handshake, RTT, requests with
+    timeouts, response resources, identify, keepalives.
+  - Links other nodes open to the client's destination (`struct link in[]`,
+    `CONFIG_RET_INBOUND_LINKS`, responder): LRPROOF, RTT, keepalive answers, DATA delivered and
+    proved, LXMF DIRECT delivery resources. A delivery arriving while another resource is received
+    closes that link (the LXMF sender retries; RCL would reject the message for good).
 - `src/ret_client.c`: a single static instance and one thread polling the socket plus an
   eventfd. Sends are queued with `k_msgq`. All protocol state is confined to that thread.
   - With `dest_name` configured the client has its own destination (address): an identity
@@ -333,12 +340,19 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
 - LXMF peer: `tools/rns_peer/lxmf_peer.py --config ret-client/tools/rnsd-test`, a real `LXMRouter`.
   It answers messages starting with `hello` with `echo: ...`, and logs whether each received
   signature validated and the app_data of each `lxmf.delivery` announce. `--print-hash` prints
-  its address for `CONFIG_RET_LXMF_SAMPLE_CONTACT`.
+  its address for `CONFIG_RET_LXMF_SAMPLE_CONTACT`. `--reply-method direct` sends the echoes over
+  a link to the device, and `--big-reply`/`--huge-reply BYTES` add larger messages (`REPLY
+  REJECTED` when the device refuses one).
+- `peer.py --link-client N` opens a link to the client's own destination (the device as
+  responder), sends N packets that must be proved, idles 15 s on keepalives, sends one more and
+  closes.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `echo`
   (a link: open, identify, request, a resource response and a refused compressed one, 15 s idle on
   keepalives, request, close; then bidirectional
-  replies to the client's own destination, proved both ways), `lxmf` (`ret_lxmf` against
-  `lxmf_peer.py`: messages and echoes both ways, signatures validated on both sides),
+  replies to the client's own destination, proved both ways, while the peer holds its own link
+  to the device), `lxmf` (`ret_lxmf` against `lxmf_peer.py`: messages and echoes both ways,
+  signatures validated on both sides), `lxmf-direct` (the same with DIRECT echoes over a link
+  to the device, a 3000-byte message delivered as a Resource, a 12000-byte one refused),
   `store-forward` (a fresh `lxmd` from `tools/lxmd-test`: messages deposited with
   `tools/rns_peer/lxmf_send.py` while the device is down are collected by its sync, and the
   node's store ends with only an oversized one; a third boot verifies a new message with the

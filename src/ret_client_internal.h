@@ -137,6 +137,8 @@ struct link_resource {
 	/* RES_RESPONSE: the request it answers. */
 	struct link_request *req;
 	int64_t deadline_ms;
+	/* No resource may hold the buffers longer than this. */
+	int64_t give_up_ms;
 	uint8_t retries;
 	struct ret_resource_rx rx;
 	uint8_t stream[CONFIG_RET_RESOURCE_MAX_SIZE];
@@ -204,6 +206,8 @@ struct lxmf_sync {
 	size_t n_skipped;
 	/* Decrypting an item while the resource buffers are taken. */
 	uint8_t item_plain[RET_LINK_MDU];
+	/* Requests refused because a delivery resource held the buffers. */
+	uint8_t busy_retries;
 };
 
 struct ret_client {
@@ -227,6 +231,10 @@ struct ret_client {
 	atomic_t want_suspended;
 	struct held_send held[CONFIG_RET_MAX_HELD_SENDS];
 	struct link_out out;
+#if CONFIG_RET_INBOUND_LINKS > 0
+	/* Links other nodes opened to the client's destination. */
+	struct link in[CONFIG_RET_INBOUND_LINKS];
+#endif
 	struct link_resource res;
 
 	/* LXMF (cfg.on_lxmf): announce app_data, recent message hashes, and
@@ -272,6 +280,16 @@ struct ret_client {
 
 /* --- Provided by ret_client.c -------------------------------------- */
 
+/** Recently delivered packet hashes: a repeat is proved, not redelivered. */
+bool ret_client_seen_packet(const struct ret_client *c, const uint8_t hash[RET_HASH_LEN]);
+void ret_client_remember_packet(struct ret_client *c, const uint8_t hash[RET_HASH_LEN]);
+
+/**
+ * Data that arrived over an inbound link (one packet, or a Resource):
+ * LXMF DIRECT delivery with on_lxmf, else on_data.
+ */
+void ret_client_on_link_data(struct ret_client *c, const uint8_t *data, size_t len);
+
 /** HDLC-frame c->tx_raw[0..raw_len) and send it. -ECONNRESET: link dropped. */
 int ret_client_send_frame(struct ret_client *c, size_t raw_len);
 
@@ -299,6 +317,9 @@ void ret_lxmf_drv_on_announce(struct ret_client *c, const struct ret_destination
 
 /** Check, remember and deliver a message body (packed[16:]) for us. */
 enum lxmf_outcome ret_lxmf_drv_deliver(struct ret_client *c, const uint8_t *body, size_t len);
+
+/** An LXMF message delivered DIRECT over a link: the full packed message. */
+void ret_lxmf_drv_on_direct(struct ret_client *c, const uint8_t *packed, size_t len);
 
 /** The decrypted payload of a packet for our lxmf.delivery address. */
 void ret_lxmf_drv_on_data(struct ret_client *c, const uint8_t *plain, size_t len);
@@ -333,6 +354,10 @@ void ret_link_drv_open(struct ret_client *c, const struct send_req *r);
 void ret_link_drv_request(struct ret_client *c, const struct send_req *r);
 void ret_link_drv_identify(struct ret_client *c);
 void ret_link_drv_close(struct ret_client *c);
+
+/** A LINKREQUEST for the client's destination: accept it (responder). */
+void ret_link_drv_on_request(struct ret_client *c, const struct ret_packet *pkt,
+			     const uint8_t *raw, size_t raw_len);
 
 /** A packet addressed to link @p l; @p raw is the frame (proofs hash it). */
 void ret_link_drv_on_packet(struct ret_client *c, struct link *l, const struct ret_packet *pkt,

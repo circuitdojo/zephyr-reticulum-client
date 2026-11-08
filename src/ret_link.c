@@ -308,9 +308,13 @@ int ret_link_rtt_parse(const uint8_t *plain, size_t len, uint32_t *rtt_ms)
 		return -EBADMSG;
 	}
 	mpack_reader_destroy(&r);
-	/* NaN fails both comparisons. */
-	if (!(rtt >= 0.0) || !(rtt <= RET_LINK_RTT_MAX_S)) {
-		return -EBADMSG;
+	/* Link.rtt_packet takes max(measured, reported) of any number: a
+	 * negative or NaN report counts as 0, one past the cap as the cap.
+	 */
+	if (!(rtt > 0.0)) {
+		rtt = 0.0;
+	} else if (rtt > RET_LINK_RTT_MAX_S) {
+		rtt = RET_LINK_RTT_MAX_S;
 	}
 	*rtt_ms = (uint32_t)(rtt * 1000.0);
 	return 0;

@@ -136,9 +136,11 @@ int ret_link_packet_proof_build(const struct ret_local_identity *id,
 				const uint8_t packet_hash[RET_HASH_LEN], uint8_t *out, size_t cap);
 
 /**
- * The initiator's LRRTT plaintext: one msgpack number, seconds.
+ * The initiator's LRRTT plaintext: one msgpack number, seconds. Negative or
+ * NaN counts as 0 and anything over RET_LINK_RTT_MAX_S as that (the caller
+ * takes the larger of this and its own measurement, as RNS does).
  *
- * @retval -EBADMSG not exactly one finite number in [0, RET_LINK_RTT_MAX_S]
+ * @retval -EBADMSG not exactly one msgpack number
  */
 int ret_link_rtt_parse(const uint8_t *plain, size_t len, uint32_t *rtt_ms);
 

@@ -4,6 +4,17 @@
 
 ### Added
 
+- Links other nodes open to the client's destination (responder side, `CONFIG_RET_INBOUND_LINKS`,
+  default 2), as RNS's `Link.validate_request()` handles them: LRPROOF signed by the identity
+  (MTU 500 confirmed), RTT, keepalive answers, stale and close; link DATA delivered (to
+  `on_lxmf` or `on_data`) and proved. Suspend closes every link.
+- LXMF DIRECT delivery: messages sent over such a link, as NomadNet and most LXMF clients do by
+  default, in one packet or as a Resource. A delivery arriving while another resource is
+  received closes the link so the sender retries; one too large is refused. A sync request
+  refused while a delivery holds the resource buffers is sent again.
+- e2e: `echo` adds the peer opening a link to the device; new `lxmf-direct` (DIRECT echoes, a
+  3000-byte Resource delivered, a 12000-byte one refused).
+
 - Sleep: `ret_client_suspend()` / `ret_client_resume()` and `samples/ret_lxmf_sleep`, a sleepy
   LXMF node modelled on lion_sleep (suspend client and peripherals, modem in PSM, wake, sync,
   answer, sleep). e2e scenario `sleep`: three wakes, mail deposited while asleep collected at

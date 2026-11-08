@@ -42,6 +42,8 @@ LOG_MODULE_DECLARE(ret, CONFIG_RET_LOG_LEVEL);
 /* LXMPeer error codes answered instead of a list. */
 #define ERROR_NO_IDENTITY 0xf0
 #define ERROR_NO_ACCESS   0xf1
+/* Times one request is sent again after a delivery held the resource. */
+#define SYNC_BUSY_RETRIES 3
 
 /* Each request must fit one link packet (no outgoing resources). */
 BUILD_ASSERT(1 + 1 + RET_LXMF_SYNC_BATCH * (2 + RET_SHA256_LEN) + 1 + 9 <= RET_LINK_MDU - 32);
@@ -361,11 +363,22 @@ static void sync_response(int status, const uint8_t *resp, size_t len, void *use
 	if (!s->active) {
 		return;
 	}
+	if (status == -EBUSY && s->busy_retries < SYNC_BUSY_RETRIES) {
+		/* A delivery resource on an inbound link held the buffers. /get
+		 * is idempotent (nothing is deleted until acknowledged): send
+		 * the same request again once the resource is done.
+		 */
+		s->busy_retries++;
+		LOG_INF("sync: resource buffers busy, request again when free");
+		s->pending = SYNC_PEND_REQUEST;
+		return;
+	}
 	if (status != 0) {
 		LOG_WRN("sync request failed: %d", status);
 		fail(c, status);
 		return;
 	}
+	s->busy_retries = 0;
 
 	switch (s->phase) {
 	case SYNC_LISTING:
@@ -478,6 +491,10 @@ void ret_lxmf_sync_drv_service(struct ret_client *c)
 	if (!owns_link(c)) {
 		return; /* gone: its callback ends (or ended) the sync */
 	}
+	if (p == SYNC_PEND_REQUEST && c->res.state != RES_IDLE) {
+		s->pending = p; /* its response could not be received yet */
+		return;
+	}
 	switch (p) {
 	case SYNC_PEND_IDENTIFY:
 		ret_link_drv_identify(c);
@@ -499,7 +516,15 @@ void ret_lxmf_sync_drv_service(struct ret_client *c)
 
 int64_t ret_lxmf_sync_drv_next_event(const struct ret_client *c)
 {
-	return (c->sync.active && c->sync.pending != SYNC_PEND_NONE) ? 0 : INT64_MAX;
+	const struct lxmf_sync *s = &c->sync;
+
+	if (!s->active || s->pending == SYNC_PEND_NONE) {
+		return INT64_MAX;
+	}
+	/* A request waits for the resource buffers: the resource's own
+	 * deadlines and packets wake the loop.
+	 */
+	return (s->pending == SYNC_PEND_REQUEST && c->res.state != RES_IDLE) ? INT64_MAX : 0;
 }
 
 bool ret_lxmf_sync_drv_owns_link(const struct ret_client *c)
