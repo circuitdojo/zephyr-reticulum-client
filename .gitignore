@@ -12,6 +12,9 @@ samples/*/env/*
 !samples/*/env/example.conf
 tools/rnsd-hw/storage/
 tools/rnsd-hw/logfile
+# lxmd keeps its identity and message store next to its config.
+tools/lxmd-hw/*
+!tools/lxmd-hw/config
 samples/*/log-*.log
 # Zephyr Tools per-checkout build settings
 **/.zephyr-overrides.json

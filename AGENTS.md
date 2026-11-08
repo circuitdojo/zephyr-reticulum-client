@@ -151,8 +151,17 @@ waits for network time (date_time: modem, else NTP) before sending, because LXMF
 wall-clock time. Run `tools/rns_peer/lxmf_peer.py --config ret-client/tools/rnsd-hw` as its contact,
 or message its address from NomadNet or Sideband.
 
-`ret_lxmf_sleep` needs `CONFIG_RET_SLEEP_PROPAGATION_NODE` (an lxmd the hub runs, attached to
-`tools/rnsd-hw`) in its `env/` overlay. Measure sleep current with the PPK between wakes. The
+`ret_lxmf_sleep` needs `CONFIG_RET_SLEEP_PROPAGATION_NODE` in its `env/` overlay: the lxmd from
+`tools/lxmd-hw`, attached to `tools/rnsd-hw`. Its identity stays in that directory (gitignored),
+so the hash is stable; `lxmf_send.py --make-node-identity ret-client/tools/lxmd-hw/identity`
+prints it before the first start:
+
+```bash
+uv run --project ret-client/tools/rns_peer lxmd --config ret-client/tools/lxmd-hw \
+    --rnsconfig ret-client/tools/rnsd-hw -p
+```
+
+Measure sleep current with the PPK between wakes. The
 sample prints stack use (thread analyzer) once per wake, after the sync: that is the client
 thread's deepest path.
 

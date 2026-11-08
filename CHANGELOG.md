@@ -12,6 +12,8 @@
   `announce_app_data` limit accounts for. e2e: `lxmf` and `store-forward` check the peers
   encrypt to the device's ratchet; `sleep` rotates at a wake and still decrypts with the older one.
   A new ratchet that can't be stored delays the rotation, not the announce.
+- `tools/lxmd-hw`: an lxmd propagation node config for board tests, attached to `tools/rnsd-hw`,
+  for `ret_lxmf_sleep`'s (and `ret_lxmf`'s) sync. Its identity stays local, so its hash is stable.
 - `tests/lib/ret_storage`: the settings records (identity, ratchets, known senders, remembered
   messages) tested against real NVS settings on native_sim.
 - LXMF DIRECT sending: `ret_lxmf_send()` sends a message too long for one packet over a link to
