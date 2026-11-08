@@ -55,7 +55,7 @@ static void sync_link(enum ret_link_event ev, int reason, void *user);
 /* The link is the sync's while its callback is ours. */
 static bool owns_link(const struct ret_client *c)
 {
-	return c->link.state != LINK_NONE && c->link.cb == sync_link;
+	return c->out.l.state != LINK_NONE && c->out.cb == sync_link;
 }
 
 /* End with @p err: close the link if it is still up; the link callback
@@ -237,6 +237,14 @@ static void on_item(struct ret_client *c, const uint8_t *item, size_t len)
 	uint8_t *plain = ret_link_drv_scratch(c, &cap);
 	int n;
 
+	if (plain == NULL) {
+		/* A resource is arriving on another link, so this response came
+		 * in one packet: its items fit a link MDU.
+		 */
+		plain = s->item_plain;
+		cap = sizeof(s->item_plain);
+	}
+
 	if (ret_sha256(&iov, 1, id) != 0) {
 		return;
 	}
@@ -260,7 +268,11 @@ static void on_item(struct ret_client *c, const uint8_t *item, size_t len)
 	n = ret_local_identity_decrypt(&c->id, &item[RET_LXMF_ADDR_LEN], len - RET_LXMF_ADDR_LEN,
 				       plain, cap);
 	if (n < 0) {
-		LOG_WRN("propagated message undecryptable (%d): dropped", n);
+		if (n == -ENOBUFS) {
+			LOG_ERR("propagated message larger than its buffer: dropped");
+		} else {
+			LOG_WRN("propagated message undecryptable (%d): dropped", n);
+		}
 		return;
 	}
 	if (ret_lxmf_drv_deliver(c, plain, (size_t)n) == LXMF_DELIVERED) {
@@ -427,7 +439,7 @@ void ret_lxmf_sync_drv_start(struct ret_client *c, const struct send_req *r)
 		err = -EALREADY;
 	} else if (c->state != RET_STATE_CONNECTED || c->connecting) {
 		err = -ENOTCONN;
-	} else if (c->link.state != LINK_NONE) {
+	} else if (c->out.l.state != LINK_NONE) {
 		err = -EBUSY;
 	}
 	if (err) {

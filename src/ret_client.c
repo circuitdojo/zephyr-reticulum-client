@@ -319,10 +319,13 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
 	}
 	c->rx_packets++;
 
-	if (pkt.dest_type == RET_DEST_LINK && c->link.state != LINK_NONE &&
-	    memcmp(pkt.dest_hash, c->link.id, RET_TRUNC_HASH_LEN) == 0) {
-		ret_link_drv_on_packet(c, &pkt);
-		return;
+	if (pkt.dest_type == RET_DEST_LINK) {
+		struct link *l = ret_link_drv_find(c, pkt.dest_hash);
+
+		if (l != NULL) {
+			ret_link_drv_on_packet(c, l, &pkt, frame, len);
+			return;
+		}
 	}
 
 	LOG_DBG("rx type %u hdr %u hops %u ctx 0x%02x len %zu", pkt.packet_type,
@@ -820,13 +823,11 @@ static void run_connected(struct ret_client *c)
 				return;
 			}
 			if (atomic_get(&c->want_suspended)) {
-				/* Tell the peer an established link is going, rather
-				 * than let it go stale. One still being set up just
+				/* Tell the peers established links are going, rather
+				 * than let them go stale. One still being set up just
 				 * fails (disconnect() tears it down).
 				 */
-				if (c->link.state == LINK_ACTIVE || c->link.state == LINK_STALE) {
-					ret_link_drv_close(c);
-				}
+				ret_link_drv_close_all(c);
 				return;
 			}
 		}
