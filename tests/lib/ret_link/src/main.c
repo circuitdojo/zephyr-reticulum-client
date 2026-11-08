@@ -403,6 +403,42 @@ ZTEST(link, test_packet_proof_matches_rns)
 	ret_wipe(&id, sizeof(id));
 }
 
+ZTEST(link, test_packet_proof_validate)
+{
+	/* The initiator's side of the same exchange: RNS's proof of the
+	 * packet we sent, against the responder identity's Ed25519 key.
+	 */
+	const uint8_t *sig_pub = &v_identity_pub[RET_X25519_LEN];
+	uint8_t raw[sizeof(v_link_data_proof)];
+	uint8_t other[RET_HASH_LEN];
+	struct ret_packet p;
+
+	unpack_ok(v_link_data_proof, sizeof(v_link_data_proof), &p);
+	zassert_ok(ret_link_packet_proof_validate(sig_pub, v_link_id, v_link_data_hash, &p));
+
+	/* Implicit form: the signature alone. */
+	p.data += RET_HASH_LEN;
+	p.data_len -= RET_HASH_LEN;
+	zassert_ok(ret_link_packet_proof_validate(sig_pub, v_link_id, v_link_data_hash, &p));
+
+	/* Another packet's, another link's, or a forged one. */
+	memcpy(other, v_link_data_hash, sizeof(other));
+	other[0] ^= 1;
+	unpack_ok(v_link_data_proof, sizeof(v_link_data_proof), &p);
+	zassert_equal(ret_link_packet_proof_validate(sig_pub, v_link_id, other, &p), -ENOENT);
+	zassert_equal(ret_link_packet_proof_validate(sig_pub, v_link_request_id, v_link_data_hash,
+						     &p),
+		      -ENOENT);
+	memcpy(raw, v_link_data_proof, sizeof(raw));
+	raw[sizeof(raw) - 1] ^= 1;
+	unpack_ok(raw, sizeof(raw), &p);
+	zassert_equal(ret_link_packet_proof_validate(sig_pub, v_link_id, v_link_data_hash, &p),
+		      -EBADMSG);
+	p.data_len = 10;
+	zassert_equal(ret_link_packet_proof_validate(sig_pub, v_link_id, v_link_data_hash, &p),
+		      -ENOENT);
+}
+
 ZTEST(link, test_rtt_parse)
 {
 	struct ret_packet p;

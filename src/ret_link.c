@@ -296,6 +296,31 @@ int ret_link_packet_proof_build(const struct ret_local_identity *id,
 		     cap);
 }
 
+int ret_link_packet_proof_validate(const uint8_t sig_pub[RET_ED25519_PUB_LEN],
+				   const uint8_t link_id[RET_TRUNC_HASH_LEN],
+				   const uint8_t packet_hash[RET_HASH_LEN],
+				   const struct ret_packet *pkt)
+{
+	const uint8_t *sig;
+
+	if (pkt->packet_type != RET_PKT_PROOF || pkt->dest_type != RET_DEST_LINK ||
+	    pkt->context != RET_CONTEXT_NONE ||
+	    memcmp(pkt->dest_hash, link_id, RET_TRUNC_HASH_LEN) != 0) {
+		return -ENOENT;
+	}
+	if (pkt->data_len == RET_LINK_PACKET_PROOF_LEN) {
+		if (memcmp(pkt->data, packet_hash, RET_HASH_LEN) != 0) {
+			return -ENOENT;
+		}
+		sig = &pkt->data[RET_HASH_LEN];
+	} else if (pkt->data_len == RET_ED25519_SIG_LEN) {
+		sig = pkt->data;
+	} else {
+		return -ENOENT;
+	}
+	return ret_ed25519_verify(sig, sig_pub, packet_hash, RET_HASH_LEN) ? 0 : -EBADMSG;
+}
+
 int ret_link_rtt_parse(const uint8_t *plain, size_t len, uint32_t *rtt_ms)
 {
 	mpack_reader_t r;

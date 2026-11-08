@@ -136,6 +136,21 @@ int ret_link_packet_proof_build(const struct ret_local_identity *id,
 				const uint8_t packet_hash[RET_HASH_LEN], uint8_t *out, size_t cap);
 
 /**
+ * Check the proof of a packet we sent on a link (PacketReceipt
+ * .validate_link_proof()): a PROOF for @p link_id, context NONE, carrying
+ * packet_hash | signature (explicit) or the signature alone (implicit),
+ * which must verify against the peer's Ed25519 key @p sig_pub over
+ * @p packet_hash.
+ *
+ * @retval -ENOENT not a packet proof, or for another packet
+ * @retval -EBADMSG for this packet, but the signature does not verify
+ */
+int ret_link_packet_proof_validate(const uint8_t sig_pub[RET_ED25519_PUB_LEN],
+				   const uint8_t link_id[RET_TRUNC_HASH_LEN],
+				   const uint8_t packet_hash[RET_HASH_LEN],
+				   const struct ret_packet *pkt);
+
+/**
  * The initiator's LRRTT plaintext: one msgpack number, seconds. Negative or
  * NaN counts as 0 and anything over RET_LINK_RTT_MAX_S as that (the caller
  * takes the larger of this and its own measurement, as RNS does).
