@@ -18,9 +18,9 @@
  */
 #define MODE_AES256_CBC RET_LINK_MODE_AES256_CBC
 
-static void signalling(uint32_t mtu, uint8_t mode, uint8_t out[3])
+void ret_link_signalling(uint32_t mtu, uint8_t mode, uint8_t out[RET_LINK_MTU_SIZE])
 {
-	uint32_t v = (mtu & 0x1FFFFF) | ((uint32_t)(mode & 0x07) << 21);
+	uint32_t v = (mtu & RET_LINK_MTU_MASK) | ((uint32_t)(mode & 0x07) << 21);
 
 	out[0] = (uint8_t)(v >> 16);
 	out[1] = (uint8_t)(v >> 8);
@@ -54,7 +54,7 @@ void ret_link_request_data(const struct ret_link_keys *k, uint8_t out[RET_LINK_R
 {
 	memcpy(&out[0], k->x25519_pub, RET_X25519_LEN);
 	memcpy(&out[RET_X25519_LEN], k->ed25519_pub, RET_ED25519_PUB_LEN);
-	signalling(RET_MTU, MODE_AES256_CBC, &out[RET_X25519_LEN + RET_ED25519_PUB_LEN]);
+	ret_link_signalling(RET_MTU, MODE_AES256_CBC, &out[RET_X25519_LEN + RET_ED25519_PUB_LEN]);
 }
 
 int ret_link_id_from_request(const uint8_t *raw, size_t len, uint8_t link_id[RET_TRUNC_HASH_LEN])
@@ -266,7 +266,7 @@ int ret_link_proof_build(const struct ret_local_identity *id,
 	uint8_t sig[3];
 	size_t n = 0;
 
-	signalling(mtu, MODE_AES256_CBC, sig);
+	ret_link_signalling(mtu, MODE_AES256_CBC, sig);
 	memcpy(&signed_data[n], link_id, RET_TRUNC_HASH_LEN);
 	n += RET_TRUNC_HASH_LEN;
 	memcpy(&signed_data[n], resp_x25519_pub, RET_X25519_LEN);
