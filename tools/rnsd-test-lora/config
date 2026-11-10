@@ -1,0 +1,32 @@
+# The hub for the e2e 'lora-gateway' scenario: a stock rnsd, nothing
+# special for the gateway (samples/ret_lora_gateway), which connects to a
+# TCPServerInterface like any client. run_e2e.sh copies this directory, so
+# paths learned in one run do not carry over.
+
+[reticulum]
+  enable_transport = yes
+  share_instance = Yes
+  instance_name = ret-lora-test
+  shared_instance_port = 37458
+  instance_control_port = 37459
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[ret-client TCP]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 127.0.0.1
+    listen_port = 4245
+
+  # The same, protected: a gateway built with the matching
+  # CONFIG_RET_GATEWAY_IFAC_* gets in, others are ignored.
+  [[ret-client TCP IFAC]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 127.0.0.1
+    listen_port = 4247
+    network_name = ret-test
+    passphrase = correct horse battery staple

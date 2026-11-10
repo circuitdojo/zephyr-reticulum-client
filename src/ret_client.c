@@ -1127,6 +1127,16 @@ static int connect_serviced(struct ret_client *c)
 	return fd;
 }
 
+static const struct ret_tcp_opts tcp_opts = {
+	.send_timeout_ms = CONFIG_RET_SEND_TIMEOUT_MS,
+#if defined(CONFIG_RET_TCP_KEEPALIVE)
+	.keepalive = true,
+	.keepalive_idle_s = CONFIG_RET_TCP_KEEPALIVE_IDLE_S,
+	.keepalive_interval_s = CONFIG_RET_TCP_KEEPALIVE_INTERVAL_S,
+	.keepalive_count = CONFIG_RET_TCP_KEEPALIVE_COUNT,
+#endif
+};
+
 static int connect_serviced_inner(struct ret_client *c)
 {
 	static struct ret_tcp_addrs addrs;
@@ -1138,7 +1148,7 @@ static int connect_serviced_inner(struct ret_client *c)
 
 	for (int i = 0; i < addrs.count; i++) {
 		bool in_progress;
-		int fd = ret_tcp_connect_start(&addrs, i, &in_progress);
+		int fd = ret_tcp_connect_start(&addrs, i, &tcp_opts, &in_progress);
 		int64_t deadline = k_uptime_get() + CONFIG_RET_CONNECT_TIMEOUT_MS;
 
 		if (fd < 0) {

@@ -22,6 +22,19 @@ Samples:
   `contact add` names an address (settings `chat/ct/<n>`), `msg send` / `msg inbox` / `msg read`
   message and read (inbox in RAM only), plus `announce`, `sync` and `status`. `src/chat.c` is the
   shell-free layer a station UI would reuse; `src/chat_shell.c` only parses and prints.
+- `samples/ret_lora_gateway`: a LoRa gateway, a transport node (`CONFIG_RET_TRANSPORT`) with
+  two interfaces: the LoRa radio (RNode framing, gateway mode) and an HDLC TCP uplink to a
+  stock rnsd `TCPServerInterface` (optionally IFAC). The hub needs nothing special.
+  - **Threads:** the main thread owns all routing state. The radio thread (`src/radio_task.c`)
+    reassembles frames and transmits queued packets after a random backoff, never during a
+    split packet. The uplink thread (`src/uplink.c`) connects with backoff and posts frames.
+    Tunnel synthesis is sent on every connect.
+  - **Storage:** paths and announces are one file each on LittleFS (`src/store_lfs.c`, under
+    `/lfs/tp`). The transport identity and a boot counter are kept in settings (`gw/id`,
+    `gw/boot`) in a file on the same LittleFS. native_sim mounts it on the upper 1 MB of the
+    simulated flash (`boards/native_sim.overlay`).
+  - **Targets:** native_sim only so far, with the radio simulated over UDP (`src/radio_sim.c`
+    and `tools/rns_peer/air.py`). The SX1262 and LTE come next.
 
 Targets:
 - `native_sim`: NSOS host sockets, PSA Crypto from mbedTLS.
@@ -414,7 +427,7 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   closes.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `ifac`
   (the same on `tools/rnsd-test`'s protected interface, port 4244: delivered with the right
-  passphrase, nothing through with a wrong one), `echo`
+  passphrase, nothing through with a wrong one), `lora-gateway`, `echo`
   (a link: open, identify, request, a resource response and a refused compressed one, 15 s idle on
   keepalives, request, close; then bidirectional
   replies to the client's own destination, proved both ways, while the peer holds its own link
@@ -435,6 +448,21 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   build. Each known-hash scenario starts a fresh rnsd, because
   rnsd drops repeat path requests for a destination for 45 s.
   Pass names to run a subset. Logs go to `build/ret_e2e-logs/`.
+- `lora-gateway` (`ret_lora_gateway`, see "Samples"): a stock hub (`tools/rnsd-test-lora`: open
+  TCP on 4245, IFAC on 4247) and RNS LoRa peers on the simulated air (`tools/rns_peer/air.py`,
+  who hears whom; `tools/rnsd-test-lora/interfaces/AirInterface.py`, RNode framing over UDP).
+  Topology: gateway hears n1, n3 and a transport repeater; the repeater hears n2. It checks:
+  - a device on the hub with n1 (DATA, proofs, replies, a link with a resource in split
+    frames);
+  - two LoRa hops to n2;
+  - n3 to n1 through the gateway with the hub down;
+  - a gateway reboot (same identity, paths from flash), after which the hub's tunnel restores
+    its path to n2;
+  - n3 discovering a destination the gateway never heard (path request forwarded up);
+  - the IFAC uplink, right and wrong passphrase.
+
+  `peer.py --send-to HASH [--send-count N --send-size N]` sends to a `retclient.echo`
+  destination and logs `SEND PATH`, `SEND PROVED` and `SEND FAILED`.
 - Run the venv's `python` and `rnsd` (`tools/rns_peer/.venv/bin/`) when backgrounding them.
   Killing a backgrounded `uv run` leaves the child running, and a stray peer stays attached
   to rnsd and corrupts later runs.

@@ -8,13 +8,15 @@ manifest:
       url: https://github.com/zephyrproject-rtos/zephyr
       west-commands: scripts/west-commands.yml
       # native_sim-only workspace: Mbed TLS and TF-PSA-Crypto (since 4.4
-      # the PSA Crypto API lives in the latter) and picolibc for the
-      # embedded libc the samples select.
+      # the PSA Crypto API lives in the latter), picolibc for the
+      # embedded libc the samples select, and LittleFS for the gateway's
+      # path store.
       import:
         name-allowlist:
           - mbedtls
           - tf-psa-crypto
           - picolibc
+          - littlefs
     - name: monocypher
       # X25519 and RFC 8032 Ed25519. Not a Zephyr module: ret-client's
       # port/zephyr/CMakeLists.txt compiles it from this path.

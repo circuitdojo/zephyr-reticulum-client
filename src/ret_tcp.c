@@ -27,20 +27,21 @@ static int set_opt(int s, int level, int name, const void *val, socklen_t len, c
 	return 0;
 }
 
-static int configure(int s)
+static int configure(int s, const struct ret_tcp_opts *opts)
 {
 	struct zsock_timeval tv = {
-		.tv_sec = CONFIG_RET_SEND_TIMEOUT_MS / 1000,
-		.tv_usec = (CONFIG_RET_SEND_TIMEOUT_MS % 1000) * 1000,
+		.tv_sec = opts->send_timeout_ms / 1000,
+		.tv_usec = (opts->send_timeout_ms % 1000) * 1000,
 	};
 	int err = set_opt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv), "SO_SNDTIMEO");
-
-#if defined(CONFIG_RET_TCP_KEEPALIVE)
 	int on = 1;
-	int idle = CONFIG_RET_TCP_KEEPALIVE_IDLE_S;
-	int intvl = CONFIG_RET_TCP_KEEPALIVE_INTERVAL_S;
-	int cnt = CONFIG_RET_TCP_KEEPALIVE_COUNT;
+	int idle = opts->keepalive_idle_s;
+	int intvl = opts->keepalive_interval_s;
+	int cnt = opts->keepalive_count;
 
+	if (!opts->keepalive) {
+		return err;
+	}
 	if (!err) {
 		err = set_opt(s, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on), "SO_KEEPALIVE");
 	}
@@ -54,7 +55,6 @@ static int configure(int s)
 	if (!err) {
 		err = set_opt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt), "TCP_KEEPCNT");
 	}
-#endif
 	return err;
 }
 
@@ -101,7 +101,8 @@ static int set_nonblocking(int s, bool on)
 	return zsock_fcntl(s, ZVFS_F_SETFL, flags) < 0 ? -errno : 0;
 }
 
-int ret_tcp_connect_start(const struct ret_tcp_addrs *addrs, int i, bool *in_progress)
+int ret_tcp_connect_start(const struct ret_tcp_addrs *addrs, int i,
+			  const struct ret_tcp_opts *opts, bool *in_progress)
 {
 	int s = zsock_socket(addrs->family[i], SOCK_STREAM, IPPROTO_TCP);
 	int err;
@@ -109,7 +110,7 @@ int ret_tcp_connect_start(const struct ret_tcp_addrs *addrs, int i, bool *in_pro
 	if (s < 0) {
 		return -errno;
 	}
-	err = configure(s);
+	err = configure(s, opts);
 	if (!err) {
 		err = set_nonblocking(s, true);
 	}

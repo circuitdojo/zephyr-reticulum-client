@@ -1,0 +1,141 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+menu "ret_lora_gateway sample"
+
+config RET_GATEWAY_HOST
+	string "Hub host name or address"
+	help
+	  An rnsd with a TCPServerInterface (any stock rnsd). The gateway
+	  connects out to it, so its own address doesn't matter.
+
+config RET_GATEWAY_PORT
+	int "Hub port"
+	default 4242
+	range 1 65535
+
+config RET_GATEWAY_RECONNECT_MAX_S
+	int "Longest wait between reconnects (s)"
+	default 60
+	range 1 3600
+	help
+	  The wait doubles from 1 s after each failed connect.
+
+config RET_GATEWAY_IFAC_NETWORK_NAME
+	string "Hub interface's network_name (IFAC)"
+	default ""
+
+config RET_GATEWAY_IFAC_PASSPHRASE
+	string "Hub interface's passphrase (IFAC)"
+	default ""
+	help
+	  Set in env/<name>.conf, which git ignores: it ends up in the
+	  firmware image. With neither name nor passphrase the uplink is open.
+
+config RET_GATEWAY_IFAC_SIZE
+	int "Hub interface's IFAC size in bytes (ifac_size / 8)"
+	default 16
+	range 1 64
+
+config RET_GATEWAY_ANNOUNCE_CAP
+	int "Uplink announce cap (percent of its bitrate)"
+	default 2
+	range 1 100
+
+config RET_LORA_IFAC_NETWORK_NAME
+	string "LoRa network_name (IFAC)"
+	default ""
+	help
+	  Every node on the LoRa network must use the same.
+
+config RET_LORA_IFAC_PASSPHRASE
+	string "LoRa passphrase (IFAC)"
+	default ""
+
+config RET_LORA_IFAC_SIZE
+	int "LoRa IFAC size in bytes"
+	default 8
+	range 1 8
+	help
+	  RNode's default. A 500-byte packet plus the code must fit the
+	  508-byte LoRa MTU, so at most 8.
+
+config RET_LORA_ANNOUNCE_CAP
+	int "LoRa announce cap (percent of airtime)"
+	default 2
+	range 1 100
+	help
+	  Announces forwarded onto LoRa may use this share of the airtime;
+	  the rest wait in a queue, fewest hops first.
+
+config RET_LORA_TX_QUEUE
+	int "Packets waiting for the radio"
+	default 4
+	range 1 32
+
+config RET_LORA_BACKOFF_MS
+	int "Longest random wait before transmitting (ms)"
+	default 500
+	range 0 10000
+	help
+	  The radio has no carrier sense yet, so this is the only thing
+	  separating transmissions from other nodes. Restarted whenever a
+	  frame is received.
+
+config RET_LORA_FREQ_HZ
+	int "Frequency (Hz)"
+	default 915000000
+
+config RET_LORA_BW_HZ
+	int "Bandwidth (Hz)"
+	default 500000
+	help
+	  Every node on the network must use the same frequency, bandwidth,
+	  spreading factor and coding rate.
+
+config RET_LORA_SF
+	int "Spreading factor"
+	default 9
+	range 5 12
+
+config RET_LORA_CR
+	int "Coding rate denominator (5 to 8, for 4/5 to 4/8)"
+	default 5
+	range 5 8
+
+config RET_LORA_TX_POWER_DBM
+	int "TX power (dBm)"
+	default 14
+	range -9 22
+
+config RET_GATEWAY_STORE_MAX_PATHS
+	int "Paths kept in flash"
+	default 1024
+	help
+	  One file per destination under /lfs/tp, each taking a filesystem
+	  block. When this many are stored, or the free blocks fall to
+	  RET_GATEWAY_STORE_RESERVE_BLOCKS, one is removed to make room.
+
+config RET_GATEWAY_STORE_RESERVE_BLOCKS
+	int "Filesystem blocks kept free"
+	default 16
+	help
+	  Room the path store never takes: LittleFS needs free blocks to
+	  rewrite files, and the settings file (identity, boot counter)
+	  shares the filesystem.
+
+if !NRF_MODEM_LIB
+
+config RET_LORA_SIM_AIR_PORT
+	int "UDP port of the simulated air (tools/rns_peer/air.py)"
+	default 5100
+
+config RET_LORA_SIM_LOCAL_PORT
+	int "UDP port of this simulated radio"
+	default 5101
+
+endif
+
+endmenu
+
+source "Kconfig.zephyr"

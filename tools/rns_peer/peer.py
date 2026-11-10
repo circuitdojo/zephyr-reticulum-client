@@ -12,7 +12,8 @@ client's own destination (`retclient.node`, learned from its announce) and
 reports the client's delivery proof for each reply.
 
 Lines meant for scripts start with a fixed tag: PEER READY, ANNOUNCED,
-RECEIVED, CLIENT ANNOUNCE, REPLY SENT, REPLY PROVED, REPLY FAILED, LINK ESTABLISHED,
+RECEIVED, CLIENT ANNOUNCE, REPLY SENT, REPLY PROVED, REPLY FAILED, SEND PATH, SEND PROVED,
+SEND FAILED, LINK ESTABLISHED,
 LINK IDENTIFIED, LINK REQUEST, LINK CLOSED, RESOURCE PROVED, RESOURCE
 REFUSED. The destination serves link
 request handlers:
@@ -78,6 +79,15 @@ def main() -> None:
         metavar="N",
         help=f"open a link to the client's {CLIENT_NAME}, send N packets (proved), idle 15 s on "
         "keepalives, send one more, close",
+    )
+    ap.add_argument(
+        "--send-to",
+        metavar="HASH",
+        help="send --send-count messages to this retclient.echo destination and report each proof",
+    )
+    ap.add_argument("--send-count", type=int, default=3)
+    ap.add_argument(
+        "--send-size", type=int, default=0, metavar="N", help="pad each message to N bytes"
     )
     ap.add_argument(
         "--print-hash",
@@ -197,6 +207,38 @@ def main() -> None:
         # RNS does not call a callback set after the proof already arrived.
         if receipt.status == RNS.PacketReceipt.DELIVERED:
             report(f"REPLY PROVED {text}")
+
+    def send_to(dest_hex: str, count: int) -> None:
+        """Send to another peer, finding the path through RNS."""
+        dest_hash = bytes.fromhex(dest_hex)
+        deadline = time.time() + REPLY_PATH_WAIT_S * 3
+        while not RNS.Transport.has_path(dest_hash) or RNS.Identity.recall(dest_hash) is None:
+            if time.time() > deadline:
+                out(f"SEND FAILED no path to {dest_hex}")
+                return
+            RNS.Transport.request_path(dest_hash)
+            time.sleep(3)
+        out(f"SEND PATH {RNS.Transport.hops_to(dest_hash)} hops")
+        target = RNS.Destination(
+            RNS.Identity.recall(dest_hash),
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            APP_NAME,
+            ASPECT,
+        )
+        for i in range(1, count + 1):
+            text = f"sent #{i}"
+            receipt = RNS.Packet(target, text.ljust(args.send_size).encode()).send()
+            limit = time.time() + 30
+            while receipt.status == RNS.PacketReceipt.SENT and time.time() < limit:
+                time.sleep(0.1)
+            if receipt.status == RNS.PacketReceipt.DELIVERED:
+                out(f"SEND PROVED {i}")
+            else:
+                out(f"SEND FAILED {i}")
+
+    if args.send_to:
+        threading.Thread(target=send_to, args=(args.send_to, args.send_count), daemon=True).start()
 
     received = 0
 
