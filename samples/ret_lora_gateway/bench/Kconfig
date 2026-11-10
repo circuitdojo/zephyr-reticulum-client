@@ -6,9 +6,6 @@ menu "Path store benchmark"
 config BENCH_PATHS
 	int "Paths in the workload"
 	default 200
-	help
-	  native_sim's 1 MB partition holds about 240 LittleFS paths (a
-	  block each), so the default stays under that for both stores.
 
 config BENCH_ANNOUNCE_LEN
 	int "Bytes of announce per path"

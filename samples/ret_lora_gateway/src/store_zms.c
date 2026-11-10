@@ -3,26 +3,34 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * The transport's path store in ZMS: one record per destination, value a
- * header, the path's metadata and the announce as received (as
- * store_lfs.c's files). ZMS appends every write and reclaims the oldest
- * sector when full; its data CRC covers each record.
+ * header, the path's metadata and the announce as received. ZMS appends
+ * every write and reclaims the oldest sector when full; its data CRC
+ * covers each record.
  *
  * Record IDs are 32 bits of the destination hash: bytes 0..3, or bytes
  * 8..11 when another destination holds the first. RAM keeps a sorted index
  * of the stored IDs with a tag from bytes 4..7 naming the owner, so:
  * - a lookup for a destination we don't have never touches flash;
  * - a write needs no read first;
- * - a destination made to share an ID with another (32 bits are cheap to
- *   grind) moves to its second ID instead of replacing it. Taking both
- *   would need 64 matching bits.
+ * - a stored path is never replaced by another destination's. One made to
+ *   share an ID (32 bits are cheap to grind) moves to its second ID, and
+ *   one whose IDs are both taken isn't stored, so the gateway doesn't
+ *   rebroadcast it or answer for it (about 46 bits of grinding, and only
+ *   that destination loses). A flood of new destinations still evicts the
+ *   oldest records, as any bounded table would.
  * Records still carry the whole hash, which every read checks.
  *
  * ZMS finds a record by walking its log back from the newest entry unless
  * its lookup cache answers: about 0.15 ms per entry walked on the NOR. The
  * index is built at boot in one pass over the log (zms_iter_next_all):
  * zms_iter_next() looks for a newer copy of every entry it yields, which
- * makes a full walk quadratic. A record that can't be read (malformed, or
- * its data CRC fails) is deleted, so one bad record can't stop a boot.
+ * makes a full walk quadratic. While more deleted paths are still in the
+ * log than MAX_DEAD, each further copy of those costs a lookup at boot.
+ * A record that can't be read (malformed, or its data CRC fails twice) is
+ * deleted, so one bad record can't stop a boot.
+ *
+ * Eviction takes the record ZMS wrote longest ago: GC rewrites survivors at
+ * the head, so this is roughly first in, first out.
  */
 
 #include <errno.h>
@@ -51,7 +59,7 @@ LOG_MODULE_REGISTER(store_zms, LOG_LEVEL_INF);
  * IDs seen deleted while building the index, so older copies stay hidden.
  * Past this many, candidates are checked with ZMS before being indexed.
  */
-#define MAX_DEAD  (MAX_PATHS / 2)
+#define MAX_DEAD  MAX_PATHS
 /* Records over the limit removed per boot (a build with a lower limit). */
 #define MAX_EXTRA 32
 
@@ -63,9 +71,18 @@ struct header {
 
 #define RECORD_MAX (sizeof(struct header) + sizeof(struct ret_transport_path_meta) + RET_MTU)
 
-/* Every record and its ZMS entry must fit, with sectors for ZMS to rotate. */
-BUILD_ASSERT((uint64_t)MAX_PATHS * (RECORD_MAX + 16) + 2 * 4096 <= PARTITION_SIZE(PATHS_PART),
-	     "RET_GATEWAY_STORE_MAX_PATHS records don't fit gw_paths_partition (aim for twice)");
+BUILD_ASSERT(sizeof(zms_id_t) == sizeof(uint32_t), "the path store needs 32-bit ZMS IDs");
+
+/*
+ * Sectors MAX_PATHS records take (4 KB sectors, five ZMS entries per sector
+ * for its own use): ZMS wants twice that, or a full store spends its time
+ * in garbage collection. Checked again at mount with the real sector size.
+ */
+#define ATE_SIZE 16
+#define SECTORS_FOR(sector)                                                                    \
+	DIV_ROUND_UP(MAX_PATHS, ((sector) - 5 * ATE_SIZE) / (RECORD_MAX + ATE_SIZE))
+BUILD_ASSERT(2 * SECTORS_FOR(4096) + 2 <= PARTITION_SIZE(PATHS_PART) / 4096,
+	     "gw_paths_partition can't hold twice RET_GATEWAY_STORE_MAX_PATHS records");
 
 struct entry {
 	uint32_t id;
@@ -219,6 +236,18 @@ static int read_record(uint32_t id, const struct ret_transport_path_meta **meta,
 	    h->len > RET_MTU || (size_t)n != sizeof(*h) + h->meta_size + h->len) {
 		return -EBADMSG;
 	}
+	/* A value longer than rec reads partially, past ZMS's data CRC. */
+	if ((size_t)n == sizeof(rec)) {
+		ssize_t stored = zms_get_data_length(&fs, id);
+
+		if (stored < 0) {
+			/* -EIO is retried by read_indexed(). */
+			return (int)stored;
+		}
+		if (stored != n) {
+			return -EBADMSG;
+		}
+	}
 	*meta = (const struct ret_transport_path_meta *)&rec[sizeof(*h)];
 	if (announce) {
 		*announce = &rec[sizeof(*h) + h->meta_size];
@@ -237,6 +266,10 @@ static int read_indexed(uint32_t id, const struct ret_transport_path_meta **meta
 	struct entry *e;
 	int err = read_record(id, meta, announce, len);
 
+	if (err == -EIO) {
+		/* A CRC mismatch, or a flash read error: only the first lasts. */
+		err = read_record(id, meta, announce, len);
+	}
 	if (err == -EBADMSG || err == -EIO) {
 		LOG_WRN("unreadable path record %08x (%d), removed", (unsigned int)id, err);
 		(void)zms_delete(&fs, id);
@@ -286,18 +319,37 @@ static int locate(const uint8_t dest_hash[RET_TRUNC_HASH_LEN], const uint32_t id
 	return -ENOENT;
 }
 
-/* Read @p dest_hash's record (located with locate()): -ENOENT unless it's theirs. */
-static int read_own(const uint8_t dest_hash[RET_TRUNC_HASH_LEN], uint32_t id,
-		    const struct ret_transport_path_meta **meta, const uint8_t **announce,
-		    size_t *len)
+/*
+ * Read @p dest_hash's own record: of its IDs, one whose owner may be it and
+ * whose stored hash is it. @p k receives which. -ENOENT if neither.
+ */
+static int read_mine(const uint8_t dest_hash[RET_TRUNC_HASH_LEN], const uint32_t ids[2],
+		     int *k, const struct ret_transport_path_meta **meta, const uint8_t **announce,
+		     size_t *len)
 {
-	int err = read_indexed(id, meta, announce, len);
+	uint32_t tag = tag_of(dest_hash);
 
-	if (!err && memcmp((*meta)->dest_hash, dest_hash, RET_TRUNC_HASH_LEN) != 0) {
-		/* The tags matched, the hashes don't (32-bit tags). */
-		err = -ENOENT;
+	for (int i = 0; i < 2; i++) {
+		struct entry *e = find(ids[i]);
+		int err;
+
+		if (!e || (e->tag != TAG_UNKNOWN && e->tag != tag)) {
+			continue;
+		}
+		err = read_indexed(ids[i], meta, announce, len);
+		if (err == -ENOENT) {
+			continue;
+		}
+		if (err) {
+			return err;
+		}
+		if (memcmp((*meta)->dest_hash, dest_hash, RET_TRUNC_HASH_LEN) == 0) {
+			*k = i;
+			return 0;
+		}
+		/* Same tag, another destination (32-bit tags): try the other ID. */
 	}
-	return err;
+	return -ENOENT;
 }
 
 static int load(struct ret_transport_store *s, const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
@@ -312,11 +364,7 @@ static int load(struct ret_transport_store *s, const uint8_t dest_hash[RET_TRUNC
 
 	ARG_UNUSED(s);
 	ids_of(dest_hash, ids);
-	k = locate(dest_hash, ids);
-	if (k < 0) {
-		return k;
-	}
-	err = read_own(dest_hash, ids[k], &m, &a, &n);
+	err = read_mine(dest_hash, ids, &k, &m, &a, &n);
 	if (err) {
 		return err;
 	}
@@ -414,19 +462,11 @@ static int save(struct ret_transport_store *s, const struct ret_transport_path_m
 
 	ARG_UNUSED(s);
 	ids_of(meta->dest_hash, ids);
-	k = locate(meta->dest_hash, ids);
-	if (k < 0 && k != -ENOENT) {
-		return k;
-	}
 	if (!announce) {
 		/* Metadata only: keep the stored announce (read into rec). */
 		const struct ret_transport_path_meta *old;
-		int err;
+		int err = read_mine(meta->dest_hash, ids, &k, &old, NULL, NULL);
 
-		if (k < 0) {
-			return -ENOENT;
-		}
-		err = read_own(meta->dest_hash, ids[k], &old, NULL, NULL);
 		if (err) {
 			return err;
 		}
@@ -437,15 +477,22 @@ static int save(struct ret_transport_store *s, const struct ret_transport_path_m
 		if (len == 0 || len > RET_MTU) {
 			return -EMSGSIZE;
 		}
+		/* By owner tag, no read: matching a stored path's ID and tag
+		 * both would take 64 bits.
+		 */
+		k = locate(meta->dest_hash, ids);
 		if (k >= 0) {
 			id = ids[k];
+		} else if (k != -ENOENT) {
+			return k;
 		} else if (!find(ids[0])) {
 			id = ids[0];
 		} else if (!find(ids[1])) {
 			id = ids[1];
 		} else {
-			/* Both IDs belong to others: the first one gives way. */
-			id = ids[0];
+			/* Both IDs belong to others, who keep them. */
+			LOG_DBG("both IDs of a new path are taken, not stored");
+			return -EEXIST;
 		}
 		h->magic = MAGIC;
 		h->meta_size = sizeof(*meta);
@@ -466,11 +513,7 @@ static int remove_path(struct ret_transport_store *s, const uint8_t dest_hash[RE
 
 	ARG_UNUSED(s);
 	ids_of(dest_hash, ids);
-	k = locate(dest_hash, ids);
-	if (k < 0) {
-		return k;
-	}
-	err = read_own(dest_hash, ids[k], &m, NULL, NULL);
+	err = read_mine(dest_hash, ids, &k, &m, NULL, NULL);
 	if (err) {
 		return err;
 	}
@@ -574,15 +617,20 @@ static int foreach(struct ret_transport_store *s,
 			/* Dropped from the index: entries[i] is the next one now. */
 			continue;
 		}
-		i++;
 		if (err) {
 			LOG_WRN("path record %08x: %d", (unsigned int)id, err);
+			i++;
 			continue;
 		}
 		ids_of(m->dest_hash, ids);
 		if (ids[0] != id && ids[1] != id) {
+			/* Stored under an ID its hash doesn't give: not ours to keep. */
+			LOG_WRN("path record %08x under the wrong ID, removed", (unsigned int)id);
+			(void)zms_delete(&fs, id);
+			drop(id);
 			continue;
 		}
+		i++;
 		meta = *m;
 		if (cb(&meta, user)) {
 			break;
@@ -617,6 +665,11 @@ int store_init(struct ret_transport_store **out)
 	/* A sector must hold the largest record; erase pages may be smaller. */
 	fs.sector_size = ROUND_UP(MAX(info.size, 2 * RECORD_MAX), info.size);
 	fs.sector_count = PARTITION_SIZE(PATHS_PART) / fs.sector_size;
+	if (2 * SECTORS_FOR(fs.sector_size) + 2 > fs.sector_count) {
+		LOG_ERR("path store: %u sectors of %u bytes can't hold twice %d paths",
+			fs.sector_count, fs.sector_size, MAX_PATHS);
+		return -ENOSPC;
+	}
 
 	err = zms_set_lookup_cache(&fs, lookup_cache, ARRAY_SIZE(lookup_cache));
 	if (!err) {

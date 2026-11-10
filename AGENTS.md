@@ -35,26 +35,31 @@ Samples:
     - **Record IDs:** bytes 0..3 of the destination hash, or bytes 8..11 when another
       destination holds the first. Never ZMS's reserved 0xFFFFFFFF.
     - **RAM index:** sorted, 8 bytes per path: the ID, and a tag from bytes 4..7 naming the
-      owner. A lookup for an unknown destination never touches flash, a write needs no read
-      first, and a ground 32-bit collision can't push another destination out. The index is
-      built at boot in one linear pass (`zms_iter_next_all`), because `zms_iter_next()` is
-      quadratic. Owners are learned on each record's first read.
-    - **Bad records:** a record that can't be read (malformed, or its data CRC fails) is
+      owner. A lookup for an unknown destination never touches flash, and a write needs no read
+      first. Owners are learned on each record's first read.
+    - **Collisions:** a stored path is never replaced by another destination's. One whose IDs
+      are both taken isn't stored, so the gateway doesn't rebroadcast it or answer for it.
+      That takes about 46 bits of grinding, and only that destination loses. A flood of new
+      destinations still evicts the oldest records.
+    - **Boot:** the index is built in one pass (`zms_iter_next_all`), because
+      `zms_iter_next()` is quadratic. Past `CONFIG_RET_GATEWAY_STORE_MAX_PATHS` deleted paths
+      still in the log, each further copy of those costs a lookup.
+    - **Bad records:** a record that can't be read (malformed, or its data CRC fails twice) is
       deleted, so one bad record can't stop a boot.
     - **Lookup cache:** keep `CONFIG_RET_GATEWAY_ZMS_CACHE` at about twice
       `CONFIG_RET_GATEWAY_STORE_MAX_PATHS`. A read whose cache slot belongs to another ID walks
-      the log, at milliseconds per entry on the NOR.
+      the log, at about 0.15 ms per entry on the NOR.
     - **native_sim:** the paths are on the upper 1 MB of the simulated flash
       (`boards/native_sim.overlay`), settings on `storage_partition`.
-    - **LittleFS variant:** `-DFILE_SUFFIX=lfs` builds the earlier LittleFS store
-      (`src/store_lfs.c`, a file per path under `/lfs/tp`) for comparison. On the Feather it
-      took 342 ms per insert, 205 ms per hit and 79 ms per miss at 200 paths, against ZMS's
-      17 ms, 2.3 ms and 45 µs.
-  - **Benchmark:** `bench/` drives either store with a fixed workload (insert, hits, misses,
-    metadata updates, announce replacements, a walk). It reports time per operation and, on
-    native_sim, the flash simulator's bytes read and written and its erases. On the Feather it
-    reboots warm to time the boot. It wipes the store first: the ZMS build erases its NOR
-    partitions, so it repartitions away the board's LittleFS and the other samples' settings.
+    - **Why not LittleFS:** an earlier store kept a file per path on LittleFS. On the
+      Feather it took 342 ms per insert, 205 ms per hit and 79 ms per miss at 200 paths,
+      against ZMS's 17 ms, 2.3 ms and 45 µs, with 4.5 KB of flash per path against about
+      600 B. It was removed.
+  - **Benchmark:** `bench/` drives the store with a fixed workload (insert, hits, misses,
+    metadata updates, announce replacements, a read of every record). It reports time per
+    operation and, on native_sim, the flash simulator's bytes read and written and its erases.
+    On the Feather it reboots warm to time the boot. It erases its NOR partitions first, which
+    repartitions away the board's LittleFS and the other samples' settings.
   - **Targets:** native_sim only so far, with the radio simulated over UDP (`src/radio_sim.c`
     and `tools/rns_peer/air.py`). The SX1262 and LTE come next.
 
@@ -76,7 +81,7 @@ Read it before touching packet, crypto or announce code.
 Everything builds from the **workspace root** (`nrf9160-feather-examples-and-drivers/`),
 not from inside this repo. Its manifest is one of this repo's:
 - `west-vanilla.yml`: vanilla Zephyr v4.5.0 (one past the line NCS v3.5 is built on), Mbed TLS,
-  TF-PSA-Crypto, picolibc, LittleFS, Monocypher and mpack. native_sim only. v4.5 has ZMS's
+  TF-PSA-Crypto, picolibc, Monocypher and mpack. native_sim only. v4.5 has ZMS's
   iterator (NCS v3.5 backports it) and the new partition schema: memory-mapped partitions
   carry `compatible = "zephyr,mapped-partition"` and the `PARTITION_*` macros replace the
   deprecated `FIXED_PARTITION_*`. External NOR partitions keep the old form, with no
@@ -387,6 +392,12 @@ Kconfig notes carried over from lion-client:
      wiping, thread confinement, and missing tests.
    - Verify each finding against the code before acting on it.
    - Fix the real ones. List any you deliberately skipped in the commit body or the PR.
+   - **Review again after significant fixes.** If the fixes changed design or logic (new data
+     structures, reworked control flow, a redesign), run another fresh-context review of the
+     result before committing, with the intent and the list of fixes. Ask it to check that
+     each fix is right and to look for bugs the fixes introduced. Repeat until a round needs
+     only trivial changes. Fixes to docs, comments or single lines don't need another round.
+   - In the PR, say which round each fix came from.
 6. **Commit.** Commit at each milestone once the gates and review are done.
    - Use Conventional Commit subjects (`feat(announce): …`, `fix(hdlc): …`, `test(crypto): …`,
      `chore: …`). The body explains the why.
@@ -403,10 +414,10 @@ Kconfig notes carried over from lion-client:
 `.forgejo/workflows/ci.yml` runs on every PR and push to `main` on the bigbox runner,
 in the `ret-client-ci` image (`ci/Dockerfile`). It has two jobs:
 - `native_sim` (vanilla workspace): ruff, a golden-vector regeneration diff, the flash.py
-  tests, the unit tests, warning-free sample builds (including the gateway's LittleFS
-  variant and its store benchmark, both stores) and the full e2e.
-- `nrf9151` (NCS workspace, after `native_sim`): warning-free sysbuilds of the three samples for
-  the Feather. It uploads `tfm_merged.hex` (TF-M plus app) for `ret_basic` and `ret_lxmf`, with nfed's
+  tests, the unit tests, warning-free sample builds (including the gateway's store
+  benchmark) and the full e2e.
+- `nrf9151` (NCS workspace, after `native_sim`): warning-free sysbuilds of the samples for the
+  Feather, plus the gateway's store benchmark. It uploads `tfm_merged.hex` (TF-M plus app) for `ret_basic` and `ret_lxmf`, with nfed's
   `uicr_debug_access_open.hex`, as the `samples-nrf9151` artifact.
 
 Runner setup (image build, volume allowlist) is in `docs/ci-forgejo.md`. After pushing a

@@ -78,15 +78,10 @@ jobs:
             west build -b native_sim ret-client/samples/$s -d build/$s -p --no-sysbuild 2>&1 | tee build/$s.log
             ! grep -q "warning:" build/$s.log
           done
-          # The gateway's LittleFS store and the path store benchmark.
-          west build -b native_sim ret-client/samples/ret_lora_gateway -d build/gw_lfs -p --no-sysbuild \
-            -- -DFILE_SUFFIX=lfs 2>&1 | tee build/gw_lfs.log
-          ! grep -q "warning:" build/gw_lfs.log
-          for v in "" lfs; do
-            west build -b native_sim ret-client/samples/ret_lora_gateway/bench -d build/bench_$v -p --no-sysbuild \
-              ${v:+-- -DFILE_SUFFIX=$v} 2>&1 | tee build/bench_$v.log
-            ! grep -q "warning:" build/bench_$v.log
-          done
+          # The gateway's path store benchmark.
+          west build -b native_sim ret-client/samples/ret_lora_gateway/bench -d build/gw_bench -p \
+            --no-sysbuild 2>&1 | tee build/gw_bench.log
+          ! grep -q "warning:" build/gw_bench.log
 
       - name: End to end against rnsd
         id: e2e

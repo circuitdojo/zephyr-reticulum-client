@@ -2,8 +2,8 @@
  * Copyright (c) 2026 Circuit Dojo LLC
  * SPDX-License-Identifier: Apache-2.0
  *
- * Path store benchmark: the gateway's store (ZMS, or LittleFS with
- * -DFILE_SUFFIX=lfs) under a fixed workload. Each phase reports the time
+ * Path store benchmark: the gateway's ZMS store (src/store_zms.c) under a
+ * fixed workload. Each phase reports the time
  * per operation and, on native_sim's simulated flash, the bytes read and
  * written per operation and the erases. Start from blank flash (native_sim:
  * a new --flash file).
@@ -166,7 +166,6 @@ static void report(const char *name, uint32_t ops, uint32_t cycles, const struct
 	printk(failures ? " (%d FAILED)\n" : "\n", failures);
 }
 
-#if defined(CONFIG_RET_GATEWAY_STORE_ZMS)
 #if DT_HAS_CHOSEN(zephyr_settings_partition)
 #define SETTINGS_PART_ID DT_PARTITION_ID(DT_CHOSEN(zephyr_settings_partition))
 #else
@@ -192,33 +191,6 @@ static int wipe(void)
 	}
 	return 0;
 }
-#else
-static uint8_t found[CONFIG_RET_GATEWAY_STORE_MAX_PATHS][RET_TRUNC_HASH_LEN];
-static size_t n_found;
-
-static int note_path(const struct ret_transport_path_meta *meta, void *user)
-{
-	ARG_UNUSED(user);
-	if (n_found == ARRAY_SIZE(found)) {
-		return 1;
-	}
-	memcpy(found[n_found++], meta->dest_hash, RET_TRUNC_HASH_LEN);
-	return 0;
-}
-
-/* Start from an empty store: remove an earlier run's paths. */
-static int wipe_store(void)
-{
-	do {
-		n_found = 0;
-		(void)store->foreach(store, note_path, NULL);
-		for (size_t i = 0; i < n_found; i++) {
-			(void)store->remove(store, found[i]);
-		}
-	} while (n_found > 0);
-	return 0;
-}
-#endif
 
 /* The transport loads this many paths into RAM at boot (RET_TRANSPORT_PATHS). */
 static int warm_path(const struct ret_transport_path_meta *meta, void *user)
@@ -288,13 +260,11 @@ int main(void)
 		return 0;
 	}
 	memset(announce, 0xa5, sizeof(announce));
-#if defined(CONFIG_RET_GATEWAY_STORE_ZMS)
 	err = wipe();
 	if (err) {
 		printk("wipe: %d\n", err);
 		return 0;
 	}
-#endif
 	err = ret_crypto_init();
 	if (!err) {
 		/* As the gateway: its identity is a setting next to the paths. */
@@ -311,21 +281,15 @@ int main(void)
 	have = counters(&a);
 	t0 = k_cycle_get_32();
 	err = store_init(&store);
+	uint32_t init_cycles = k_cycle_get_32() - t0;
+
 	have = counters(&b);
 	if (err) {
 		printk("store_init: %d\n", err);
 		return 0;
 	}
-#if !defined(CONFIG_RET_GATEWAY_STORE_ZMS)
-	if (store_used_bytes() > 0) {
-		/* Not timed: init above is, with the earlier run's paths. */
-		(void)wipe_store();
-		printk("removed an earlier run's paths\n");
-	}
-#endif
-	printk("BENCH %s, %d paths, %d-byte announces\n",
-	       IS_ENABLED(CONFIG_RET_GATEWAY_STORE_ZMS) ? "ZMS" : "LittleFS", N, LEN);
-	report("init", 1, k_cycle_get_32() - t0, &a, &b, have, 0);
+	printk("BENCH ZMS, %d paths, %d-byte announces\n", N, LEN);
+	report("init", 1, init_cycles, &a, &b, have, 0);
 
 	for (enum op op = OP_INSERT; op <= OP_REPLACE; op++) {
 		int failures = 0;

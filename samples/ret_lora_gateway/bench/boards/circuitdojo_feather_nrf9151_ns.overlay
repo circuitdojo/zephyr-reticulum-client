@@ -1,7 +1,7 @@
 /*
- * ZMS on the external NOR instead of the board's 16 MB LittleFS: settings
- * and paths each on a partition of their own. Flashing this replaces
- * whatever LittleFS held (other samples' settings).
+ * ZMS on the external NOR instead of the board's 16 MB LittleFS partition:
+ * settings and paths each on a partition of their own. Flashing this
+ * replaces whatever LittleFS held there (other samples' settings).
  */
 
 #include "../../../common/circuitdojo_feather_nrf9151_ns_flash.dtsi"

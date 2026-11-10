@@ -44,7 +44,7 @@ int uplink_send(const uint8_t *frame, size_t len);
 /** SHA-256 naming the uplink for tunnel synthesis; the same on every connect. */
 void uplink_iface_hash(uint8_t hash[RET_HASH_LEN]);
 
-/* store_lfs.c or store_zms.c */
+/* store_zms.c */
 int store_init(struct ret_transport_store **store);
 /** Flash the store occupies now, in bytes. */
 ssize_t store_used_bytes(void);
