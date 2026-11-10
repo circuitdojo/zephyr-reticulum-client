@@ -35,7 +35,10 @@
 
 /** Largest plaintext per link packet at MTU 500: floor((500-1-19-48)/16)*16-1. */
 #define RET_LINK_MDU          431
-#define RET_LINK_REQUEST_LEN  (RET_X25519_LEN + RET_ED25519_PUB_LEN + 3)
+/* MTU (21 bits) and mode (3 bits << 21), big-endian (Link.signalling_bytes). */
+#define RET_LINK_MTU_SIZE     3
+#define RET_LINK_MTU_MASK     0x1FFFFF
+#define RET_LINK_REQUEST_LEN  (RET_X25519_LEN + RET_ED25519_PUB_LEN + RET_LINK_MTU_SIZE)
 #define RET_LINK_IDENTIFY_LEN (RET_PUBKEY_LEN + RET_SIG_LEN)
 
 #define RET_LINK_MODE_AES256_CBC  1
@@ -53,6 +56,9 @@ struct ret_link_keys {
 	uint8_t ed25519_sk[64];
 	uint8_t ed25519_pub[RET_ED25519_PUB_LEN];
 };
+
+/** Encode link MTU signalling: (mtu & 0x1FFFFF) | mode << 21, 3 bytes big-endian. */
+void ret_link_signalling(uint32_t mtu, uint8_t mode, uint8_t out[RET_LINK_MTU_SIZE]);
 
 int ret_link_keys_generate(struct ret_link_keys *k);
 

@@ -71,6 +71,18 @@ struct ret_packet {
 int ret_packet_unpack(const uint8_t *raw, size_t len, struct ret_packet *pkt);
 
 /**
+ * Parse a packet received on an interface whose hardware MTU may exceed
+ * RET_MTU (an RNode's is 508), with Packet.unpack()'s checks: a hop
+ * count of 128 or more, or an empty data field, is malformed.
+ *
+ * @retval 0 on success
+ * @retval -EMSGSIZE shorter than the header, or longer than @p max_len
+ * @retval -EBADMSG hop count or empty data
+ * @retval -ENOTSUP the IFAC flag is set
+ */
+int ret_packet_unpack_max(const uint8_t *raw, size_t len, size_t max_len, struct ret_packet *pkt);
+
+/**
  * Serialise @p pkt into @p out.
  *
  * @return packed length, or -EMSGSIZE if it exceeds @p cap or the MTU.
@@ -98,5 +110,16 @@ int ret_packet_hash(const uint8_t *raw, size_t len, uint8_t hash[RET_HASH_LEN]);
  */
 int ret_path_request_build(const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
 			   const uint8_t tag[RET_PATH_REQUEST_TAG_LEN], uint8_t *out, size_t cap);
+
+/**
+ * Build a path request as a transport node sends it: data = dest_hash |
+ * the requesting node's transport ID | tag (48 bytes).
+ *
+ * @return packet length, or a negative errno.
+ */
+int ret_path_request_build_transport(const uint8_t dest_hash[RET_TRUNC_HASH_LEN],
+				     const uint8_t transport_id[RET_TRUNC_HASH_LEN],
+				     const uint8_t tag[RET_PATH_REQUEST_TAG_LEN], uint8_t *out,
+				     size_t cap);
 
 #endif /* RET_PACKET_H_ */

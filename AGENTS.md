@@ -203,6 +203,15 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
 - `src/ret_link.c`: link packet formats (request, link_id, proof validation and key, link
   packets, request/response/identify/RTT payloads). Pure functions, tested against RNS-built
   vectors in `tests/lib/ret_link`.
+- `src/ret_transport.c` (`CONFIG_RET_TRANSPORT`): a transport node, RNS's Transport.py with
+  `enable_transport` for a few interfaces (a LoRa radio plus a TCP uplink). Pure code: the
+  caller passes the time, serialises calls, runs `ret_transport_jobs()` and sends through each
+  interface's callback. Paths and their announces live in an application store
+  (`struct ret_transport_store`; `ret_transport_store_ram.c` for tests); RAM caches them.
+  docs/protocol.md "Transport node" has the rules and where they differ from RNS. Tested in
+  `tests/lib/ret_transport`: bytes against RNS-built vectors (`transport_vectors()`), behaviour
+  with a hand-run clock.
+- `src/ret_rnode_air.c`: RNode firmware's LoRa framing (split and reassemble up to 508 bytes).
 - `src/ret_resource.c`: Resources. Receiving (responses and deliveries larger than a packet):
   advertisement parsing, windowed part requests, hashmap updates, assembly against the resource
   hash, and the proof; compressed, split and oversized resources are refused, not decompressed.

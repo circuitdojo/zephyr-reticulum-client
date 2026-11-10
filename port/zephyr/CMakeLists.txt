@@ -65,6 +65,7 @@ zephyr_library_sources(
     ../../src/ret_mp.c
     ../../src/ret_resource.c
     ../../src/ret_ifac.c
+    ../../src/ret_rnode_air.c
     ../../src/ret_lxmf.c
     ../../src/ret_lxmf_seen.c
     ${RET_MONOCYPHER_DIR}/src/monocypher.c
@@ -74,6 +75,11 @@ zephyr_library_sources(
     ${RET_MPACK_DIR}/src/mpack/mpack-reader.c
     ${RET_MPACK_DIR}/src/mpack/mpack-expect.c
     ${RET_MPACK_DIR}/src/mpack/mpack-writer.c
+)
+
+zephyr_library_sources_ifdef(CONFIG_RET_TRANSPORT
+    ../../src/ret_transport.c
+    ../../src/ret_transport_store_ram.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_RET_CLIENT

@@ -39,6 +39,12 @@ struct ret_announce {
  */
 int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *out);
 
+/**
+ * Emission time of an announce: the big-endian seconds in random_hash[5..9]
+ * (Transport.timebase_from_random_blob).
+ */
+uint64_t ret_announce_emitted(const uint8_t random_hash[RET_RANDOM_HASH_LEN]);
+
 #define RET_CONTEXT_PATH_RESPONSE 0x0B
 
 /**

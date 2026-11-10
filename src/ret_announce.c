@@ -12,6 +12,16 @@
 
 #define ANNOUNCE_FIXED_LEN (RET_PUBKEY_LEN + RET_NAME_HASH_LEN + RET_RANDOM_HASH_LEN + RET_SIG_LEN)
 
+uint64_t ret_announce_emitted(const uint8_t random_hash[RET_RANDOM_HASH_LEN])
+{
+	uint64_t t = 0;
+
+	for (int i = 5; i < RET_RANDOM_HASH_LEN; i++) {
+		t = (t << 8) | random_hash[i];
+	}
+	return t;
+}
+
 int ret_announce_validate(const struct ret_packet *pkt, struct ret_announce *a)
 {
 	/* dest_hash + everything in the announce except the signature. */

@@ -93,6 +93,129 @@ An interface with `network_name` and/or `passphrase` (a "protected" interface) s
   local-client destinations it does not mark them answered). Retries
   within 45 s are dropped; the client's request timeout defaults to 60 s.
 
+## Transport node (RNS/Transport.py with enable_transport; src/ret_transport.c)
+
+A node with several interfaces (a LoRa radio and a TCP uplink) routes as an RNS instance with
+`enable_transport = yes`. Stock rnsd and RNode peers need nothing special. Byte formats are tested
+against RNS-built vectors (`transport_vectors()` in `gen_vectors.py`).
+
+**Inbound** (`preprocess_inbound`, `packet_filter`, `_inbound`):
+- **Order:** strip IFAC, check `len <= HW_MTU + ifac_size` (16 when IFAC is off), unpack (hops
+  under 128, data not empty), filter, then `hops += 1`.
+- **Filter:**
+  - Drop non-announces addressed through another transport ID.
+  - KEEPALIVE, RESOURCE, RESOURCE_REQ, RESOURCE_PRF, CACHE_REQUEST and CHANNEL contexts always
+    pass.
+  - PLAIN and GROUP packets pass only at hops ≤ 1 (before the increment) and are never relayed.
+  - Everything else is deduplicated by packet hash. A repeated SINGLE announce still passes,
+    which rebroadcast detection needs.
+- **Announces:** the signature and destination hash are checked first. An announce for an unknown
+  destination we aren't looking for is held while its interface bursts.
+- **Path requests:** deduplicated by `dest | tag`. While one is in flight (45 s), further requests
+  for the destination only record their interface, to be answered by the announce.
+- **HEADER_2 to our transport ID:** look up the path (none: drop).
+  - More than one hop left: rewrite the transport ID to the next hop.
+  - One hop left: `flags = HEADER_1 | BROADCAST | flags & 0x0F` (the context flag is dropped, as
+    RNS does), then the transport ID is removed.
+  - A link request goes into the link table, with proof timeout `now + 4000/bitrate s +
+    6 s × max(1, hops left)`. Its 3 MTU signalling bytes (data exactly 67 bytes) are removed
+    onto an interface without MTU autoconfiguration (an RNode). Elsewhere they are set to
+    `min(next hop, previous hop) HW_MTU` when smaller; a mode other than AES-256-CBC drops it.
+  - Other packets go into the reverse table under their truncated hash.
+- **Link table:** packets to a link ID go out by hop count.
+  - Same interface both ways: if hops equal the remaining or the taken hops.
+  - From the next hop: if hops equal the remaining hops.
+  - From the requester: if hops equal the taken hops.
+  - Not before the link's proof.
+- **LRPROOF:** checked against the destination's announced Ed25519 key over `link_id |
+  responder X25519 | that key | signalling`, then forwarded to the requester; the link is then
+  valid. A valid proof that arrives with a different hop count first updates the path's hops
+  (rebalance).
+- **Other proofs:** pop the reverse entry, and forward it only if it arrived on the packet's
+  outbound interface.
+
+**Announces:**
+- **Rebroadcast detection** (H2 announces for a destination in the announce table):
+  - Same distance as ours: counts a local rebroadcast; two after our first send end our retries.
+  - One hop further while our retry is pending: ours was passed on, so stop.
+- **Accepting a path:**
+  - A new destination is accepted.
+  - With hops no more than the path's: only a new random blob newer than every stored one.
+  - With more hops: a new blob once the path has expired; or one newer than the path; or the
+    same emission time when the path is unresponsive.
+  - The emission time is `random_hash[5:10]`, big-endian.
+- **Rate limit:** the target is 3600 s, grace 5, penalty 0 (the transport defaults). A blocked
+  announce updates the path but is not rebroadcast.
+- **Rebroadcast:** path responses (context 0x0B) are never rebroadcast. Other accepted
+  announces go out HEADER_2 with our transport ID after 0–0.5 s, and again 5.5 s later. They go
+  on every interface, including the one they came in on.
+- **Discovery:** requests waiting for this destination get an immediate PATH_RESPONSE on each
+  requesting interface.
+- **Expiry:** paths expire after 7 days, 1 day on access-point interfaces, 6 hours on roaming
+  ones. They are dropped once unused for that long.
+
+**Outbound** (our announces, path requests, tunnel synthesis):
+- Mode rules apply only when no interface is attached. Access-point interfaces get no
+  rebroadcasts; roaming and boundary interfaces filter by the path's interface mode.
+- **Announce cap:** the next announce may go `len × 8 / bitrate / cap` later (default cap 2%).
+  Until then announces queue, fewest hops first, dropped after 3 hours. At 7 kbps a 223-byte
+  rebroadcast blocks the radio for about 12.7 s. Attached announces (path responses) skip the
+  cap.
+
+**Path requests** (`path_request`):
+- **Known path:** answered after 0.4 s with one PATH_RESPONSE on the requesting interface.
+  Not answered when the requester is the path's next hop, or back out a roaming interface the
+  path came from.
+- **Unknown path,** on an access-point, gateway, roaming or internal interface (boundary:
+  towards boundary and gateway interfaces only): forwarded on the other online interfaces with
+  the same tag, as `dest | our transport ID | tag`. A forwarded request on an interface is
+  dropped while that interface's announce queue is non-empty or its cap blocks.
+- **Other modes:** unknown paths are not searched for.
+
+**Jobs:**
+- **Every 1 s:** announce retransmits.
+- **Every 5 s:**
+  - Cull the tables: reverse entries at 480 s, validated links at 900 s, unproven links at their
+    proof timeout, paths unused past their expiry, path requests at 45 s.
+  - Ingress-control upkeep, and the release of one held announce.
+- **Unproven link timeouts:** a request for the path is queued (one every 0.5 s). If the path
+  was one hop, it is marked unresponsive and the request goes on the other interfaces.
+
+**Tunnel synthesis** (`synthesize_tunnel`, sent on each uplink connect): HEADER_1 PLAIN DATA to
+`rnstransport.tunnel.synthesize`, data `pub(64) | interface hash(32) | random(16) |
+Ed25519 signature of the first 112 bytes`. rnsd then keeps the paths it learned through us for
+8 hours across reconnects.
+
+**Differences from RNS:**
+- **Tables are bounded,** and the oldest entry makes room.
+  - The path table is a RAM cache over a store (flash). A miss loads the path from the store, and
+    a path evicted from RAM stays in the store.
+  - Only cached paths are culled. Stored ones go when the store needs room.
+  - A path whose stored announce is gone is dropped, since it can't be announced, answered or
+    used to check link proofs.
+  - Paths written in another boot are loaded as just heard, so they last their full time.
+  - Stored records that don't fit this build are removed.
+- **Announce queue:** a queued announce goes out from the stored announce, which may be newer
+  than the one queued, with the queued hop count.
+- **Per path:** 8 random blobs (RNS keeps 64), and the rate-limit state.
+- **Packet hashes:** two halves of 16-byte truncated hashes.
+- **Not implemented:** local destinations other than `rnstransport.path.request`, remote
+  management, probes, blackholes, interface discovery, gravity, egress control and a persisted
+  hash list.
+
+**RNode on-air framing** (RNode firmware `Config.h`, `RNode_Firmware.ino`; src/ret_rnode_air.c):
+- **Header byte:** each LoRa frame starts with one, a random nibble in bits 7-4 and `FLAG_SPLIT`
+  0x01.
+- **Splitting:** a packet up to 254 bytes is one frame. Up to the MTU of 508 it is two frames with
+  the same header: 254 bytes, then the rest.
+- **Reassembly:**
+  - A split frame with nothing pending starts a packet, and one with the same sequence completes
+    it.
+  - A split frame with another sequence restarts it.
+  - A frame that isn't split discards any partial packet.
+- **SX126x:** sync word 0x1424, explicit header, CRC on, no IQ inversion, preamble at least 18
+  symbols.
+
 ## Proof strategy
 
 - `Destination.proof_strategy` defaults to PROVE_NONE. Most destinations

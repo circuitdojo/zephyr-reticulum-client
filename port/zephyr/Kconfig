@@ -63,6 +63,75 @@ config RET_RESOURCE_MAX_SIZE
 	  message can be up to about this size minus 69 bytes; larger
 	  resources are refused.
 
+menuconfig RET_TRANSPORT
+	bool "Transport node"
+	help
+	  Route between interfaces as an RNS instance with enable_transport
+	  does (src/ret_transport.c): forward packets along known paths,
+	  rebroadcast announces (also on the interface they arrived on),
+	  answer and forward path requests, relay links and proofs. Paths
+	  and their announces live in a store the application provides
+	  (flash on a device); RAM holds the tables below.
+
+if RET_TRANSPORT
+
+config RET_TRANSPORT_MAX_IFACES
+	int "Interfaces"
+	default 2
+	range 1 8
+
+config RET_TRANSPORT_PATHS
+	int "Paths cached in RAM"
+	default 64
+	help
+	  The store holds every path; a lookup that misses RAM reads it from
+	  the store and replaces the least recently used entry.
+
+config RET_TRANSPORT_RANDOM_BLOBS
+	int "Announce random blobs kept per path"
+	default 8
+	range 1 64
+	help
+	  RNS keeps 64 to recognise replayed announces; the newest emission
+	  time also guards against replays, so a few suffice.
+
+config RET_TRANSPORT_ANNOUNCES
+	int "Announces waiting for rebroadcast"
+	default 16
+
+config RET_TRANSPORT_ANNOUNCE_QUEUE
+	int "Announces queued per interface by the announce cap"
+	default 32
+
+config RET_TRANSPORT_HELD_ANNOUNCES
+	int "Announces held per interface by ingress control"
+	default 4
+
+config RET_TRANSPORT_LINKS
+	int "Links relayed"
+	default 16
+
+config RET_TRANSPORT_REVERSE
+	int "Packets awaiting a proof (reverse table)"
+	default 32
+
+config RET_TRANSPORT_HASHLIST
+	int "Packet hashes remembered, per half"
+	default 256
+	help
+	  Two halves, rotated when the current one fills, as RNS's
+	  packet_hashlist and packet_hashlist_prev. 16 bytes each.
+
+config RET_TRANSPORT_PR_TAGS
+	int "Path request tags remembered, per half"
+	default 64
+
+config RET_TRANSPORT_PATH_REQUESTS
+	int "Path requests tracked (own, in flight, being discovered)"
+	default 8
+
+endif # RET_TRANSPORT
+
 module = RET
 module-str = Reticulum
 source "subsys/logging/Kconfig.template.log_config"

@@ -602,6 +602,96 @@ def ifac_vectors(announce, data):
     return out
 
 
+def transport_vectors(identity, announce_real, link):
+    """What a transport node sends (RNS/Transport.py), for a node whose
+    transport identity is fixed: announces rebroadcast and answered as
+    Transport.jobs()/path_request() build them with RNS.Packet, its path
+    requests (request_path), and packets it forwards, rewritten with the
+    byte operations of Transport._inbound (cited per vector)."""
+    t_prv = fixed("transport_x25519", 32) + fixed("transport_ed25519", 32)
+    tid = RNS.Identity.from_bytes(t_prv).hash
+    ann = unpack(announce_real)
+    dest = RNS.Destination(identity, RNS.Destination.OUT, RNS.Destination.SINGLE, *NAME.split("."))
+    assert dest.hash == ann.destination_hash
+
+    def as_transport(context, hops):
+        p = RNS.Packet(
+            dest,
+            ann.data,
+            RNS.Packet.ANNOUNCE,
+            context=context,
+            header_type=RNS.Packet.HEADER_2,
+            transport_type=RNS.Transport.TRANSPORT,
+            transport_id=tid,
+            context_flag=ann.context_flag,
+        )
+        p.hops = hops
+        p.pack()
+        return p.raw
+
+    pr_dest = RNS.Destination(
+        None, RNS.Destination.OUT, RNS.Destination.PLAIN, "rnstransport", "path", "request"
+    )
+    tag = fixed("transport_pr_tag", 16)
+    pr = RNS.Packet(
+        pr_dest,
+        ann.destination_hash + tid + tag,
+        packet_type=RNS.Packet.DATA,
+        transport_type=RNS.Transport.BROADCAST,
+        header_type=RNS.Packet.HEADER_1,
+    )
+    pr.pack()
+
+    # A DATA packet a peer addressed to us (Transport._outbound inserts the
+    # next hop's transport ID), received with hops 0.
+    data_h1 = bytes([0x00, 0x00]) + ann.destination_hash + b"\x00" + fixed("transport_body", 40)
+    flags = (RNS.Packet.HEADER_2 << 6) | (RNS.Transport.TRANSPORT << 4) | (data_h1[0] & 0x0F)
+    data_in = bytes([flags]) + data_h1[1:2] + tid + data_h1[2:]
+    next_hop = fixed("transport_next_hop", 16)
+    hops = 1  # after the receiving node's hops += 1
+    # Transport._inbound, remaining_hops > 1: keep HEADER_2, new transport ID.
+    data_fwd = data_in[0:1] + bytes([hops]) + next_hop + data_in[18:]
+    # remaining_hops == 1: HEADER_1 BROADCAST, the flags' low nibble kept.
+    last = (RNS.Packet.HEADER_1 << 6) | (RNS.Transport.BROADCAST << 4) | (data_in[0] & 0x0F)
+    data_last = bytes([last, hops]) + data_in[18:]
+
+    # A link request addressed to us, signalling a 262144-byte MTU.
+    lr = link["v_link_request_mtu_big"]
+    lr_flags = (RNS.Packet.HEADER_2 << 6) | (RNS.Transport.TRANSPORT << 4) | (lr[0] & 0x0F)
+    lr_in = bytes([lr_flags]) + lr[1:2] + tid + lr[2:]
+    lr_pkt = unpack(lr_in)
+    lr_last = bytes([last & 0xF0 | (lr_in[0] & 0x0F), hops]) + lr_in[18:]
+    mode = RNS.Link.mode_from_lr_packet(lr_pkt)
+    # Onto an interface without MTU autoconfiguration (an RNode): stripped.
+    lr_strip = lr_last[: -RNS.Link.LINK_MTU_SIZE]
+    # Onto a fixed-MTU 508 interface: clamped to min(next hop, previous hop).
+    lr_clamp = lr_last[: -RNS.Link.LINK_MTU_SIZE] + RNS.Link.signalling_bytes(508, mode)
+    link_id = RNS.Link.link_id_from_lr_packet(lr_pkt)
+    assert link_id == RNS.Link.link_id_from_lr_packet(unpack(lr_strip))
+    assert link_id == RNS.Link.link_id_from_lr_packet(unpack(lr_clamp))
+    assert link_id == link["v_link_id"]
+
+    tunnel_dest = RNS.Destination.hash(None, "rnstransport", "tunnel", "synthesize")
+
+    return {
+        "v_tp_prv": t_prv,
+        "v_tp_id": tid,
+        "v_tp_rebroadcast": as_transport(RNS.Packet.NONE, 1),
+        "v_tp_rebroadcast_hops3": as_transport(RNS.Packet.NONE, 3),
+        "v_tp_path_response": as_transport(RNS.Packet.PATH_RESPONSE, 1),
+        "v_tp_pr_tag": tag,
+        "v_tp_path_request": pr.raw,
+        "v_tp_next_hop": next_hop,
+        "v_tp_data_in": data_in,
+        "v_tp_data_fwd": data_fwd,
+        "v_tp_data_last": data_last,
+        "v_tp_lr_in": lr_in,
+        "v_tp_lr_strip": lr_strip,
+        "v_tp_lr_clamp": lr_clamp,
+        "v_tp_tunnel_dest": tunnel_dest,
+    }
+
+
 def c_array(name: str, b: bytes) -> str:
     rows = []
     for i in range(0, len(b), 12):
@@ -809,6 +899,7 @@ def main() -> None:
         c_array("v_mp_adv_r", fixed("adv_r", 4)),
         c_array("v_mp_adv_q", fixed("adv_q", 16)),
         c_array("v_mp_adv_m", fixed("adv_m", 12)),
+        *[c_array(k, v) for k, v in transport_vectors(identity, announce_real, link).items()],
         "#endif /* VECTORS_RNS_H_ */",
         "",
     ]

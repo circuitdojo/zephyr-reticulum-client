@@ -4,6 +4,27 @@
 
 ### Added
 
+- Transport node (`CONFIG_RET_TRANSPORT`, `src/ret_transport.c`): routes between interfaces as
+  an RNS instance with `enable_transport`, for a LoRa gateway that needs nothing special on the
+  hub.
+  - **Forwarding:** along known paths (HEADER_2 rewrite, last-hop strip), including back out
+    the receiving interface.
+  - **Announces:** rebroadcast on every interface, with RNS's retry, rebroadcast detection,
+    acceptance and rate rules, a per-interface announce cap and queue, and ingress control.
+  - **Path requests:** answered from the path table, and forwarded for gateway-mode interfaces.
+  - **Links and proofs:** relayed through link and reverse tables. Link MTU signalling is
+    clamped or stripped, and LRPROOFs are checked against the destination's key.
+  - **Tunnel synthesis** for a TCP uplink.
+  - **Storage:** paths and announces are kept in an application store; RAM caches them
+    (`ret_transport_store_ram.c` keeps them in RAM).
+  - Byte formats are tested against RNS-built vectors, and behaviour with a hand-run clock
+    (`tests/lib/ret_transport`).
+- RNode on-air framing (`src/ret_rnode_air.c`): splitting packets up to 508 bytes into LoRa frames
+  and reassembling them, as RNode firmware does (`tests/lib/ret_lora`).
+- `ret_packet_unpack_max()`, for interfaces whose MTU exceeds 500 bytes.
+- `ret_path_request_build_transport()`, a transport node's path request.
+- `ret_link_signalling()` and `ret_announce_emitted()`, now exported.
+
 - Interface access codes (`CONFIG_RET_IFAC`): the client joins an rnsd interface protected with
   `network_name` and/or `passphrase`, as RNS does (byte for byte against RNS's own functions).
   Set them with `ret_client_config.ifac_network_name` / `ifac_passphrase` or

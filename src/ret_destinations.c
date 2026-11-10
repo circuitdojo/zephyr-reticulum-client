@@ -12,17 +12,6 @@
 
 static struct ret_destination table[CONFIG_RET_MAX_KNOWN_DESTINATIONS];
 
-/* Announce emission time: big-endian seconds in random_hash[5..9]. */
-static uint64_t emitted(const uint8_t random_hash[RET_RANDOM_HASH_LEN])
-{
-	uint64_t t = 0;
-
-	for (int i = 5; i < RET_RANDOM_HASH_LEN; i++) {
-		t = (t << 8) | random_hash[i];
-	}
-	return t;
-}
-
 void ret_destinations_clear(void)
 {
 	memset(table, 0, sizeof(table));
@@ -63,7 +52,7 @@ int ret_destinations_update(const struct ret_packet *pkt, const struct ret_annou
 		if (memcmp(d->pub, a->pub, RET_PUBKEY_LEN) != 0) {
 			return -EPERM;
 		}
-		if (emitted(a->random_hash) < emitted(d->random_hash)) {
+		if (ret_announce_emitted(a->random_hash) < ret_announce_emitted(d->random_hash)) {
 			if (fresh != NULL) {
 				*fresh = false;
 			}
