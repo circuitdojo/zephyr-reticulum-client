@@ -4,6 +4,19 @@
 
 ### Added
 
+- `samples/ret_lora_gateway`: a LoRa gateway built on the transport node, for native_sim so
+  far (simulated radio).
+  - **Interfaces:** the LoRa radio (RNode framing, gateway mode, 2% announce cap) and an HDLC TCP
+    uplink to any stock rnsd, optionally with IFAC. The hub needs no special interface or
+    configuration.
+  - **Routing:** LoRa to LoRa through the gateway, including with the hub down, and LoRa to the
+    hub's network.
+  - **Storage:** paths are kept on LittleFS across reboots, the identity in settings, and tunnel
+    synthesis restores the hub's paths after it restarts.
+  - **e2e:** `lora-gateway`, against a stock rnsd and RNS LoRa peers on a simulated air
+    (`tools/rns_peer/air.py`).
+- `peer.py --send-to`, `--send-count`, `--send-size`: send to a destination and report proofs.
+
 - Transport node (`CONFIG_RET_TRANSPORT`, `src/ret_transport.c`): routes between interfaces as
   an RNS instance with `enable_transport`, for a LoRa gateway that needs nothing special on the
   hub.
@@ -72,6 +85,9 @@
   records were never seen. They stayed in flash and came back on the next boot.
 
 ### Changed
+
+- `src/ret_tcp.c` builds with `NET_SOCKETS` rather than `RET_CLIENT`, and takes its socket
+  options as `struct ret_tcp_opts`, so the client and the gateway share it.
 
 - nRF9151 samples trim Zephyr's native IP stack: the modem runs TCP/IP and DNS, so native TCP,
   the DNS resolver and most packet buffers were unused. About 16 KB of RAM and 23 KB of flash

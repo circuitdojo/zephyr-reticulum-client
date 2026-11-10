@@ -82,8 +82,10 @@ zephyr_library_sources_ifdef(CONFIG_RET_TRANSPORT
     ../../src/ret_transport_store_ram.c
 )
 
+# TCP helpers for anything with sockets: the client and gateways.
+zephyr_library_sources_ifdef(CONFIG_NET_SOCKETS ../../src/ret_tcp.c)
+
 zephyr_library_sources_ifdef(CONFIG_RET_CLIENT
-    ../../src/ret_tcp.c
     ../../src/ret_client.c
     ../../src/ret_client_link.c
     ../../src/ret_client_lxmf.c
