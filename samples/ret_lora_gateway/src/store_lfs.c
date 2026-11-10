@@ -56,6 +56,12 @@ static void path_of(const uint8_t dest_hash[RET_TRUNC_HASH_LEN], char out[PATH_S
 	}
 }
 
+/* The path of record file @p name, which must be NAME_LEN characters. */
+static void path_of_name(const char *name, char out[PATH_SIZE])
+{
+	snprintf(out, PATH_SIZE, "%s/%.*s", DIR, NAME_LEN, name);
+}
+
 static int name_to_hash(const char *name, uint8_t out[RET_TRUNC_HASH_LEN])
 {
 	if (strlen(name) != NAME_LEN) {
@@ -158,7 +164,7 @@ static int evict_one(void)
 	path[0] = '\0';
 	while (fs_readdir(&dir, &entry) == 0 && entry.name[0] != '\0') {
 		if (entry.type == FS_DIR_ENTRY_FILE && strlen(entry.name) == NAME_LEN) {
-			snprintf(path, sizeof(path), "%s/%s", DIR, entry.name);
+			path_of_name(entry.name, path);
 			break;
 		}
 	}
@@ -314,7 +320,12 @@ static int walk(int (*cb)(const struct ret_transport_path_meta *meta, void *user
 		if (entry.type != FS_DIR_ENTRY_FILE) {
 			continue;
 		}
-		snprintf(path, sizeof(path), "%s/%s", DIR, entry.name);
+		if (strlen(entry.name) != NAME_LEN) {
+			/* Not ours: its path may not even fit, so leave it alone. */
+			LOG_WRN("unexpected file %s in %s", entry.name, DIR);
+			continue;
+		}
+		path_of_name(entry.name, path);
 		ok = name_to_hash(entry.name, hash) == 0 &&
 		     read_record(path, &meta, NULL, 0, NULL) == 0 &&
 		     memcmp(meta.dest_hash, hash, sizeof(hash)) == 0;
