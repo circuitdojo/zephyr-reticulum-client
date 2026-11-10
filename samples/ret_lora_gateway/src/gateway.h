@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include <zephyr/kernel.h>
 
@@ -43,7 +44,9 @@ int uplink_send(const uint8_t *frame, size_t len);
 /** SHA-256 naming the uplink for tunnel synthesis; the same on every connect. */
 void uplink_iface_hash(uint8_t hash[RET_HASH_LEN]);
 
-/* store_lfs.c */
-int store_lfs_init(struct ret_transport_store **store);
+/* store_lfs.c or store_zms.c */
+int store_init(struct ret_transport_store **store);
+/** Flash the store occupies now, in bytes. */
+ssize_t store_used_bytes(void);
 
 #endif /* GATEWAY_H_ */

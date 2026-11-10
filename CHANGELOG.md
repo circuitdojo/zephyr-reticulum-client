@@ -4,6 +4,28 @@
 
 ### Added
 
+- `ret_lora_gateway` keeps paths in ZMS (`src/store_zms.c`), its new default, one record per
+  destination, with settings in ZMS too.
+  - **Index:** a RAM index of stored paths (8 bytes each: record ID and owner tag) keeps
+    misses off flash. A destination whose first ID is taken uses a second, so a ground 32-bit
+    collision can't replace another's path. The index is built at boot in one linear pass.
+    Unreadable records are deleted rather than failing the boot.
+  - **Measured on the Feather's W25Q128 at 200 paths, against LittleFS:**
+
+    | | ZMS | LittleFS |
+    |---|---|---|
+    | insert | 17 ms | 342 ms |
+    | hit | 2.3 ms | 205 ms |
+    | miss | 45 µs | 79 ms |
+    | flash per path | about 600 B | 4.4 KB |
+
+    ZMS also needs about 8 times fewer erases, and 18 KB less code.
+  - **RAM cost:** the 1,024-entry lookup cache (8 KB) and the index (4 KB at 512 paths):
+    28.9 KB for the store benchmark on the Feather, against 16.6 KB with LittleFS.
+  - **Comparison build:** `-DFILE_SUFFIX=lfs` still builds the LittleFS store.
+- `samples/ret_lora_gateway/bench`: a path store benchmark for native_sim (flash simulator
+  counters) and the Feather (timings, including a warm-reboot boot measurement).
+
 - `samples/ret_lora_gateway`: a LoRa gateway built on the transport node, for native_sim so
   far (simulated radio).
   - **Interfaces:** the LoRa radio (RNode framing, gateway mode, 2% announce cap) and an HDLC TCP
@@ -88,6 +110,10 @@
 
 - `src/ret_tcp.c` builds with `NET_SOCKETS` rather than `RET_CLIENT`, and takes its socket
   options as `struct ret_tcp_opts`, so the client and the gateway share it.
+- `west-vanilla.yml` moves to Zephyr v4.5.0 for ZMS's iterator. The gateway's partitions use
+  v4.5's schema: memory-mapped ones carry `zephyr,mapped-partition`, and code uses the
+  `PARTITION_*` macros.
+- The gateway's path limit defaults to 512.
 
 - nRF9151 samples trim Zephyr's native IP stack: the modem runs TCP/IP and DNS, so native TCP,
   the DNS resolver and most packet buffers were unused. About 16 KB of RAM and 23 KB of flash

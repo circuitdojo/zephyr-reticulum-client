@@ -38,7 +38,7 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
     && uv --version
 
 # Pinned to zephyr/SDK_VERSION on the revision west-vanilla.yml tracks
-# (v4.4.2 wants 1.0.1; NCS v3.5 in west-ncs.yml wants the same).
+# (v4.5.0 wants 1.0.1; NCS v3.5 in west-ncs.yml wants the same).
 # x86_64-zephyr-elf for native_sim, arm-zephyr-eabi for the nRF9151.
 ARG ZSDK_VERSION=1.0.1
 RUN cd /opt \

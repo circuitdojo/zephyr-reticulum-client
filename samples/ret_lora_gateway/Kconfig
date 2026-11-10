@@ -108,21 +108,7 @@ config RET_LORA_TX_POWER_DBM
 	default 14
 	range -9 22
 
-config RET_GATEWAY_STORE_MAX_PATHS
-	int "Paths kept in flash"
-	default 1024
-	help
-	  One file per destination under /lfs/tp, each taking a filesystem
-	  block. When this many are stored, or the free blocks fall to
-	  RET_GATEWAY_STORE_RESERVE_BLOCKS, one is removed to make room.
-
-config RET_GATEWAY_STORE_RESERVE_BLOCKS
-	int "Filesystem blocks kept free"
-	default 16
-	help
-	  Room the path store never takes: LittleFS needs free blocks to
-	  rewrite files, and the settings file (identity, boot counter)
-	  shares the filesystem.
+rsource "Kconfig.store"
 
 if !NRF_MODEM_LIB
 

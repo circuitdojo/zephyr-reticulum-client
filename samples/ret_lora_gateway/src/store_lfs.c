@@ -39,12 +39,19 @@ struct header {
 
 static struct ret_transport_store store;
 static size_t count;
+/*
+ * Free blocks, as last measured and then tracked: each record file takes a
+ * block. fs_statvfs() walks the whole filesystem, so it runs only at start
+ * and near the reserve.
+ */
+static unsigned long free_est;
 
 static void counted_removed(void)
 {
 	if (count > 0) {
 		count--;
 	}
+	free_est++;
 }
 
 static void path_of(const uint8_t dest_hash[RET_TRUNC_HASH_LEN], char out[PATH_SIZE])
@@ -203,9 +210,17 @@ static int make_room(void)
 		}
 	}
 	for (;;) {
+		if (free_est > CONFIG_RET_GATEWAY_STORE_RESERVE_BLOCKS + 1) {
+			return 0;
+		}
+		/* Near the reserve: measure. */
 		err = free_blocks(&bfree);
-		if (err || bfree > CONFIG_RET_GATEWAY_STORE_RESERVE_BLOCKS) {
+		if (err) {
 			return err;
+		}
+		free_est = bfree;
+		if (bfree > CONFIG_RET_GATEWAY_STORE_RESERVE_BLOCKS) {
+			return 0;
 		}
 		err = evict_one();
 		if (err) {
@@ -267,9 +282,18 @@ static int save(struct ret_transport_store *s, const struct ret_transport_path_m
 		err = write_all(&f, announce, len);
 	}
 	err = close_with(&f, err);
+	if (err == -ENOSPC) {
+		/* The estimate was off (directory blocks, the settings file):
+		 * measure on the next insert, and evict from there.
+		 */
+		free_est = 0;
+	}
 	if (!exists) {
 		if (!err) {
 			count++;
+			if (free_est > 0) {
+				free_est--;
+			}
 		} else {
 			/* Not half a record: it would read as invalid anyway. */
 			(void)fs_unlink(path);
@@ -358,7 +382,15 @@ static int foreach(struct ret_transport_store *s,
 	return walk(cb, user, NULL);
 }
 
-int store_lfs_init(struct ret_transport_store **out)
+ssize_t store_used_bytes(void)
+{
+	struct fs_statvfs st;
+	int err = fs_statvfs(DIR, &st);
+
+	return err ? err : (ssize_t)((st.f_blocks - st.f_bfree) * st.f_frsize);
+}
+
+int store_init(struct ret_transport_store **out)
 {
 	struct fs_dirent st;
 	int err = fs_stat(DIR, &st) == 0 ? 0 : fs_mkdir(DIR);
@@ -368,6 +400,9 @@ int store_lfs_init(struct ret_transport_store **out)
 		return err;
 	}
 	err = walk(NULL, NULL, &count);
+	if (!err) {
+		err = free_blocks(&free_est);
+	}
 	if (err) {
 		LOG_ERR("reading %s: %d", DIR, err);
 		return err;

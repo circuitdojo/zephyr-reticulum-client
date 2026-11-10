@@ -78,6 +78,15 @@ jobs:
             west build -b native_sim ret-client/samples/$s -d build/$s -p --no-sysbuild 2>&1 | tee build/$s.log
             ! grep -q "warning:" build/$s.log
           done
+          # The gateway's LittleFS store and the path store benchmark.
+          west build -b native_sim ret-client/samples/ret_lora_gateway -d build/gw_lfs -p --no-sysbuild \
+            -- -DFILE_SUFFIX=lfs 2>&1 | tee build/gw_lfs.log
+          ! grep -q "warning:" build/gw_lfs.log
+          for v in "" lfs; do
+            west build -b native_sim ret-client/samples/ret_lora_gateway/bench -d build/bench_$v -p --no-sysbuild \
+              ${v:+-- -DFILE_SUFFIX=$v} 2>&1 | tee build/bench_$v.log
+            ! grep -q "warning:" build/bench_$v.log
+          done
 
       - name: End to end against rnsd
         id: e2e
@@ -145,6 +154,11 @@ jobs:
               -d build/${s}_nrf9151 -p 2>&1 | tee build/${s}_nrf9151.log
             ! grep -q ": warning:" build/${s}_nrf9151.log
           done
+          # The gateway's path stores on the Feather's NOR, until the gateway
+          # itself builds for the board.
+          west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_lora_gateway/bench \
+            -d build/gw_bench_nrf9151 -p 2>&1 | tee build/gw_bench_nrf9151.log
+          ! grep -q ": warning:" build/gw_bench_nrf9151.log
 
       - name: Collect the images
         # tfm_merged.hex is TF-M plus the application (NCS 3.5, no Partition

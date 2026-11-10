@@ -7,7 +7,9 @@ list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(ret_lora_gateway)
 
-target_sources(app PRIVATE src/main.c src/radio_task.c src/uplink.c src/store_lfs.c)
+target_sources(app PRIVATE src/main.c src/radio_task.c src/uplink.c)
+target_sources_ifdef(CONFIG_RET_GATEWAY_STORE_LFS app PRIVATE src/store_lfs.c)
+target_sources_ifdef(CONFIG_RET_GATEWAY_STORE_ZMS app PRIVATE src/store_zms.c)
 # A transport node uses the library's internals, not the client API.
 target_include_directories(app PRIVATE ../../src)
 

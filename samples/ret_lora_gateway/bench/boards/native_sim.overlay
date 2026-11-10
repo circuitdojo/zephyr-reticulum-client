@@ -1,0 +1,15 @@
+/*
+ * The ZMS path store: the upper half of the simulated flash (a file,
+ * --flash=<path>), above the board's partitions. Settings use the board's
+ * storage_partition.
+ */
+
+&flash0 {
+	partitions {
+		gw_paths_partition: partition@100000 {
+			compatible = "zephyr,mapped-partition";
+			label = "gw-paths";
+			reg = <0x00100000 0x00100000>;
+		};
+	};
+};

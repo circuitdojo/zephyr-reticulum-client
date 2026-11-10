@@ -1,0 +1,54 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The path store, shared by the gateway and bench/.
+
+choice RET_GATEWAY_STORE
+	prompt "Where paths are kept"
+	default RET_GATEWAY_STORE_ZMS
+
+config RET_GATEWAY_STORE_LFS
+	bool "LittleFS, a file per path"
+	help
+	  src/store_lfs.c: /lfs/tp/<destination>, settings in /lfs/gw-settings.
+	  Build with -DFILE_SUFFIX=lfs (prj_lfs.conf). Every path takes a
+	  filesystem block, and a lookup searches one large directory.
+
+config RET_GATEWAY_STORE_ZMS
+	bool "ZMS, a record per path"
+	depends on ZMS
+	help
+	  src/store_zms.c: a ZMS partition of its own (gw_paths_partition),
+	  settings in ZMS too, and an index of stored paths in RAM (4 bytes
+	  each) so lookups for unknown destinations never touch flash.
+
+endchoice
+
+config RET_GATEWAY_ZMS_CACHE
+	int "ZMS lookup cache entries for the path store"
+	default 1024
+	depends on RET_GATEWAY_STORE_ZMS
+	help
+	  8 bytes each. A read whose cache slot belongs to another path walks
+	  the log back from the newest entry: keep this at about twice
+	  RET_GATEWAY_STORE_MAX_PATHS.
+
+config RET_GATEWAY_STORE_MAX_PATHS
+	int "Paths kept in flash"
+	default 512
+	range 16 65535
+	help
+	  When this many are stored, or the flash is full, the oldest (ZMS)
+	  or the first by name (LittleFS) makes room. ZMS: the RAM index
+	  takes 8 bytes per path, and gw_paths_partition must hold them all
+	  (checked at build time; aim for twice). LittleFS: each path is a
+	  file under /lfs/tp and takes a filesystem block.
+
+config RET_GATEWAY_STORE_RESERVE_BLOCKS
+	int "Filesystem blocks kept free"
+	default 16
+	depends on RET_GATEWAY_STORE_LFS
+	help
+	  Room the path store never takes: LittleFS needs free blocks to
+	  rewrite files, and the settings file (identity, boot counter)
+	  shares the filesystem.
