@@ -28,6 +28,12 @@
 #             restores its paths through it (tunnel); a LoRa node discovers
 #             a destination the gateway never heard of; and an IFAC uplink
 #             with the right passphrase gets through, a wrong one is ignored
+#   lora-ifac  the gateway with IFAC on its LoRa side and an open uplink:
+#             n1 has the LoRa passphrase, n3 has none and n4 a wrong one.
+#             n4, then n3, announce and ask the hub for X; the gateway drops
+#             their frames before routing, so the hub never hears of them
+#             and their request never goes up. n1 is reached from the hub
+#             (3/3 proved, the gateway adding and checking codes on LoRa)
 #
 # Every device run shares one simulated flash file, so the client keeps its
 # identity (address) across scenarios, as it would across reboots. echo
@@ -108,6 +114,7 @@ BUILD_GW="$TOP/build/ret_e2e-gw"
 BUILD_GW_IFAC="$TOP/build/ret_e2e-gw-ifac"
 BUILD_GW_IFAC_BAD="$TOP/build/ret_e2e-gw-ifac-bad"
 BUILD_GW_DEV="$TOP/build/ret_e2e-gw-dev"
+BUILD_GW_LORA_IFAC="$TOP/build/ret_e2e-gw-lora-ifac"
 # Not under a build dir: a pristine build wipes it.
 LOGS="$TOP/build/ret_e2e-logs"
 PEER_PROJECT="$HERE/rns_peer"
@@ -128,13 +135,17 @@ AIR_N1=5102
 AIR_REPEATER=5103
 AIR_N2=5104
 AIR_N3=5105
+AIR_N4=5106
+# The LoRa side's access code in lora-ifac.
+LORA_IFAC_NETNAME="ret-lora"
+LORA_IFAC_PASSPHRASE="lora test passphrase"
 COUNT_NAME=3
 COUNT_HASH=6
 COUNT_LXMF=3
 COUNT_SF=12
 
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove ifac lora-gateway echo lxmf lxmf-direct chat store-forward sleep late stall bootdown restart)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove ifac lora-gateway lora-ifac echo lxmf lxmf-direct chat store-forward sleep late stall bootdown restart)
 
 pids=()
 # Builds still running (process groups: west, cmake and ninja with them).
@@ -256,7 +267,7 @@ if needs ifac; then
 		-DCONFIG_RET_IFAC_PASSPHRASE=\"wrong\" \
 		-DCONFIG_RET_SAMPLE_DEST_HASH=\""$("$PY" "$PEER_PROJECT/peer.py" --print-hash)"\"
 fi
-if needs lora-gateway; then
+if needs lora-gateway lora-ifac; then
 	# Identities first: the device and the senders are told who to reach.
 	for n in n1 n2 n3 hub; do
 		mkdir -p "$LOGS/air-$n"
@@ -275,6 +286,8 @@ if needs lora-gateway; then
 			-DCONFIG_RET_LORA_SIM_LOCAL_PORT=$AIR_GW \
 			"$@"
 	}
+fi
+if needs lora-gateway; then
 	spawn build_gateway "$BUILD_GW" $LORA_TCP_PORT
 	spawn build_gateway "$BUILD_GW_IFAC" $LORA_IFAC_PORT \
 		-DCONFIG_RET_GATEWAY_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
@@ -286,6 +299,11 @@ if needs lora-gateway; then
 	spawn build "$BUILD_GW_DEV" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$LORA_TCP_PORT \
 		-DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y -DCONFIG_RET_SAMPLE_REPLY_WAIT_S=30 \
 		-DCONFIG_RET_SAMPLE_LINK_TEST=y
+fi
+if needs lora-ifac; then
+	spawn build_gateway "$BUILD_GW_LORA_IFAC" $LORA_TCP_PORT \
+		-DCONFIG_RET_LORA_IFAC_NETWORK_NAME=\""$LORA_IFAC_NETNAME"\" \
+		-DCONFIG_RET_LORA_IFAC_PASSPHRASE=\""$LORA_IFAC_PASSPHRASE"\"
 fi
 needs echo && spawn build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
 	-DCONFIG_RET_SAMPLE_LINK_TEST=y
@@ -1003,8 +1021,12 @@ scenario_restart() {
 
 tcp_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
-air_node() { # <name> <udp port> <enable_transport>: a LoRa node's config dir
-	local dir="$LOGS/air-$1"
+air_node() { # <name> <udp port> <enable_transport> [network_name passphrase]: a LoRa node's config dir
+	local dir="$LOGS/air-$1" ifac=""
+	# ifac_size in bits: 8 bytes, the gateway's CONFIG_RET_LORA_IFAC_SIZE.
+	[ $# -lt 5 ] || ifac="    network_name = $4
+    passphrase = $5
+    ifac_size = 64"
 	mkdir -p "$dir/interfaces"
 	ln -sf "$LORA_CONFIG/interfaces/AirInterface.py" "$dir/interfaces/AirInterface.py"
 	cat >"$dir/config" <<CONFIG
@@ -1022,6 +1044,7 @@ air_node() { # <name> <udp port> <enable_transport>: a LoRa node's config dir
     enabled = yes
     air_port = $AIR_PORT
     local_port = $2
+$ifac
 CONFIG
 }
 
@@ -1202,12 +1225,76 @@ scenario_lora_gateway() {
 	done
 }
 
+# IFAC on the gateway's LoRa side:
+#
+#   hub == gateway ~~ n1   right passphrase
+#                  ~~ n3   none
+#                  ~~ n4   wrong passphrase
+scenario_lora_ifac() {
+	local hub_log="$LOGS/rnsd-lora-ifac.log" air_log="$LOGS/air-ifac.log"
+	local gw_log="$LOGS/gateway-lora-ifac.log" hub_dir="$LOGS/air-hub" n3 n4 p
+	local first=${#pids[@]}
+
+	tcp_open $LORA_TCP_PORT && fail "port $LORA_TCP_PORT already in use"
+	rm -f "$LOGS/gw-flash.bin"
+	rm -rf "$hub_dir/storage"
+	cp -r "$LORA_CONFIG"/. "$hub_dir"
+	air_node n1 $AIR_N1 No "$LORA_IFAC_NETNAME" "$LORA_IFAC_PASSPHRASE"
+	air_node n3 $AIR_N3 No
+	air_node n4 $AIR_N4 No "$LORA_IFAC_NETNAME" "wrong"
+	# Fresh identities: nothing the hub may know from lora-gateway.
+	rm -f "$LOGS/air-n3/identity" "$LOGS/air-n4/identity"
+	n3=$("$PY" "$PEER_PROJECT/peer.py" --identity "$LOGS/air-n3/identity" --print-hash)
+	n4=$("$PY" "$PEER_PROJECT/peer.py" --identity "$LOGS/air-n4/identity" --print-hash)
+
+	"$PY" "$PEER_PROJECT/air.py" --port $AIR_PORT --node gw=$AIR_GW --node n1=$AIR_N1 \
+		--node n3=$AIR_N3 --node n4=$AIR_N4 \
+		--link gw-n1 --link gw-n3 --link gw-n4 >"$air_log" 2>&1 &
+	pids+=("$!")
+	wait_for 10 "air" grep -q "^AIR READY" "$air_log"
+
+	start_hub "$hub_log"
+	start_hub_peer "$LOGS/hub-x-ifac.log" "$hub_dir/x-identity"
+	wait_for 30 "hub peer X" grep -q "^ANNOUNCED$" "$LOGS/hub-x-ifac.log"
+	start_gateway "$BUILD_GW_LORA_IFAC" "$gw_log"
+	wait_for 30 "the gateway's uplink" grep -q "uplink connected" "$gw_log"
+
+	# Outsiders first: they announce and ask for X at once. n4 alone on the
+	# air until the gateway's first drop report, so it shows n4 transmitted.
+	start_lora_peer n4 --send-to "$LORA_X" --send-count 1
+	wait_for 40 "the gateway to drop n4" grep -Eq "LoRa: [0-9]+ frames failed IFAC" "$gw_log"
+	start_lora_peer n3 --send-to "$LORA_X" --send-count 1
+
+	# The member: the hub learns n1 through the gateway and reaches it.
+	start_lora_peer n1
+	wait_for 40 "the hub to hear n1" grep -q "Destination <$LORA_N1> is now" "$hub_log"
+	start_hub_peer "$LOGS/hub-peer-ifac.log" "$hub_dir/identity" --send-to "$LORA_N1"
+	all_proved lora-ifac "$LOGS/hub-peer-ifac.log" 3 "$LOGS/air-n1.log"
+	echo "   LoRa IFAC: n1 (right passphrase) 3/3 proved from the hub"
+
+	# By now n3 and n4 have announced and asked for X, again and again.
+	! grep -q "<$n3>\|<$n4>" "$hub_log" ||
+		fail "lora-ifac: an outsider's announce reached the hub, see $hub_log"
+	# RNS logs "Path request for <X>" on receipt, "Answering path request ..." after.
+	! grep -qi "path request for <$LORA_X>" "$hub_log" ||
+		fail "lora-ifac: an outsider's path request reached the hub, see $hub_log"
+	grep -q "^SEND PATH" "$LOGS/air-n3.log" "$LOGS/air-n4.log" &&
+		fail "lora-ifac: an outsider found a path to X, see $LOGS/air-n3.log $LOGS/air-n4.log"
+	echo "   outsiders (no or wrong passphrase): dropped at the gateway," \
+		"$(grep -Eo "LoRa: [0-9]+ frames failed IFAC" "$gw_log" | head -1 | grep -Eo "[0-9]+") frames in the first report"
+
+	for p in "${pids[@]:first}"; do
+		stop_pid_wait "$p"
+	done
+}
+
 for s in "${scenarios[@]}"; do
 	echo "== scenario $s"
 	case $s in
 	plain | ratchets | no-prove) scenario_announced "$s" ;;
 	ifac) scenario_ifac ;;
 	lora-gateway) scenario_lora_gateway ;;
+	lora-ifac) scenario_lora_ifac ;;
 	echo) scenario_echo ;;
 	lxmf) scenario_lxmf ;;
 	lxmf-direct) scenario_lxmf direct ;;

@@ -34,6 +34,10 @@
     handling: a frame dropped, or the RX restart landing after SET_TX and aborting the
     transmission. The work now holds the lock. Work queued but not yet started when an
     operation is stopped can still act on the next one; that is left to an upstream fix.
+- The transport counts frames that fail an interface's access code (`ifac_drops`), and
+  `ret_lora_gateway` logs them, at most every 30 s per interface. With `CONFIG_RET_LORA_IFAC_*`
+  set, LoRa nodes without the passphrase are dropped on the gateway, before they use any uplink
+  data. e2e: `lora-ifac`, with a node with the passphrase, one without and one with a wrong one.
 - `ret_lora_gateway` keeps paths in ZMS (`src/store_zms.c`), one record per
   destination, with settings in ZMS too.
   - **Index:** a RAM index of stored paths (8 bytes each: record ID and owner tag) keeps

@@ -444,20 +444,41 @@ ZTEST(ret_transport, test_link_onto_rnode)
 ZTEST(ret_transport, test_ifac)
 {
 	static struct ret_ifac ifac;
+	static struct ret_ifac wrong;
 	uint8_t frame[RET_TRANSPORT_FRAME_MAX];
 	uint8_t raw[RET_TRANSPORT_FRAME_MAX];
 	int n;
 
 	zassert_ok(ret_ifac_init(&ifac, V_IFAC_NETNAME, V_IFAC_PASSPHRASE, 16));
+	zassert_ok(ret_ifac_init(&wrong, V_IFAC_NETNAME, "wrong", 16));
 	tcp.ifac = &ifac;
 
+	/* No code on a protected interface. */
 	rx(&tcp, v_announce_real, sizeof(v_announce_real));
 	zassert_is_null(ret_transport_path(&tp, v_dest_hash));
+	zassert_equal(tcp.ifac_drops, 1);
+
+	/* Another passphrase's code. */
+	n = ret_ifac_apply(&wrong, v_announce_real, sizeof(v_announce_real), frame, sizeof(frame));
+	zassert_true(n > 0);
+	rx(&tcp, frame, (size_t)n);
+	zassert_is_null(ret_transport_path(&tp, v_dest_hash));
+	zassert_equal(tcp.ifac_drops, 2);
+
+	/* A code on an open interface. */
+	rx(&lora, frame, (size_t)n);
+	zassert_is_null(ret_transport_path(&tp, v_dest_hash));
+	zassert_equal(lora.ifac_drops, 1);
+	run_until(now + 1000);
+	zassert_equal(TCP_TX->n, 0);
+	zassert_equal(LORA_TX->n, 0);
 
 	n = ret_ifac_apply(&ifac, v_announce_real, sizeof(v_announce_real), frame, sizeof(frame));
 	zassert_true(n > 0);
 	rx(&tcp, frame, (size_t)n);
 	zassert_not_null(ret_transport_path(&tp, v_dest_hash));
+	zassert_equal(tcp.ifac_drops, 2);
+	zassert_equal(tcp.drops, 2);
 
 	run_until(now + 1000);
 	zassert_equal(TCP_TX->n, 1);
