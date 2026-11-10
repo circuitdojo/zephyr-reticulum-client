@@ -1,0 +1,30 @@
+/*
+ * ZMS on the external NOR instead of the board's 16 MB LittleFS partition:
+ * settings and paths each on a partition of their own. Flashing this
+ * replaces whatever LittleFS held there (other samples' settings).
+ */
+
+#include "../../../common/circuitdojo_feather_nrf9151_ns_flash.dtsi"
+
+/delete-node/ &lfs;
+/delete-node/ &lfs_partition;
+
+/ {
+	chosen {
+		zephyr,settings-partition = &gw_settings_partition;
+	};
+};
+
+&w25q128jv {
+	partitions {
+		gw_settings_partition: partition@0 {
+			label = "gw-settings";
+			reg = <0x00000000 0x00010000>;
+		};
+
+		gw_paths_partition: partition@10000 {
+			label = "gw-paths";
+			reg = <0x00010000 0x00800000>;
+		};
+	};
+};

@@ -4,6 +4,32 @@
 
 ### Added
 
+- `ret_lora_gateway` keeps paths in ZMS (`src/store_zms.c`), one record per
+  destination, with settings in ZMS too.
+  - **Index:** a RAM index of stored paths (8 bytes each: record ID and owner tag) keeps
+    misses off flash.
+  - **Collisions:** a destination whose first ID is taken uses a second. One whose IDs are
+    both taken isn't stored, so no path is replaced by another destination's.
+  - **Boot:** the index is built in one pass over the log.
+  - **Bad records:** unreadable records are deleted rather than failing the boot.
+  - **Measured on the Feather's W25Q128 at 200 paths, against LittleFS:**
+
+    | | ZMS | LittleFS |
+    |---|---|---|
+    | insert | 17 ms | 342 ms |
+    | hit | 2.3 ms | 205 ms |
+    | miss | 45 µs | 79 ms |
+    | flash per path | about 600 B | 4.5 KB |
+
+    ZMS also needs about 8 times fewer erases, and 18 KB less code.
+  - **RAM cost:** the 1,024-entry lookup cache (8 KB), the index (4 KB at 512 paths) and
+    boot-time scratch (2 KB). The store benchmark measures 29.9 KB on the Feather, against
+    16.6 KB with LittleFS.
+  - **Why not LittleFS:** an earlier store kept a file per path on LittleFS (measured above). It
+    was dropped before release: ZMS is much faster and denser, for 12 KB more RAM.
+- `samples/ret_lora_gateway/bench`: a path store benchmark for native_sim (flash simulator
+  counters) and the Feather (timings, including a warm-reboot boot measurement).
+
 - `samples/ret_lora_gateway`: a LoRa gateway built on the transport node, for native_sim so
   far (simulated radio).
   - **Interfaces:** the LoRa radio (RNode framing, gateway mode, 2% announce cap) and an HDLC TCP
@@ -11,8 +37,8 @@
     configuration.
   - **Routing:** LoRa to LoRa through the gateway, including with the hub down, and LoRa to the
     hub's network.
-  - **Storage:** paths are kept on LittleFS across reboots, the identity in settings, and tunnel
-    synthesis restores the hub's paths after it restarts.
+  - **Storage:** paths are kept in ZMS across reboots (see the entry above), the identity in
+    settings, and tunnel synthesis restores the hub's paths after it restarts.
   - **e2e:** `lora-gateway`, against a stock rnsd and RNS LoRa peers on a simulated air
     (`tools/rns_peer/air.py`).
 - `peer.py --send-to`, `--send-count`, `--send-size`: send to a destination and report proofs.
@@ -88,6 +114,10 @@
 
 - `src/ret_tcp.c` builds with `NET_SOCKETS` rather than `RET_CLIENT`, and takes its socket
   options as `struct ret_tcp_opts`, so the client and the gateway share it.
+- `west-vanilla.yml` moves to Zephyr v4.5.0 for ZMS's iterator. The gateway's partitions use
+  v4.5's schema: memory-mapped ones carry `zephyr,mapped-partition`, and code uses the
+  `PARTITION_*` macros.
+- The gateway's path limit defaults to 512.
 
 - nRF9151 samples trim Zephyr's native IP stack: the modem runs TCP/IP and DNS, so native TCP,
   the DNS resolver and most packet buffers were unused. About 16 KB of RAM and 23 KB of flash

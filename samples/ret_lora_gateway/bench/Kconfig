@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Path store benchmark"
+
+config BENCH_PATHS
+	int "Paths in the workload"
+	default 200
+
+config BENCH_ANNOUNCE_LEN
+	int "Bytes of announce per path"
+	default 300
+	range 148 500
+
+rsource "../Kconfig.store"
+
+endmenu
+
+source "Kconfig.zephyr"

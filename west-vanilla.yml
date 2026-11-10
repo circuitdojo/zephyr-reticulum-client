@@ -1,22 +1,21 @@
 manifest:
   projects:
     - name: zephyr
-      # The Zephyr line NCS v3.5 is built on (v4.4.0 plus later upstream),
-      # so sample configs stay valid in both: v4.4.2 is that line's latest
-      # patch release.
-      revision: v4.4.2
+      # v4.5.0: one release past the line NCS v3.5 is built on (v4.4.0 plus
+      # later upstream, including backports such as ZMS's iterator, which
+      # the LoRa gateway's path store needs and v4.4.x lacks). Code must
+      # build in both.
+      revision: v4.5.0
       url: https://github.com/zephyrproject-rtos/zephyr
       west-commands: scripts/west-commands.yml
       # native_sim-only workspace: Mbed TLS and TF-PSA-Crypto (since 4.4
-      # the PSA Crypto API lives in the latter), picolibc for the
-      # embedded libc the samples select, and LittleFS for the gateway's
-      # path store.
+      # the PSA Crypto API lives in the latter) and picolibc for the
+      # embedded libc the samples select.
       import:
         name-allowlist:
           - mbedtls
           - tf-psa-crypto
           - picolibc
-          - littlefs
     - name: monocypher
       # X25519 and RFC 8032 Ed25519. Not a Zephyr module: ret-client's
       # port/zephyr/CMakeLists.txt compiles it from this path.

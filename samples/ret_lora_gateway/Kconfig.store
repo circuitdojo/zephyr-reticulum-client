@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Circuit Dojo LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The path store (src/store_zms.c), shared by the gateway and bench/.
+
+config RET_GATEWAY_STORE_MAX_PATHS
+	int "Paths kept in flash"
+	default 512
+	range 16 65535
+	help
+	  One ZMS record per destination on gw_paths_partition. When this
+	  many are stored, or ZMS is full, the record written longest ago
+	  makes room. The RAM index takes 8 bytes per path, plus 4 per path of
+	  boot-time scratch, and the partition must hold them all twice over
+	  (checked at build time and at mount).
+
+config RET_GATEWAY_ZMS_CACHE
+	int "ZMS lookup cache entries for the path store"
+	default 1024
+	help
+	  8 bytes each. A read whose cache slot belongs to another path walks
+	  the log back from the newest entry: keep this at about twice
+	  RET_GATEWAY_STORE_MAX_PATHS.

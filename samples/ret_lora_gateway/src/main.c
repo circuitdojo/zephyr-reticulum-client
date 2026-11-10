@@ -228,7 +228,7 @@ int main(void)
 		err = load_identity();
 	}
 	if (!err) {
-		err = store_lfs_init(&store);
+		err = store_init(&store);
 	}
 	if (!err) {
 		err = setup_ifac(&lora_ifac, CONFIG_RET_LORA_IFAC_NETWORK_NAME,
