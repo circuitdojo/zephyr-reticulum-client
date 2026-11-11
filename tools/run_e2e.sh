@@ -137,7 +137,12 @@ scenarios=("$@")
 [ ${#scenarios[@]} -gt 0 ] || scenarios=(plain ratchets no-prove ifac lora-gateway echo lxmf lxmf-direct chat store-forward sleep late stall bootdown restart)
 
 pids=()
+# Builds still running (process groups: west, cmake and ninja with them).
+build_pids=()
 cleanup() {
+	for pid in "${build_pids[@]}"; do
+		kill -- "-$pid" 2>/dev/null || true
+	done
 	for pid in "${pids[@]}"; do
 		kill "$pid" 2>/dev/null || true
 	done
@@ -168,18 +173,44 @@ uv sync --quiet --project "$PEER_PROJECT"
 PY="$PEER_PROJECT/.venv/bin/python"
 RNSD="$PEER_PROJECT/.venv/bin/rnsd"
 
+# Builds run in parallel: start each with spawn, then wait_builds before
+# the first scenario. Each is a pristine build of its own directory.
+west_build() { # <dir> <sample> <what> [cmake args...]
+	local dir=$1 sample=$2 log="$LOGS/build-$(basename "$1").log"
+	echo "== build $(basename "$dir") ($3)"
+	shift 3
+	west build -b native_sim "$RET/samples/$sample" -d "$dir" -p --no-sysbuild -- "$@" \
+		>"$log" 2>&1 || fail "build failed, see $log"
+	[ -x "$dir/zephyr/zephyr.exe" ] || fail "no $dir/zephyr/zephyr.exe"
+}
+
+spawn() { # <build function> [args...]: in the background
+	# A process group of its own (job control on for the fork only), so
+	# cleanup stops the whole build if the script exits before it ends.
+	set -m
+	"$@" &
+	build_pids+=("$!")
+	set +m
+}
+
+wait_builds() {
+	local p failed=0
+	for p in "${build_pids[@]}"; do
+		wait "$p" || failed=1
+	done
+	build_pids=()
+	[ $failed -eq 0 ] || fail "a build failed, see the FAIL lines above"
+}
+
 build() { # <dir> <count> [extra cmake args...]
 	local dir=$1 count=$2
 	shift 2
-	echo "== build $(basename "$dir") ($count messages)"
-	west build -b native_sim "$RET/samples/ret_basic" -d "$dir" -p --no-sysbuild -- \
+	west_build "$dir" ret_basic "$count messages" \
 		-DCONFIG_RET_SERVER_PORT=$PORT \
 		-DCONFIG_RET_SAMPLE_MESSAGE_COUNT="$count" \
 		-DCONFIG_RET_SAMPLE_SEND_INTERVAL_S=2 \
 		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
-		"$@" >"$LOGS/build-$(basename "$dir").log" 2>&1 ||
-		fail "build failed, see $LOGS/build-$(basename "$dir").log"
-	[ -x "$dir/zephyr/zephyr.exe" ] || fail "no $dir/zephyr/zephyr.exe"
+		"$@"
 }
 
 RNSD_PID=
@@ -214,13 +245,13 @@ rm -rf "$LOGS"
 mkdir -p "$LOGS"
 FLASH="$LOGS/flash.bin"
 
-needs plain ratchets no-prove && build "$BUILD_NAME" $COUNT_NAME
+needs plain ratchets no-prove && spawn build "$BUILD_NAME" $COUNT_NAME
 if needs ifac; then
-	build "$BUILD_IFAC" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$IFAC_PORT -DCONFIG_RET_IFAC=y \
+	spawn build "$BUILD_IFAC" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$IFAC_PORT -DCONFIG_RET_IFAC=y \
 		-DCONFIG_RET_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
 		-DCONFIG_RET_IFAC_PASSPHRASE=\""$IFAC_PASSPHRASE"\"
 	# Knows the peer's hash, so it transmits (path requests) at once.
-	build "$BUILD_IFAC_BAD" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$IFAC_PORT -DCONFIG_RET_IFAC=y \
+	spawn build "$BUILD_IFAC_BAD" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$IFAC_PORT -DCONFIG_RET_IFAC=y \
 		-DCONFIG_RET_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
 		-DCONFIG_RET_IFAC_PASSPHRASE=\"wrong\" \
 		-DCONFIG_RET_SAMPLE_DEST_HASH=\""$("$PY" "$PEER_PROJECT/peer.py" --print-hash)"\"
@@ -236,52 +267,43 @@ if needs lora-gateway; then
 	build_gateway() { # <dir> <hub port> [extra cmake args...]
 		local dir=$1 port=$2
 		shift 2
-		echo "== build $(basename "$dir") (LoRa gateway)"
-		west build -b native_sim "$RET/samples/ret_lora_gateway" -d "$dir" -p --no-sysbuild -- \
+		west_build "$dir" ret_lora_gateway "LoRa gateway" \
 			-DCONFIG_RET_GATEWAY_PORT="$port" \
 			-DCONFIG_RET_GATEWAY_RECONNECT_MAX_S=2 \
 			-DCONFIG_RET_LORA_BACKOFF_MS=100 \
 			-DCONFIG_RET_LORA_SIM_AIR_PORT=$AIR_PORT \
 			-DCONFIG_RET_LORA_SIM_LOCAL_PORT=$AIR_GW \
-			"$@" >"$LOGS/build-$(basename "$dir").log" 2>&1 ||
-			fail "build failed, see $LOGS/build-$(basename "$dir").log"
-		[ -x "$dir/zephyr/zephyr.exe" ] || fail "no $dir/zephyr/zephyr.exe"
+			"$@"
 	}
-	build_gateway "$BUILD_GW" $LORA_TCP_PORT
-	build_gateway "$BUILD_GW_IFAC" $LORA_IFAC_PORT \
+	spawn build_gateway "$BUILD_GW" $LORA_TCP_PORT
+	spawn build_gateway "$BUILD_GW_IFAC" $LORA_IFAC_PORT \
 		-DCONFIG_RET_GATEWAY_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
 		-DCONFIG_RET_GATEWAY_IFAC_PASSPHRASE=\""$IFAC_PASSPHRASE"\"
-	build_gateway "$BUILD_GW_IFAC_BAD" $LORA_IFAC_PORT \
+	spawn build_gateway "$BUILD_GW_IFAC_BAD" $LORA_IFAC_PORT \
 		-DCONFIG_RET_GATEWAY_IFAC_NETWORK_NAME=\""$IFAC_NETNAME"\" \
 		-DCONFIG_RET_GATEWAY_IFAC_PASSPHRASE=\"wrong\"
 	# Sends to the first retclient.echo it hears announce: n1.
-	build "$BUILD_GW_DEV" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$LORA_TCP_PORT \
+	spawn build "$BUILD_GW_DEV" $COUNT_NAME -DCONFIG_RET_SERVER_PORT=$LORA_TCP_PORT \
 		-DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y -DCONFIG_RET_SAMPLE_REPLY_WAIT_S=30 \
 		-DCONFIG_RET_SAMPLE_LINK_TEST=y
 fi
-needs echo && build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
+needs echo && spawn build "$BUILD_ECHO" $COUNT_NAME -DCONFIG_RET_SAMPLE_EXPECT_REPLIES=y \
 	-DCONFIG_RET_SAMPLE_LINK_TEST=y
 if needs lxmf lxmf-direct chat; then
 	LXMF_PEER=$("$PY" "$PEER_PROJECT/lxmf_peer.py" --print-hash)
 fi
 if needs chat; then
-	echo "== build $(basename "$BUILD_CHAT") (shell)"
-	west build -b native_sim "$RET/samples/ret_chat" -d "$BUILD_CHAT" -p --no-sysbuild -- \
+	spawn west_build "$BUILD_CHAT" ret_chat "shell" \
 		-DCONFIG_RET_SERVER_PORT=$PORT \
-		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
-		>"$LOGS/build-$(basename "$BUILD_CHAT").log" 2>&1 ||
-		fail "build failed, see $LOGS/build-$(basename "$BUILD_CHAT").log"
+		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000
 fi
 if needs lxmf lxmf-direct; then
-	echo "== build $(basename "$BUILD_LXMF") ($COUNT_LXMF messages)"
-	west build -b native_sim "$RET/samples/ret_lxmf" -d "$BUILD_LXMF" -p --no-sysbuild -- \
+	spawn west_build "$BUILD_LXMF" ret_lxmf "$COUNT_LXMF messages" \
 		-DCONFIG_RET_SERVER_PORT=$PORT \
 		-DCONFIG_RET_LXMF_SAMPLE_CONTACT=\""$LXMF_PEER"\" \
 		-DCONFIG_RET_LXMF_SAMPLE_MESSAGE_COUNT=$COUNT_LXMF \
 		-DCONFIG_RET_LXMF_SAMPLE_SEND_INTERVAL_S=2 \
-		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
-		>"$LOGS/build-$(basename "$BUILD_LXMF").log" 2>&1 ||
-		fail "build failed, see $LOGS/build-$(basename "$BUILD_LXMF").log"
+		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000
 fi
 if needs store-forward sleep; then
 	# A fresh node per run: its identity decides the hash the device
@@ -290,32 +312,28 @@ if needs store-forward sleep; then
 	mkdir -p "$LXMD_DIR"
 	cp "$HERE/lxmd-test/config" "$LXMD_DIR/config"
 	NODE=$("$PY" "$PEER_PROJECT/lxmf_send.py" --make-node-identity "$LXMD_DIR/identity")
-	echo "== build $(basename "$BUILD_SF") (propagation sync)"
-	west build -b native_sim "$RET/samples/ret_lxmf" -d "$BUILD_SF" -p --no-sysbuild -- \
+	spawn west_build "$BUILD_SF" ret_lxmf "propagation sync" \
 		-DCONFIG_RET_SERVER_PORT=$PORT \
 		-DCONFIG_RET_LXMF_SAMPLE_PROPAGATION_NODE=\""$NODE"\" \
-		-DCONFIG_RET_LXMF_SAMPLE_SYNC_AND_EXIT=y \
-		>"$LOGS/build-$(basename "$BUILD_SF").log" 2>&1 ||
-		fail "build failed, see $LOGS/build-$(basename "$BUILD_SF").log"
-	echo "== build $(basename "$BUILD_SLEEP") (sleepy node)"
-	west build -b native_sim "$RET/samples/ret_lxmf_sleep" -d "$BUILD_SLEEP" -p --no-sysbuild -- \
+		-DCONFIG_RET_LXMF_SAMPLE_SYNC_AND_EXIT=y
+	spawn west_build "$BUILD_SLEEP" ret_lxmf_sleep "sleepy node" \
 		-DCONFIG_RET_SERVER_PORT=$PORT \
 		-DCONFIG_RET_SLEEP_PROPAGATION_NODE=\""$NODE"\" \
 		-DCONFIG_RET_SLEEP_CYCLES=3 \
 		-DCONFIG_RET_SLEEP_INTERVAL_S=30 \
 		-DCONFIG_RET_SLEEP_WAKE_TIMEOUT_S=30 \
 		-DCONFIG_RET_RECEIPT_TIMEOUT_MS=5000 \
-		-DCONFIG_RET_RATCHET_INTERVAL_S=20 \
-		>"$LOGS/build-$(basename "$BUILD_SLEEP").log" 2>&1 ||
-		fail "build failed, see $LOGS/build-$(basename "$BUILD_SLEEP").log"
+		-DCONFIG_RET_RATCHET_INTERVAL_S=20
 fi
 if needs late stall bootdown restart; then
 	DEST=$("$PY" "$PEER_PROJECT/peer.py" --print-hash)
 	# The peer takes ~18 s to re-attach and re-announce after an rnsd
 	# restart, during which every send is held: size the table for that.
-	build "$BUILD_HASH" $COUNT_HASH -DCONFIG_RET_SAMPLE_DEST_HASH=\""$DEST"\" \
+	spawn build "$BUILD_HASH" $COUNT_HASH -DCONFIG_RET_SAMPLE_DEST_HASH=\""$DEST"\" \
 		-DCONFIG_RET_MAX_HELD_SENDS=8
 fi
+
+wait_builds
 
 port_open && fail "port $PORT already in use; stop whatever is listening there"
 # Only tools attached to the test rnsd (tools/rnsd-test) disturb a run;
@@ -1100,6 +1118,9 @@ scenario_lora_gateway() {
 	# Two LoRa hops: the hub reaches n2 through the repeater.
 	PYTHONUNBUFFERED=1 "$RNSD" --config "$LOGS/air-repeater" -vv >"$LOGS/air-repeater.log" 2>&1 &
 	pids+=("$!")
+	# n2 announces once: the repeater must be on the air to hear it. RNS
+	# starts Transport after binding the interfaces.
+	wait_for 30 "the repeater" grep -q "Transport instance .* started" "$LOGS/air-repeater.log"
 	start_lora_peer n2
 	start_hub_peer "$LOGS/hub-peer.log" "$hub_dir/identity" --send-to "$LORA_N2"
 	all_proved lora-gateway "$LOGS/hub-peer.log" 3 "$LOGS/air-n2.log"

@@ -120,6 +120,11 @@
 
 ### Changed
 
+- `tools/run_e2e.sh` runs in about 6 minutes instead of 9. Its builds run in parallel (135 s to
+  40 s), and `lxmf_send.py` makes propagation stamps itself and queues all deposits at once
+  (`store-forward` 114 s to 11 s): left to LXMRouter, stamps are made one per 4 s job pass.
+  `lora-gateway` waits for the repeater to be up before n2's only announce, which it could
+  miss.
 - `src/ret_tcp.c` builds with `NET_SOCKETS` rather than `RET_CLIENT`, and takes its socket
   options as `struct ret_tcp_opts`, so the client and the gateway share it.
 - `west-vanilla.yml` moves to Zephyr v4.5.0 for ZMS's iterator. The gateway's partitions use
