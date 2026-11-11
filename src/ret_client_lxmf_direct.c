@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * LXMF DIRECT delivery, as LXMRouter sends a message with method DIRECT:
  * a link to the recipient's lxmf.delivery destination, then the whole

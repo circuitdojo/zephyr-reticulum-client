@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2025-2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Board peripheral power management for the nRF9151 Feather (from
  * lion-client/samples/lion_sleep).

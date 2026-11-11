@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * A path store in RAM for ret_transport: a fixed array of paths with their
  * announces. When full, the path written longest ago makes room.

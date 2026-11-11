@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2025-2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  */
 
 #include "peripherals.h"

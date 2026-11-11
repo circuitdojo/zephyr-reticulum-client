@@ -231,6 +231,9 @@ The Python tools under `tools/rns_peer` are a `uv` project pinned to `rns==1.5.7
 
 ## Layout
 
+- License: the Reticulum License (`LICENSE`), as the reference implementations, with Mark
+  Qvist's copyright kept. New source files start with `Copyright (c) <year> Circuit Dojo LLC`
+  and `SPDX-License-Identifier: LicenseRef-Reticulum`.
 - `port/zephyr/{Kconfig,CMakeLists.txt}`: `RET_CORE` is the protocol with no networking (the
   unit tests enable only this). `RET_CLIENT` adds the TCP client thread.
 - `include/ret/ret_client.h`: the public API.

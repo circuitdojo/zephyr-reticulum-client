@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * The gateway's parts: the transport thread (main.c) owns all routing
  * state; the radio and uplink threads only move frames and post them to it.

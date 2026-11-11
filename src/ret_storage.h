@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Persistent client state in Zephyr settings, under "ret/":
  *   ret/id    the identity's 64-byte RNS private key

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * The chat layer: contacts, the addresses heard announcing, the inbox and
  * sending, on top of ret_client. No shell in here: the shell commands

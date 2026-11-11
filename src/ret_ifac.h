@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Interface Access Codes (RNS/Reticulum.py interface setup,
  * Transport.handle_outgoing_ifac / handle_ifac): an interface configured

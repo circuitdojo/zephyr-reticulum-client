@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Known-answer tests for the crypto backend (RFC / NIST vectors), and
  * byte-exact interop with RNS for identity hashing and encryption.

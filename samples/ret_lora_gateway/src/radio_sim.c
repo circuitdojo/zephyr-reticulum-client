@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * A radio on native_sim: each LoRa frame is one UDP datagram to the
  * simulated air (tools/rns_peer/air.py), which decides who hears it.

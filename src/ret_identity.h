@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Identity and destination hashing, and encryption to a SINGLE
  * destination (RNS/Identity.py, RNS/Cryptography/Token.py).

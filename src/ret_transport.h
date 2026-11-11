@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * A Reticulum transport node (RNS/Transport.py with enable_transport):
  * routes packets between interfaces, rebroadcasts announces (also on the

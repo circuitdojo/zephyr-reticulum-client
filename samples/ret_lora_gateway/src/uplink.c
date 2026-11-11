@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * The uplink: an HDLC-framed TCP connection to a stock rnsd
  * TCPServerInterface, as RNS's TCPClientInterface makes. This thread

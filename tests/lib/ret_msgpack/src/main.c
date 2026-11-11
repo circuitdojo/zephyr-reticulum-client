@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * mpack (the msgpack library ret-client uses) against RNS's umsgpack:
  * LXMF hashes and signs re-serialized payloads, so mpack must write the

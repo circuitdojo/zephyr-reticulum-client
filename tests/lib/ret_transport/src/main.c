@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * ret_transport against RNS: the bytes it sends match vectors built by RNS
  * (tools/rns_peer/gen_vectors.py, transport_vectors()), and its behaviour

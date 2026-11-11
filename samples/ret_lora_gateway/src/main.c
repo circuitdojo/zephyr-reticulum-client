@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * LoRa gateway: a Reticulum transport node with two interfaces, the LoRa
  * radio (RNode framing, gateway mode) and a TCP uplink to a stock rnsd.

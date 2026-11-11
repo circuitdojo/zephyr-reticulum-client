@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Crypto backend: PSA Crypto API for SHA-256, HMAC and AES (mbedTLS on
  * vanilla Zephyr, nrf_security on NCS), Monocypher for X25519 and

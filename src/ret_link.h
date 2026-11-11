@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * RNS Links, initiator side (RNS/Link.py): building the link request,
  * validating the responder's proof, deriving the link key, and the link

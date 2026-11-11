@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * HDLC-style stream framing used by Reticulum's TCP interfaces
  * (RNS/Interfaces/TCPInterface.py, class HDLC). No CRC, no address or
