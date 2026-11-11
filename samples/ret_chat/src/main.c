@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * LXMF chat over the console: a shell to message contacts, read the
  * inbox and see who is around (chat_shell.c), over the chat layer

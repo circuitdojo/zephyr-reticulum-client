@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * LXMF propagation sync (the client side of LXMRouter's "/get" handler):
  *

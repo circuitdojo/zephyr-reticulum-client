@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * RNode's on-air LoRa framing (RNode_Firmware: Config.h, RNode_Firmware.ino).
  * Each LoRa frame starts with a header byte: a random sequence nibble and

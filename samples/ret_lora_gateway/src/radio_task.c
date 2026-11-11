@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * The radio thread: reassembles RNode frames into packets for the
  * transport, and transmits queued packets after a random backoff, never

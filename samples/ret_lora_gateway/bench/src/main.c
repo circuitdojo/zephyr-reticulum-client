@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Path store benchmark: the gateway's ZMS store (src/store_zms.c) under a
  * fixed workload. Each phase reports the time

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Transport node behaviour of RNS 1.5.7 (RNS/Transport.py with
  * enable_transport, RNS/Interfaces/Interface.py): comments name the RNS

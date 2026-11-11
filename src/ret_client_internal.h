@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Client internals shared by ret_client.c and the link driver
  * (ret_client_link.c). Everything here is owned by the client thread.

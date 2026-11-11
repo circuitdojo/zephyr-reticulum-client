@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Resource receiving against vectors laid out as RNS/Resource.py builds
  * them (stream = Token(random4 | data) under the link key, SDU 464 parts,

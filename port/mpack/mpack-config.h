@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * mpack build configuration for ret-client (used via MPACK_HAS_CONFIG).
  * Fixed caller buffers only: no heap (MPACK_STDLIB 1 would default

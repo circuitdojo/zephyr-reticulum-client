@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Client thread: one TCP connection to rnsd, polled together with an
  * eventfd that wakes the loop when the application queues a send. All

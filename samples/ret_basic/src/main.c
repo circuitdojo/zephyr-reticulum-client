@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Waits for an announce from CONFIG_RET_SAMPLE_DEST_NAME, then sends it
  * an encrypted message every CONFIG_RET_SAMPLE_SEND_INTERVAL_S seconds

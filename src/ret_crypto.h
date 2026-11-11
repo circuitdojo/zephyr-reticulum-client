@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Crypto primitives used by the Reticulum protocol. Backends implement
  * the hash/MAC/cipher/curve/RNG functions; HKDF and PKCS7 are built on

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * The transport's path store in ZMS: one record per destination, value a
  * header, the path's metadata and the announce as received. ZMS appends

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Link initiator pieces against vectors built with RNS (link_id from
  * RNS.Link.link_id_from_lr_packet, signalling from Link.signalling_bytes,

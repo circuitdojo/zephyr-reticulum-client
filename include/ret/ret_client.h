@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * Reticulum client: connects to an rnsd TCPServerInterface, learns
  * destinations from announces, sends encrypted packets and reports

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * RNS Resources (RNS/Resource.py): multi-packet transfers on a link. Pure
  * functions over caller-owned state; the link driver feeds them packets.

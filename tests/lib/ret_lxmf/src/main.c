@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Circuit Dojo LLC
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Reticulum
  *
  * LXMF messages against vectors from the real LXMF (LXMessage.pack and
  * unpack_from_bytes, lxmf 1.2.1).

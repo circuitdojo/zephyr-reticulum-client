@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **License:** ret-client is now under the Reticulum License (`LICENSE`), as the
+  Reticulum and LXMF reference implementations it follows, with Mark Qvist's copyright notice
+  kept. Source headers change from `Apache-2.0` to `LicenseRef-Reticulum`.
+- **Readme:** credits Mark Qvist as the creator of Reticulum, LXMF and RNode, and covers the
+  current features, samples and dependencies.
+
 ### Added
 
 - `ret_lora_gateway` keeps paths in ZMS (`src/store_zms.c`), one record per
