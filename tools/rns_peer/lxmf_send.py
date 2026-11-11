@@ -196,22 +196,57 @@ def ratchet_id(destination_hash: bytes) -> str | None:
 
 
 def deposit(router, dest, source, texts, timeout) -> bool:
-    ok = True
+    """Stamp every message here, queue them all, then wait for all of them.
+    Left to the router, propagation stamps are deferred and made one per
+    job pass (LXMRouter.PROCESSING_INTERVAL, 4 s), so 13 messages took
+    over 50 s; the stamp itself takes well under a second at the node's
+    cost. This does what the router's deferred pass does, all at once.
+
+    Only for targets that ask for no stamp and hold no ticket from us (the
+    device): those make handle_outbound repack the message after its
+    propagation stamp is made, which would invalidate the stamp."""
+    if dest.hash in router.outbound_stamp_costs and router.outbound_stamp_costs[dest.hash][1]:
+        out("DEPOSIT FAILED the target asks for a stamp, unsupported")
+        return False
+    if router.get_outbound_ticket(dest.hash) is not None:
+        out("DEPOSIT FAILED the target gave us a ticket, unsupported")
+        return False
+    cost = router.get_outbound_propagation_cost()
+    if cost is None:
+        out("DEPOSIT FAILED no propagation stamp cost from the node")
+        return False
+    # Every stamp before any is queued: a failure leaves nothing in flight.
+    stamped = []
     for text in texts:
-        out(f"ENCRYPTED {text.rstrip('.').strip()} ratchet={ratchet_id(dest.hash)}")
-        msg = LXMessage(dest, source, text, "", desired_method=LXMessage.PROPAGATED)
-        router.handle_outbound(msg)
-        deadline = time.time() + timeout
-        while msg.state not in (LXMessage.SENT, LXMessage.DELIVERED, LXMessage.FAILED):
-            if time.time() > deadline:
-                break
-            time.sleep(0.2)
         label = text.rstrip(".").rstrip()
-        if msg.state in (LXMessage.SENT, LXMessage.DELIVERED):
-            out(f"DEPOSITED {label}")
-        else:
-            out(f"DEPOSIT FAILED {label} (state {msg.state})")
-            ok = False
+        out(f"ENCRYPTED {label} ratchet={ratchet_id(dest.hash)}")
+        msg = LXMessage(dest, source, text, "", desired_method=LXMessage.PROPAGATED)
+        if not msg.get_propagation_stamp(target_cost=cost):
+            out(f"DEPOSIT FAILED {label} (no propagation stamp)")
+            return False
+        msg.defer_propagation_stamp = False
+        msg.packed = None
+        msg.pack()
+        stamped.append((label, msg))
+    for _, msg in stamped:
+        router.handle_outbound(msg)
+    pending = stamped
+    final = (LXMessage.FAILED, LXMessage.REJECTED, LXMessage.CANCELLED)
+    deadline = time.time() + timeout
+    ok = True
+    while pending:
+        still = []
+        for label, msg in pending:
+            if msg.state in (LXMessage.SENT, LXMessage.DELIVERED):
+                out(f"DEPOSITED {label}")
+            elif msg.state in final or time.time() > deadline:
+                out(f"DEPOSIT FAILED {label} (state {msg.state})")
+                ok = False
+            else:
+                still.append((label, msg))
+        pending = still
+        if pending:
+            time.sleep(0.2)
     return ok
 
 
