@@ -130,7 +130,17 @@ struct ret_transport_iface {
 	struct ret_transport_held_announce held[CONFIG_RET_TRANSPORT_HELD_ANNOUNCES];
 	uint32_t rx_frames;
 	uint32_t tx_frames;
+	/**
+	 * Inbound frames rejected as malformed, invalid or failing IFAC
+	 * (ifac_drops included), and outbound frames that failed to send.
+	 * Duplicates and other filtered packets are not counted.
+	 */
 	uint32_t drops;
+	/**
+	 * Frames that failed the access code: missing or wrong on a protected
+	 * interface, or present on an open one. Dropped before any processing.
+	 */
+	uint32_t ifac_drops;
 };
 
 /** A path, as the store keeps it. Times are ms in the boot that wrote them. */

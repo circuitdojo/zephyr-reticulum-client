@@ -1666,23 +1666,25 @@ void ret_transport_inbound(struct ret_transport *t, struct ret_transport_iface *
 	}
 	if (iface->ifac) {
 		if (!(frame[0] & FLAG_IFAC) || len <= 2 + (size_t)iface->ifac->size) {
-			iface->drops++;
-			return;
+			goto ifac_fail;
 		}
 		n = ret_ifac_strip(iface->ifac, frame, len, t->work, sizeof(t->work));
 		if (n < 0) {
-			iface->drops++;
-			return;
+			goto ifac_fail;
 		}
 	} else {
 		if (frame[0] & FLAG_IFAC) {
-			iface->drops++;
-			return;
+			goto ifac_fail;
 		}
 		memcpy(t->work, frame, len);
 		n = (int)len;
 	}
 	process(t, iface, t->work, (size_t)n, false);
+	return;
+
+ifac_fail:
+	iface->ifac_drops++;
+	iface->drops++;
 }
 
 /* --- Jobs (Transport.jobs) --- */

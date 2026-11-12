@@ -31,6 +31,8 @@ LOG_MODULE_REGISTER(gateway, LOG_LEVEL_INF);
 #define UPLINK_QUEUE_DEPTH 6
 /* A hub that keeps sending could otherwise starve the timers. */
 #define MAX_EVENTS_PER_JOB 8
+/* At most one IFAC failure report per interface per this long. */
+#define IFAC_REPORT_MS     30000
 
 struct gw_msg {
 	uint8_t type;
@@ -215,6 +217,28 @@ static void log_identity(void)
 	LOG_INF("transport node <%s>, boot %u", hex, boot);
 }
 
+/*
+ * Frames failing IFAC are dropped before routing, so nothing from a node
+ * without the passphrase reaches the uplink. Report them, rate limited: a
+ * neighbour on the same channel without the passphrase is normal on LoRa.
+ */
+static void report_ifac_drops(int64_t now)
+{
+	static uint32_t reported[ARRAY_SIZE(ifaces)];
+	static int64_t next_report[ARRAY_SIZE(ifaces)];
+
+	for (size_t i = 0; i < ARRAY_SIZE(ifaces); i++) {
+		uint32_t n = ifaces[i]->ifac_drops;
+
+		if (n != reported[i] && now >= next_report[i]) {
+			LOG_INF("%s: %u frames failed IFAC, dropped (%u total)", ifaces[i]->name,
+				n - reported[i], n);
+			reported[i] = n;
+			next_report[i] = now + IFAC_REPORT_MS;
+		}
+	}
+}
+
 int main(void)
 {
 	static struct gw_msg m;
@@ -274,6 +298,7 @@ int main(void)
 
 		if (now >= next) {
 			next = ret_transport_jobs(&tp, now);
+			report_ifac_drops(now);
 		}
 		ev[0].state = K_POLL_STATE_NOT_READY;
 		ev[1].state = K_POLL_STATE_NOT_READY;

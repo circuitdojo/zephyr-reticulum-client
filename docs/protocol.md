@@ -102,6 +102,10 @@ against RNS-built vectors (`transport_vectors()` in `gen_vectors.py`).
 **Inbound** (`preprocess_inbound`, `packet_filter`, `_inbound`):
 - **Order:** strip IFAC, check `len <= HW_MTU + ifac_size` (16 when IFAC is off), unpack (hops
   under 128, data not empty), filter, then `hops += 1`.
+- **IFAC per interface:** a frame failing the interface's access code is dropped before any
+  processing, so it is never routed or rebroadcast. Each interface's own code is applied on the
+  way out: a hub's IFAC proves a frame came from this node, not who sent it on LoRa. Counted in
+  `ifac_drops`.
 - **Filter:**
   - Drop non-announces addressed through another transport ID.
   - KEEPALIVE, RESOURCE, RESOURCE_REQ, RESOURCE_PRF, CACHE_REQUEST and CHANNEL contexts always

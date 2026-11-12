@@ -25,6 +25,10 @@ Samples:
 - `samples/ret_lora_gateway`: a LoRa gateway, a transport node (`CONFIG_RET_TRANSPORT`) with
   two interfaces: the LoRa radio (RNode framing, gateway mode) and an HDLC TCP uplink to a
   stock rnsd `TCPServerInterface` (optionally IFAC). The hub needs nothing special.
+  - **IFAC on LoRa** (`CONFIG_RET_LORA_IFAC_*`, size at most 8): frames without the code, or
+    with a wrong one, are dropped before routing, so nodes without the passphrase never cost
+    uplink data. The hub's IFAC can't do this: it only proves the frame came from the gateway.
+    Drops are counted (`ifac_drops`) and logged at most every 30 s per interface.
   - **Threads:** the main thread owns all routing state. The radio thread (`src/radio_task.c`)
     reassembles frames and transmits queued packets after a random backoff, never during a
     split packet. The uplink thread (`src/uplink.c`) connects with backoff and posts frames.
@@ -476,7 +480,7 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
   closes.
 - `run_e2e.sh` scenarios: `plain`, `ratchets`, `no-prove` (an announce-driven build), `ifac`
   (the same on `tools/rnsd-test`'s protected interface, port 4244: delivered with the right
-  passphrase, nothing through with a wrong one), `lora-gateway`, `echo`
+  passphrase, nothing through with a wrong one), `lora-gateway`, `lora-ifac`, `echo`
   (a link: open, identify, request, a resource response and a refused compressed one, 15 s idle on
   keepalives, request, close; then bidirectional
   replies to the client's own destination, proved both ways, while the peer holds its own link
@@ -512,6 +516,10 @@ Tokens live in the main checkout's `.env`, which is gitignored. Never commit or 
 
   `peer.py --send-to HASH [--send-count N --send-size N]` sends to a `retclient.echo`
   destination and logs `SEND PATH`, `SEND PROVED` and `SEND FAILED`.
+- `lora-ifac`: the gateway with IFAC on LoRa and an open uplink. n1 has the LoRa passphrase,
+  n3 none and n4 a wrong one. n4, then n3, announce and ask for a hub destination; the gateway
+  drops their frames (its first drop report comes while only n4 is on the air), so the hub
+  never hears them and the request never goes up. The hub reaches n1 (3/3 proved).
 - Run the venv's `python` and `rnsd` (`tools/rns_peer/.venv/bin/`) when backgrounding them.
   Killing a backgrounded `uv run` leaves the child running, and a stray peer stays attached
   to rnsd and corrupts later runs.
