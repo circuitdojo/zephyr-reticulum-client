@@ -12,6 +12,28 @@
 
 ### Added
 
+- `ret_lora_gateway` builds for the nRF9151 Feather: LTE through the modem
+  (`src/network_modem.c`) and an SX1262 through Zephyr's native driver (`src/radio_lora.c`).
+  About 186 KB of flash (22%) and 112 KB of RAM (87.5%). CI's `nrf9151` job builds it. On
+  hardware: phone -> RNode -> Feather -> hub -> another phone over LTE.
+  - TF-M's logging is off: it made UART instance 1 secure, and SPIM1 (the SX1262's SPI, the
+    same instance) bus-faulted the app at boot.
+  - A failed RX restart after a send is retried every second, so the radio isn't left deaf.
+  - A build-time check that a full frame fits the driver's 10 s transmit limit. At SF12 /
+    125 kHz only CR 4/5 fits (9.6 s); CR 4/8 takes 14.6 s.
+- `ret_lora_gateway`: wiring guide for a Seeed Wio-SX1262 for XIAO
+  (`samples/ret_lora_gateway/docs/wio-sx1262-hookup.md`). The overlay drives the module's RF_SW
+  (its RF switch's RX side) from D6 (P0.30) as `rx-enable-gpios`, next to `dio2-tx-enable`, with
+  a 100 kΩ pull-down on the wire.
+- `zephyr/patches.yml`: fixes to Zephyr's native SX126x driver, applied with `west patch clean`,
+  `west update`, `west patch apply` (CI does the same). Both are upstreamable.
+  - It ignored `rx-enable-gpios` / `tx-enable-gpios` when `dio2-tx-enable` was set, so RF_SW was
+    never driven. The patch drives them alongside DIO2, as the loramac-node backend and RadioLib
+    do.
+  - Its IRQ work ran without the driver's lock, so stopping RX to transmit could race RX_DONE
+    handling: a frame dropped, or the RX restart landing after SET_TX and aborting the
+    transmission. The work now holds the lock. Work queued but not yet started when an
+    operation is stopped can still act on the next one; that is left to an upstream fix.
 - `ret_lora_gateway` keeps paths in ZMS (`src/store_zms.c`), one record per
   destination, with settings in ZMS too.
   - **Index:** a RAM index of stored paths (8 bytes each: record ID and owner tag) keeps

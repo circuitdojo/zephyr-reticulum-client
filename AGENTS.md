@@ -60,8 +60,13 @@ Samples:
     operation and, on native_sim, the flash simulator's bytes read and written and its erases.
     On the Feather it reboots warm to time the boot. It erases its NOR partitions first, which
     repartitions away the board's LittleFS and the other samples' settings.
-  - **Targets:** native_sim only so far, with the radio simulated over UDP (`src/radio_sim.c`
-    and `tools/rns_peer/air.py`). The SX1262 and LTE come next.
+  - **Targets:** native_sim, with the radio simulated over UDP (`src/radio_sim.c` and
+    `tools/rns_peer/air.py`), and the nRF9151 Feather with a Seeed Wio-SX1262 on its header
+    (`src/radio_lora.c`, Zephyr's native SX126x driver; LTE through `src/network_modem.c`).
+    Wiring: `docs/wio-sx1262-hookup.md`. Built in CI with `env/example.conf`. On hardware
+    (2026-11-11): phone -> RNode -> Feather -> hub -> another phone over LTE. TF-M's logging is
+    off (`CONFIG_TFM_LOG_LEVEL_SILENCE`): it would make UART instance 1, which SPIM1 shares,
+    secure, and the app bus-faults at boot.
 
 Targets:
 - `native_sim`: NSOS host sockets, PSA Crypto from mbedTLS.
@@ -89,9 +94,12 @@ not from inside this repo. Its manifest is one of this repo's:
 - `west-ncs.yml`: nfed `v3.5.x`, which imports NCS v3.5 (v3.5.0-preview3 at the time of
   writing). Needed for the nRF9151.
 
-Switch with `west config manifest.file <file>` and `west update`. Code must build in both. Since
-Zephyr 4.4 both have `PSA_CRYPTO`, which `RET_CORE` selects: its provider is TF-M on the nRF9151
-and Mbed TLS / TF-PSA-Crypto on native_sim. native_sim builds pass `--no-sysbuild` to keep output
+Switch with `west config manifest.file <file>` and update with `west patch clean`, `west update`,
+`west patch apply`, in that order. `zephyr/patches.yml` lists fixes to other projects
+(upstreamable, kept until they land). `apply` is a plain `git apply`: on a tree that is already
+patched it fails, hence `clean` first; a fresh workspace has nothing to clean. Code must build in
+both. Since Zephyr 4.4 both have `PSA_CRYPTO`, which `RET_CORE` selects: its provider is TF-M on
+the nRF9151 and Mbed TLS / TF-PSA-Crypto on native_sim. native_sim builds pass `--no-sysbuild` to keep output
 paths identical. Hardware builds use sysbuild, which NCS requires.
 
 Toolchain environment:

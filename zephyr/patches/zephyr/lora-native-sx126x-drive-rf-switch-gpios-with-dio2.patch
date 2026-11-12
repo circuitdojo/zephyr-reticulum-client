@@ -1,0 +1,36 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index f9e2c0d1383..d8898cc8578 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -572,12 +572,12 @@ static void sx126x_dio1_callback(const struct device *dev)
+ 
+ static void sx126x_set_rf_path(const struct device *dev, bool enable, bool tx)
+ {
+-	const struct sx126x_hal_config *config = dev->config;
+-
++	/* The RF switch GPIOs are driven even when DIO2 also controls the
++	 * switch: boards such as wio_tracker_l1 pair dio2-tx-enable with
++	 * an RX enable GPIO. This matches the loramac-node backend.
++	 */
+ 	sx126x_hal_set_antenna_enable(dev, enable);
+-	if (!config->dio2_tx_enable) {
+-		sx126x_hal_set_rf_switch(dev, enable, tx);
+-	}
++	sx126x_hal_set_rf_switch(dev, enable, tx);
+ }
+ 
+ #ifdef CONFIG_PM_DEVICE
+diff --git a/dts/bindings/lora/semtech,sx126x-base.yaml b/dts/bindings/lora/semtech,sx126x-base.yaml
+index 2d13d758695..8ac2469348c 100644
+--- a/dts/bindings/lora/semtech,sx126x-base.yaml
++++ b/dts/bindings/lora/semtech,sx126x-base.yaml
+@@ -46,7 +46,8 @@ properties:
+     description: |
+       Use DIO2 to drive an RF switch selecting between the TX and RX
+       paths. When enabled, DIO2 goes high when the chip is
+-      transmitting.
++      transmitting. tx-enable-gpios and rx-enable-gpios, if set, are
++      still driven alongside DIO2.
+ 
+   dio3-tcxo-voltage:
+     type: int

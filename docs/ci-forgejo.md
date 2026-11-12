@@ -8,7 +8,8 @@ copied checkout).
 `.forgejo/workflows/ci.yml` runs on every push to `main` and every pull
 request. One job, `native_sim`, in the `ret-client-ci` container:
 
-1. `west init -l --mf west-vanilla.yml` / `west update` on a cached volume
+1. `west init -l --mf west-vanilla.yml` / `west update` on a cached volume, then
+   `west patch apply` (`zephyr/patches.yml`; `west patch clean` first undoes the last run's)
 2. Python checks in `tools/rns_peer`: ruff, and regenerating
    `tests/common/vectors_rns.h` from the pinned RNS and diffing it
 3. Unit tests: `scripts/twister.sh -T tests -p native_sim`
@@ -18,8 +19,10 @@ request. One job, `native_sim`, in the `ret-client-ci` container:
    On failure the device, peer and rnsd logs are printed.
 
 Then the `nrf9151` job (needs `native_sim`), in the NCS workspace
-(`west-ncs.yml`) on its own `ret-client-ncs-west` volume. It builds
-the three samples for `circuitdojo_feather_nrf9151/nrf9151/ns` with sysbuild
+(`west-ncs.yml`) on its own `ret-client-ncs-west` volume, with the same
+`west patch clean` / `west update` / `west patch apply`. It builds
+the samples for `circuitdojo_feather_nrf9151/nrf9151/ns` with sysbuild
+(`ret_lora_gateway` with its `env/example.conf`, since it needs a hub host)
 and fails on compiler warnings. It uploads `ret_basic`'s and `ret_lxmf`'s
 `tfm_merged.hex` (TF-M plus app) together with nfed's
 `uicr_debug_access_open.hex` as the `samples-nrf9151` artifact (14 days).

@@ -14,6 +14,6 @@ target_include_directories(app PRIVATE ../../src)
 if(CONFIG_BOARD_NATIVE_SIM)
     target_sources(app PRIVATE src/network_sim.c src/radio_sim.c)
 else()
-    # The SX1262 radio and LTE come with the board support.
-    message(FATAL_ERROR "ret_lora_gateway runs on native_sim only so far")
+    # The Feather: LTE through the modem, an SX1262 through Zephyr's LoRa API.
+    target_sources(app PRIVATE src/network_modem.c src/radio_lora.c)
 endif()

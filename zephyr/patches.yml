@@ -1,0 +1,35 @@
+# Patches to other west projects (both manifests). Update with
+# `west patch clean`, `west update`, `west patch apply`: apply is a plain
+# git apply and fails on a tree that is already patched.
+# See zephyr/scripts/schemas/patch-schema.yml.
+patches:
+  - path: zephyr/lora-native-sx126x-drive-rf-switch-gpios-with-dio2.patch
+    sha256sum: 9890916af36ad81efc81fddffd315e25fb99114c1f2343cf1c4121f73344f9b9
+    module: zephyr
+    author: Jared Wolff
+    email: jared@circuitdojo.com
+    date: 2026-11-11
+    upstreamable: true
+    comments: |
+      The native SX126x driver skips rx-enable-gpios / tx-enable-gpios when
+      dio2-tx-enable is set. The Wio-SX1262 needs both: DIO2 drives the TX side
+      of its RF switch and RF_SW (an RX enable) the RX side. The loramac-node
+      backend and RadioLib drive both, and upstream boards (wio_tracker_l1,
+      rak4631) define both. Applies to NCS v3.5's Zephyr and Zephyr v4.5.0.
+  - path: zephyr/lora-native-sx126x-serialise-irq-work-with-api.patch
+    sha256sum: 567f84155214eb00fcf07ae0dd47dcc3ac8809ce103e432be8e3989b2aad7d57
+    module: zephyr
+    author: Jared Wolff
+    email: jared@circuitdojo.com
+    date: 2026-11-11
+    upstreamable: true
+    comments: |
+      The native SX126x driver's IRQ work handler runs without data->lock,
+      and it yields (SPI transfers, BUSY polling with k_msleep). A caller
+      stopping async RX to transmit can interleave with RX_DONE handling:
+      the frame is dropped, or the RX restart lands after SET_TX and aborts
+      the transmission (lora_send then times out after 15 s). Takes the
+      (recursive) lock for the whole handler. Work queued but not yet
+      started when an operation is stopped can still act on the next one;
+      that is left to an upstream fix. Applies after the RF switch patch
+      above.
