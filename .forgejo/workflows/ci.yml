@@ -43,7 +43,11 @@ jobs:
         working-directory: /west-workspace
         run: |
           [ -d .west ] || west init -l --mf west-vanilla.yml ret-client
+          # zephyr/patches.yml: undo the last run's patches on the cached
+          # volume (a cold one has no zephyr yet), update, then apply.
+          if [ -d zephyr ]; then west patch clean; fi
           west update --narrow -o=--depth=1
+          west patch apply
 
       - name: Python tooling (lint, golden vectors match pinned RNS)
         working-directory: /west-workspace/ret-client/tools/rns_peer
@@ -131,14 +135,19 @@ jobs:
         working-directory: /ncs-workspace
         run: |
           [ -d .west ] || west init -l --mf west-ncs.yml ret-client
+          # zephyr/patches.yml: undo the last run's patches on the cached
+          # volume (a cold one has no zephyr yet), update, then apply.
+          if [ -d zephyr ]; then west patch clean; fi
           west update --narrow -o=--depth=1
+          west patch apply
 
       - name: Build the samples (nRF9151, sysbuild, no compiler warnings)
         working-directory: /ncs-workspace
         # -p: the build directory is on the volume and outlives the run, and
         # a stale CMake cache is the failure that reproduces nowhere else.
-        # No env/ overlay: per-device settings are gitignored, so CI builds
-        # the sample as checked in. Kconfig's TFM_EXPERIMENTAL notice is not
+        # No per-device env/ overlay (gitignored): CI builds the samples as
+        # checked in. The gateway takes the tracked env/example.conf, since it
+        # needs a hub host. Kconfig's TFM_EXPERIMENTAL notice is not
         # a compiler warning and does not match.
         # build/ must exist before tee opens its log (cold volume).
         run: |
@@ -149,8 +158,13 @@ jobs:
               -d build/${s}_nrf9151 -p 2>&1 | tee build/${s}_nrf9151.log
             ! grep -q ": warning:" build/${s}_nrf9151.log
           done
-          # The gateway's path stores on the Feather's NOR, until the gateway
-          # itself builds for the board.
+          # The gateway (SX1262 through the native driver, patched by
+          # zephyr/patches.yml): it needs a hub host, so the tracked example.
+          west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_lora_gateway \
+            -d build/ret_lora_gateway_nrf9151 -p -- -DEXTRA_CONF_FILE=env/example.conf \
+            2>&1 | tee build/ret_lora_gateway_nrf9151.log
+          ! grep -q ": warning:" build/ret_lora_gateway_nrf9151.log
+          # Its path store's benchmark on the Feather's NOR.
           west build -b circuitdojo_feather_nrf9151/nrf9151/ns ret-client/samples/ret_lora_gateway/bench \
             -d build/gw_bench_nrf9151 -p 2>&1 | tee build/gw_bench_nrf9151.log
           ! grep -q ": warning:" build/gw_bench_nrf9151.log

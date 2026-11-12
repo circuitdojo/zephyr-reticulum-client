@@ -1,0 +1,28 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index d8898cc..1653ca2 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -812,7 +812,16 @@ static void sx126x_irq_work_handler(struct k_work *work)
+ 	int ret;
+ 
++	/* Serialise with the API: the work yields in SPI transfers and busy
++	 * waits, so without the lock a caller stopping RX (or starting TX)
++	 * can interleave with RX_DONE handling, and the RX restart it issues
++	 * can land after SET_TX and abort the transmission. The mutex is
++	 * recursive: callbacks may call the API from here.
++	 */
++	k_mutex_lock(&data->lock, K_FOREVER);
++
+ 	ret = sx126x_get_irq_status(dev, &irq_status);
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to get IRQ status");
++		k_mutex_unlock(&data->lock);
+ 		return;
+ 	}
+@@ -839,4 +848,6 @@ static void sx126x_irq_work_handler(struct k_work *work)
+ 		sx126x_hal_dio1_irq_enable(dev);
+ 	}
++
++	k_mutex_unlock(&data->lock);
+ }
+ 
